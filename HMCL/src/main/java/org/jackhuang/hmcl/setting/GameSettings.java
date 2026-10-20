@@ -473,6 +473,31 @@ public sealed abstract class GameSettings extends ObservableSetting {
         return autoMemory;
     }
 
+    /// Property name for optional pre-launch Windows memory cleanup.
+    public static final String PROPERTY_MEMORY_CLEANUP = "memoryCleanup";
+
+    /// Whether to run the independently maintained memory helper before computing heap limits.
+    @SerializedName(PROPERTY_MEMORY_CLEANUP)
+    private final InheritableProperty<Boolean> memoryCleanup = newInheritableProperty(PROPERTY_MEMORY_CLEANUP, false);
+
+    /// Returns the default-off pre-launch memory cleanup property.
+    public InheritableProperty<Boolean> memoryCleanupProperty() {
+        return memoryCleanup;
+    }
+
+    /// Property name for the independently inherited pre-launch cleanup operation set.
+    public static final String PROPERTY_MEMORY_CLEANUP_PROFILE = "memoryCleanupProfile";
+
+    /// Selected operation set; old configurations keep the original basic profile.
+    @SerializedName(PROPERTY_MEMORY_CLEANUP_PROFILE)
+    private final InheritableProperty<MemoryCleaner.Profile> memoryCleanupProfile =
+            newInheritableProperty(PROPERTY_MEMORY_CLEANUP_PROFILE, MemoryCleaner.Profile.SAFE);
+
+    /// Returns the cleanup profile independently of the enable switch.
+    public InheritableProperty<MemoryCleaner.Profile> memoryCleanupProfileProperty() {
+        return memoryCleanupProfile;
+    }
+
     /// Property name for the minimum heap memory.
     public static final String PROPERTY_MIN_MEMORY = "minMemory";
 

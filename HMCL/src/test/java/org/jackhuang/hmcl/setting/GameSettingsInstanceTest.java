@@ -22,6 +22,7 @@ import com.google.common.jimfs.Jimfs;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import org.jackhuang.hmcl.game.Renderer;
+import org.jackhuang.hmcl.game.MemoryCleaner;
 import org.jetbrains.annotations.NotNullByDefault;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -40,6 +41,60 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /// Tests for instance-specific game settings.
 @NotNullByDefault
 public final class GameSettingsInstanceTest {
+    /// Older, null and unknown profile values must resolve to the original basic operation set.
+    @ParameterizedTest
+    @CsvSource({"{}", "'{\"memoryCleanupProfile\":null}'", "'{\"memoryCleanupProfile\":\"FUTURE_PROFILE\"}'"})
+    public void defaultsMissingOrUnknownCleanupProfiles(String json) {
+        GameSettings.Preset parent = new GameSettings.Preset(
+                GameSettingsPresetID.parse("game-settings-preset:123e4567-e89b-12d3-a456-426614174000"));
+        GameSettings.Instance instance = LauncherSettings.SETTINGS_GSON.fromJson(json, GameSettings.Instance.class);
+        instance.getOverrideProperties().add(GameSettings.PROPERTY_MEMORY_CLEANUP_PROFILE);
+        assertEquals(MemoryCleaner.Profile.SAFE,
+                GameSettings.resolve(parent, instance).getInheritable(GameSettings::memoryCleanupProfileProperty));
+    }
+
+    /// All profiles persist, with independent enable/profile inheritance and instance overrides.
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.EnumSource(MemoryCleaner.Profile.class)
+    public void inheritsAndPersistsCleanupProfiles(MemoryCleaner.Profile selected) {
+        GameSettings.Preset parent = new GameSettings.Preset(
+                GameSettingsPresetID.parse("game-settings-preset:123e4567-e89b-12d3-a456-426614174000"));
+        parent.memoryCleanupProperty().setValue(true);
+        parent.memoryCleanupProfileProperty().setValue(MemoryCleaner.Profile.FULL);
+        GameSettings.Instance instance = new GameSettings.Instance();
+        instance.memoryCleanupProfileProperty().setValue(selected);
+        assertEquals(MemoryCleaner.Profile.FULL,
+                GameSettings.resolve(parent, instance).getInheritable(GameSettings::memoryCleanupProfileProperty));
+        instance.getOverrideProperties().add(GameSettings.PROPERTY_MEMORY_CLEANUP_PROFILE);
+        String json = LauncherSettings.SETTINGS_GSON.toJson(instance, GameSettings.Instance.class);
+        GameSettings.Instance restored = LauncherSettings.SETTINGS_GSON.fromJson(json, GameSettings.Instance.class);
+        var effective = GameSettings.resolve(parent, restored);
+        assertEquals(selected, effective.getInheritable(GameSettings::memoryCleanupProfileProperty));
+        assertTrue(effective.getInheritable(GameSettings::memoryCleanupProperty));
+        restored.memoryCleanupProperty().setValue(false);
+        restored.getOverrideProperties().add(GameSettings.PROPERTY_MEMORY_CLEANUP);
+        assertFalse(effective.getInheritable(GameSettings::memoryCleanupProperty));
+        assertEquals(selected, effective.getInheritable(GameSettings::memoryCleanupProfileProperty));
+    }
+
+    /// Old configurations default to off; instance overrides survive serialization and inheritance.
+    @Test
+    public void inheritsAndPersistsMemoryCleanup() {
+        GameSettings.Preset parent = new GameSettings.Preset(
+                GameSettingsPresetID.parse("game-settings-preset:123e4567-e89b-12d3-a456-426614174000"));
+        GameSettings.Instance instance = LauncherSettings.SETTINGS_GSON.fromJson("{}", GameSettings.Instance.class);
+        assertFalse(GameSettings.resolve(parent, instance).getInheritable(GameSettings::memoryCleanupProperty));
+        parent.memoryCleanupProperty().setValue(true);
+        assertTrue(GameSettings.resolve(parent, instance).getInheritable(GameSettings::memoryCleanupProperty));
+        instance.memoryCleanupProperty().setValue(false);
+        instance.getOverrideProperties().add(GameSettings.PROPERTY_MEMORY_CLEANUP);
+        String json = LauncherSettings.SETTINGS_GSON.toJson(instance, GameSettings.Instance.class);
+        GameSettings.Instance restored = LauncherSettings.SETTINGS_GSON.fromJson(json, GameSettings.Instance.class);
+        assertFalse(GameSettings.resolve(parent, restored).getInheritable(GameSettings::memoryCleanupProperty));
+        restored.memoryCleanupProperty().setValue(true);
+        assertTrue(GameSettings.resolve(parent, restored).getInheritable(GameSettings::memoryCleanupProperty));
+    }
+
     /// Tests that directory settings are serialized with full `Directory` property names.
     @Test
     public void storesDirectoryPropertyNames() {

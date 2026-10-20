@@ -447,6 +447,25 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
             memorySublist.setDescription(getMemoryAllocationDisplayName(memorySelectedValue.get()));
             bindMemorySelectedValue(memorySelectedValue);
 
+            var memoryCleanupPane = createInheritableBooleanButton(GameSettings::memoryCleanupProperty);
+            gameSettings.getContent().add(memoryCleanupPane);
+            memoryCleanupPane.setTitle(i18n("settings.memory.cleanup"));
+            memoryCleanupPane.setSubtitle(i18n("settings.memory.cleanup.subtitle"));
+            memoryCleanupPane.setDisable(!MemoryCleaner.isSupported());
+
+            var memoryCleanupProfilePane = createInheritableButton(
+                    GameSettings::memoryCleanupProfileProperty,
+                    profile -> i18n("settings.memory.cleanup.profile." + profile.argument()),
+                    profile -> i18n("settings.memory.cleanup.profile." + profile.argument() + ".desc"),
+                    MemoryCleaner.Profile.values());
+            gameSettings.getContent().add(memoryCleanupProfilePane);
+            memoryCleanupProfilePane.setTitle(i18n("settings.memory.cleanup.profile"));
+            memoryCleanupProfilePane.setDisable(!MemoryCleaner.isSupported());
+            FXUtils.onChangeAndOperate(memoryCleanupProfilePane.valueProperty(), (@Nullable var profile) ->
+                    memoryCleanupProfilePane.setSubtitle(
+                            (profile != null ? i18n("settings.memory.cleanup.profile." + profile.argument() + ".desc") + "\n" : "")
+                                    + i18n("settings.memory.cleanup.profile.hint")));
+
             // Launcher Visibility Setting
             var launcherVisibilityPane = createInheritableButton(
                     GameSettings::launcherVisibilityProperty,

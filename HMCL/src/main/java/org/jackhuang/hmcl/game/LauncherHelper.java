@@ -255,6 +255,14 @@ public final class LauncherHelper {
                 })
                 .thenComposeAsync(() -> logIn(account).withStage("launch.state.logging_in"))
                 .thenComposeAsync(authInfo -> Task.supplyAsync(() -> {
+                    if (scriptFile == null) {
+                        MemoryCleaner.beforeLaunch(
+                                setting.getInheritable(GameSettings::memoryCleanupProperty),
+                                setting.getInheritable(GameSettings::memoryCleanupProfileProperty));
+                    }
+                    return authInfo;
+                }).withStage("launch.state.memory_cleanup"))
+                .thenComposeAsync(authInfo -> Task.supplyAsync(() -> {
                     LaunchOptions.Builder launchOptionsBuilder = gameInstance.getLaunchOptions(
                             context.javaRuntime,
                             context.javaExecutable,
@@ -345,6 +353,7 @@ public final class LauncherHelper {
                         new Task.StagesHint("launch.state.java"),
                         new Task.StagesHint("launch.state.dependencies", List.of("hmcl.install.assets", "hmcl.install.libraries", "hmcl.modpack.download")),
                         new Task.StagesHint("launch.state.logging_in"),
+                        new Task.StagesHint("launch.state.memory_cleanup"),
                         new Task.StagesHint("launch.state.waiting_launching"))
                 .executor();
         launchingStepsPane.setExecutor(executor, false);
