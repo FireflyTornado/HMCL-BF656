@@ -28,6 +28,7 @@ import javafx.collections.FXCollections;
 import javafx.collections.ObservableSet;
 import org.jackhuang.hmcl.game.*;
 import org.jackhuang.hmcl.java.JavaManager;
+import org.jackhuang.hmcl.java.BundledJava;
 import org.jackhuang.hmcl.java.JavaRuntime;
 import org.jackhuang.hmcl.setting.property.InheritableProperty;
 import org.jackhuang.hmcl.setting.property.SettingProperty;
@@ -166,6 +167,16 @@ public sealed abstract class GameSettings extends ObservableSetting {
         /// Returns the overridden setting property names.
         public ObservableSet<String> getOverrideProperties() {
             return overrideProperties;
+        }
+
+        /// Whether this instance hides optional Java version advice; validation is still performed.
+        @SerializedName("ignoreJavaCompatibilityWarnings")
+        private final SettingProperty<Boolean> ignoreJavaCompatibilityWarnings =
+                newSettingProperty("ignoreJavaCompatibilityWarnings", false);
+
+        /// Returns the instance-only warning preference, without preset inheritance or JVM-check overrides.
+        public SettingProperty<Boolean> ignoreJavaCompatibilityWarningsProperty() {
+            return ignoreJavaCompatibilityWarnings;
         }
 
         /// JSON adapter for instance settings.
@@ -374,6 +385,19 @@ public sealed abstract class GameSettings extends ObservableSetting {
     /// Returns the custom Java executable path property.
     public InheritableProperty<String> customJavaPathProperty() {
         return customJavaPath;
+    }
+
+    /// Property name for the launcher-relative Java executable path.
+    public static final String PROPERTY_BUNDLED_JAVA_PATH = "bundledJavaPath";
+
+    /// Portable executable path used exclusively by the bundled Java selection mode.
+    @SerializedName(PROPERTY_BUNDLED_JAVA_PATH)
+    private final InheritableProperty<String> bundledJavaPath =
+            newInheritableProperty(PROPERTY_BUNDLED_JAVA_PATH, BundledJava.DEFAULT_PATH);
+
+    /// Returns the bundled executable path, with override state independent of the Java selection mode.
+    public InheritableProperty<String> bundledJavaPathProperty() {
+        return bundledJavaPath;
     }
 
     /// Property name for the detected Java runtime reference.
@@ -976,6 +1000,13 @@ public sealed abstract class GameSettings extends ObservableSetting {
                     try {
                         return JavaManager.getJava(Path.of(getInheritable(GameSettings::customJavaPathProperty)));
                     } catch (IOException | InvalidPathException e) {
+                        return null;
+                    }
+                case BUNDLED:
+                    try {
+                        return JavaManager.getJava(BundledJava.resolve(BundledJava.launcherDirectory(),
+                                getInheritable(GameSettings::bundledJavaPathProperty)));
+                    } catch (IOException | IllegalArgumentException e) {
                         return null;
                     }
                 case VERSION: {

@@ -41,6 +41,34 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /// Tests for instance-specific game settings.
 @NotNullByDefault
 public final class GameSettingsInstanceTest {
+    /// Bundled mode and portable path persist with independent payload inheritance from a preset.
+    @Test
+    public void inheritsAndPersistsBundledJava() {
+        GameSettings.Preset parent = new GameSettings.Preset(
+                GameSettingsPresetID.parse("game-settings-preset:123e4567-e89b-12d3-a456-426614174000"));
+        parent.javaTypeProperty().setValue(JavaVersionType.BUNDLED);
+        parent.bundledJavaPathProperty().setValue("runtimes/parent/bin/java.exe");
+        GameSettings.Instance instance = new GameSettings.Instance();
+        instance.bundledJavaPathProperty().setValue("runtimes/实例 21/bin/java.exe");
+        var effective = GameSettings.resolve(parent, instance);
+        assertEquals(JavaVersionType.BUNDLED, effective.getInheritable(GameSettings::javaTypeProperty));
+        assertEquals("runtimes/parent/bin/java.exe", effective.getInheritable(GameSettings::bundledJavaPathProperty));
+        instance.getOverrideProperties().add(GameSettings.PROPERTY_BUNDLED_JAVA_PATH);
+        String json = LauncherSettings.SETTINGS_GSON.toJson(instance, GameSettings.Instance.class);
+        GameSettings.Instance restored = LauncherSettings.SETTINGS_GSON.fromJson(json, GameSettings.Instance.class);
+        assertEquals("runtimes/实例 21/bin/java.exe",
+                GameSettings.resolve(parent, restored).getInheritable(GameSettings::bundledJavaPathProperty));
+        instance.javaTypeProperty().setValue(JavaVersionType.BUNDLED);
+        instance.getOverrideProperties().add(GameSettings.PROPERTY_JAVA_TYPE);
+        json = LauncherSettings.SETTINGS_GSON.toJson(instance, GameSettings.Instance.class);
+        JsonObject serialized = JsonParser.parseString(json).getAsJsonObject();
+        assertEquals("BUNDLED", serialized.get("javaType").getAsString());
+        assertFalse(serialized.get("bundledJavaPath").getAsString().contains(":/"));
+        restored = LauncherSettings.SETTINGS_GSON.fromJson(json, GameSettings.Instance.class);
+        assertEquals(JavaVersionType.BUNDLED, GameSettings.resolve(parent, restored).getInheritable(GameSettings::javaTypeProperty));
+        assertFalse(restored.memoryCleanupProperty().getValue());
+    }
+
     /// Older, null and unknown profile values must resolve to the original basic operation set.
     @ParameterizedTest
     @CsvSource({"{}", "'{\"memoryCleanupProfile\":null}'", "'{\"memoryCleanupProfile\":\"FUTURE_PROFILE\"}'"})

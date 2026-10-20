@@ -43,6 +43,7 @@ import javafx.stage.FileChooser;
 import javafx.stage.Screen;
 import org.jackhuang.hmcl.game.*;
 import org.jackhuang.hmcl.java.JavaManager;
+import org.jackhuang.hmcl.java.BundledJava;
 import org.jackhuang.hmcl.java.JavaRuntime;
 import org.jackhuang.hmcl.setting.*;
 import org.jackhuang.hmcl.setting.property.InheritableProperty;
@@ -69,6 +70,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.function.Function;
 
 import static org.jackhuang.hmcl.util.Pair.pair;
@@ -117,11 +120,17 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
     private final RadioChoiceList.Choice<@Nullable Pair<@Nullable JavaVersionType, @Nullable JavaRuntime>> javaAutoDeterminedOption;
     private final RadioChoiceList.Choice<@Nullable Pair<@Nullable JavaVersionType, @Nullable JavaRuntime>> javaVersionOption;
     private final RadioChoiceList.Choice<@Nullable Pair<@Nullable JavaVersionType, @Nullable JavaRuntime>> javaCustomOption;
+    /// Portable launcher-relative runtime choice, independent of the existing custom executable choice.
+    private final RadioChoiceList.Choice<@Nullable Pair<@Nullable JavaVersionType, @Nullable JavaRuntime>> javaBundledOption;
+    /// Relative executable path displayed and stored for the bundled runtime.
+    private final JFXTextField javaBundledPathField;
     private final JFXTextField javaVersionTextField;
     private final FileSelector javaCustomSelector;
     private final ObjectProperty<@Nullable InheritableProperty<JavaVersionType>> activeParentJavaTypeProperty = new SimpleObjectProperty<>();
     private final ObjectProperty<@Nullable InheritableProperty<String>> activeParentCustomJavaVersionProperty = new SimpleObjectProperty<>();
     private final ObjectProperty<@Nullable InheritableProperty<String>> activeParentCustomJavaPathProperty = new SimpleObjectProperty<>();
+    /// Observes changes to the inherited bundled executable path while editing an instance.
+    private final ObjectProperty<@Nullable InheritableProperty<String>> activeParentBundledJavaPathProperty = new SimpleObjectProperty<>();
     private final ObjectProperty<@Nullable InheritableProperty<GameSettings.DetectedJava>> activeParentDetectedJavaProperty = new SimpleObjectProperty<>();
     private final InvalidationListener javaListener = o -> refreshJavaSettings();
     private final InvalidationListener weakJavaListener = holder.weak(javaListener);
@@ -226,6 +235,29 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
                 bindJavaInheritanceButton(javaSublist);
 
                 javaAutoDeterminedOption = new RadioChoiceList.Choice<>(i18n("settings.game.java_directory.auto"), pair(JavaVersionType.AUTO, null));
+                javaBundledPathField = new JFXTextField();
+                javaBundledPathField.setPromptText(BundledJava.DEFAULT_PATH);
+                javaBundledPathField.setValidators(new Validator(i18n("settings.game.java_directory.bundled.invalid"), value -> {
+                    try {
+                        BundledJava.resolve(BundledJava.launcherDirectory(), value);
+                        return true;
+                    } catch (IllegalArgumentException e) {
+                        return false;
+                    }
+                }));
+                FXUtils.setValidateWhileTextChanged(javaBundledPathField, true);
+                HBox.setHgrow(javaBundledPathField, Priority.ALWAYS);
+                var chooseBundledJavaButton = FXUtils.newToggleButton4(SVG.FOLDER_OPEN, 15);
+                chooseBundledJavaButton.setOnAction(event -> chooseBundledJava());
+                var bundledJavaEditor = new HBox(4, javaBundledPathField, chooseBundledJavaButton);
+                bundledJavaEditor.setAlignment(Pos.CENTER_LEFT);
+                bundledJavaEditor.setPrefWidth(350);
+                javaBundledOption = createJavaPayloadChoice(
+                        i18n("settings.game.java_directory.bundled"),
+                        pair(JavaVersionType.BUNDLED, null),
+                        bundledJavaEditor,
+                        GameSettings::bundledJavaPathProperty);
+                javaBundledOption.setSubtitle(i18n("settings.game.java_directory.bundled.subtitle", BundledJava.launcherDirectory()));
                 javaVersionTextField = new JFXTextField();
                 javaVersionTextField.setValidators(new NumberValidator(true));
                 FXUtils.setValidateWhileTextChanged(javaVersionTextField, true);
@@ -249,6 +281,7 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
                 holder.add(FXUtils.onWeakChangeAndOperate(JavaManager.getAllJavaProperty(), allJava -> {
                     var options = new ArrayList<RadioChoiceList.Choice<@Nullable Pair<@Nullable JavaVersionType, @Nullable JavaRuntime>>>();
                     options.add(javaAutoDeterminedOption);
+                    options.add(javaBundledOption);
                     options.add(javaVersionOption);
                     if (allJava != null) {
                         boolean isX86 = Architecture.SYSTEM_ARCH.isX86() && allJava.stream().allMatch(java -> java.getArchitecture().isX86());
@@ -274,6 +307,7 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
                     oldSetting.javaTypeProperty().removeListener(weakJavaListener);
                     oldSetting.detectedJavaProperty().removeListener(weakJavaListener);
                     oldSetting.customJavaPathProperty().removeListener(weakJavaListener);
+                    oldSetting.bundledJavaPathProperty().removeListener(weakJavaListener);
                     oldSetting.customJavaVersionProperty().removeListener(weakJavaListener);
                     if (oldSetting instanceof GameSettings.Instance oldInstance) {
                         oldInstance.parentProperty().removeListener(weakJavaListener);
@@ -284,6 +318,7 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
                     newSetting.javaTypeProperty().addListener(weakJavaListener);
                     newSetting.detectedJavaProperty().addListener(weakJavaListener);
                     newSetting.customJavaPathProperty().addListener(weakJavaListener);
+                    newSetting.bundledJavaPathProperty().addListener(weakJavaListener);
                     newSetting.customJavaVersionProperty().addListener(weakJavaListener);
                     if (newSetting instanceof GameSettings.Instance newInstance) {
                         newInstance.parentProperty().addListener(weakJavaListener);
@@ -301,7 +336,10 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
 
                 updatingJavaSetting = true;
                 try {
-                    if (javaCustomOption.isSelected()) {
+                    if (javaBundledOption.isSelected()) {
+                        setPropertyOverridden(setting, setting.javaTypeProperty(), true);
+                        setting.javaTypeProperty().setValue(JavaVersionType.BUNDLED);
+                    } else if (javaCustomOption.isSelected()) {
                         setPropertyOverridden(setting, setting.javaTypeProperty(), true);
                         setting.javaTypeProperty().setValue(JavaVersionType.CUSTOM);
                     } else if (javaAutoDeterminedOption.isSelected()) {
@@ -335,6 +373,17 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
                     setPropertyOverridden(setting, setting.customJavaVersionProperty(), true);
                     setting.javaTypeProperty().setValue(JavaVersionType.VERSION);
                     setting.customJavaVersionProperty().setValue(newValue);
+                    initJavaSubtitle();
+                }
+            });
+
+            javaBundledPathField.textProperty().addListener((observable, oldValue, newValue) -> {
+                @Nullable S setting = currentSetting.get();
+                if (setting != null && javaBundledOption.isSelected() && !updatingSelectedJava) {
+                    setPropertyOverridden(setting, setting.javaTypeProperty(), true);
+                    setPropertyOverridden(setting, setting.bundledJavaPathProperty(), true);
+                    setting.javaTypeProperty().setValue(JavaVersionType.BUNDLED);
+                    setting.bundledJavaPathProperty().setValue(newValue);
                     initJavaSubtitle();
                 }
             });
@@ -686,6 +735,15 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
             jvmSettings.getContent().add(noJVMCheckPane);
             noJVMCheckPane.setTitle(i18n("settings.advanced.dont_check_jvm_validity"));
 
+            if (!isPresetSetting) {
+                var ignoreJavaWarningsPane = new LineToggleButton();
+                jvmSettings.getContent().add(ignoreJavaWarningsPane);
+                ignoreJavaWarningsPane.setTitle(i18n("settings.advanced.ignore_java_warnings"));
+                ignoreJavaWarningsPane.setSubtitle(i18n("settings.advanced.ignore_java_warnings.subtitle"));
+                bindSettingBidirectional(ignoreJavaWarningsPane.selectedProperty(),
+                        setting -> ((GameSettings.Instance) setting).ignoreJavaCompatibilityWarningsProperty());
+            }
+
             var jvmArgsPane = new LinePane();
             jvmSettings.getContent().add(jvmArgsPane);
             jvmArgsPane.setTitle(i18n("settings.advanced.jvm_args"));
@@ -887,6 +945,25 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
     }
 
     // region Helper Methods for UI
+
+    /// Chooses an executable beneath the launcher directory and stores its portable relative path.
+    private void chooseBundledJava() {
+        Path directory = BundledJava.launcherDirectory();
+        var chooser = new FileChooser();
+        chooser.setTitle(i18n("settings.game.java_directory.bundled.choose"));
+        chooser.setInitialDirectory(directory.toFile());
+        if (OperatingSystem.CURRENT_OS == OperatingSystem.WINDOWS) {
+            chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter(i18n("settings.game.java_directory"), "java.exe"));
+        }
+        @Nullable Path executable = Controllers.showOpenDialog(chooser);
+        if (executable != null) {
+            try {
+                javaBundledPathField.setText(BundledJava.relativize(directory, executable));
+            } catch (IllegalArgumentException e) {
+                Controllers.dialog(i18n("settings.game.java_directory.bundled.invalid"));
+            }
+        }
+    }
 
     /// Reveals a row or section in its original position when advanced settings are enabled.
     /// Hidden content takes no layout space and retains its existing value and bindings.
@@ -2780,6 +2857,7 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
         updateParentInheritablePropertyListener(setting, activeParentJavaTypeProperty, GameSettings::javaTypeProperty, weakJavaListener);
         updateParentInheritablePropertyListener(setting, activeParentCustomJavaVersionProperty, GameSettings::customJavaVersionProperty, weakJavaListener);
         updateParentInheritablePropertyListener(setting, activeParentCustomJavaPathProperty, GameSettings::customJavaPathProperty, weakJavaListener);
+        updateParentInheritablePropertyListener(setting, activeParentBundledJavaPathProperty, GameSettings::bundledJavaPathProperty, weakJavaListener);
         updateParentInheritablePropertyListener(setting, activeParentDetectedJavaProperty, GameSettings::detectedJavaProperty, weakJavaListener);
         initJavaSubtitle();
     }
@@ -2793,6 +2871,10 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
         updatingSelectedJava = true;
         JavaVersionType javaType = getEffectiveValue(setting, GameSettings::javaTypeProperty);
         switch (javaType) {
+            case BUNDLED:
+                javaBundledOption.setSelected(true);
+                javaBundledPathField.setText(getEffectiveValue(setting, GameSettings::bundledJavaPathProperty));
+                break;
             case CUSTOM:
                 javaCustomOption.setSelected(true);
                 javaCustomSelector.setValue(getEffectiveValue(setting, GameSettings::customJavaPathProperty));
@@ -2846,6 +2928,18 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
                 gameInstance != null ? gameInstance.getEffectiveSettings() : null;
         JavaVersionType effectiveJavaVersionType = effectiveSetting != null ? effectiveSetting.getInheritable(GameSettings::javaTypeProperty) : javaVersionType;
         boolean autoSelected = effectiveJavaVersionType == JavaVersionType.AUTO || effectiveJavaVersionType == JavaVersionType.VERSION;
+
+        if (effectiveJavaVersionType == JavaVersionType.BUNDLED) {
+            try {
+                Path executable = BundledJava.resolve(BundledJava.launcherDirectory(),
+                        getEffectiveValue(setting, GameSettings::bundledJavaPathProperty));
+                javaSublist.setDescription(Files.isRegularFile(executable) ? executable.toString()
+                        : i18n("settings.game.java_directory.bundled.missing", executable));
+            } catch (IllegalArgumentException e) {
+                javaSublist.setDescription(i18n("settings.game.java_directory.bundled.invalid"));
+            }
+            return;
+        }
 
         if (gameInstance == null && autoSelected) {
             javaSublist.setDescription(i18n("settings.game.java_directory.auto"));

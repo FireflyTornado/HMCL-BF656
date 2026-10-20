@@ -24,6 +24,7 @@ import javafx.scene.control.ButtonBase;
 import javafx.scene.control.Label;
 import javafx.scene.control.ScrollPane;
 import javafx.scene.layout.HBox;
+import javafx.geometry.Insets;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
@@ -65,6 +66,9 @@ public final class MessageDialogPane extends HBox {
 
     private final HBox actions;
 
+    /// Optional body controls, kept separate from buttons so their action events do not close the dialog.
+    private final VBox extraContent = new VBox(8);
+
     private @Nullable ButtonBase cancelButton;
 
     public MessageDialogPane(@NotNull String text, @Nullable String title, @NotNull MessageType type) {
@@ -103,7 +107,9 @@ public final class MessageDialogPane extends HBox {
             actions = new HBox();
             actions.getStyleClass().add("jfx-layout-actions");
 
-            vbox.getChildren().setAll(titlePane, content, actions);
+            extraContent.setVisible(false);
+            extraContent.setManaged(false);
+            vbox.getChildren().setAll(titlePane, content, extraContent, actions);
         }
 
         this.getChildren().setAll(graphic, vbox);
@@ -156,6 +162,15 @@ public final class MessageDialogPane extends HBox {
         public Builder addAction(Node actionNode) {
             dialog.addButton(actionNode);
             actionNode.getStyleClass().add("dialog-accept");
+            return this;
+        }
+
+        /// Adds a body control without installing a dialog-close handler on its action events.
+        public Builder addBodyNode(Node node) {
+            dialog.extraContent.setVisible(true);
+            dialog.extraContent.setManaged(true);
+            dialog.extraContent.setPadding(new Insets(0, 24, 12, 24));
+            dialog.extraContent.getChildren().add(node);
             return this;
         }
 

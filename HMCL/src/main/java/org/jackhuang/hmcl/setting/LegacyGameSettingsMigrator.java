@@ -434,7 +434,7 @@ public final class LegacyGameSettingsMigrator {
         if (source.has("javaVersionType")) {
             return switch (parseLegacyJavaVersionType(source)) {
                 case VERSION, DETECTED -> JsonUtils.getString(source, "java", null);
-                case AUTO, CUSTOM -> "";
+                case AUTO, CUSTOM, BUNDLED -> "";
             };
         }
 

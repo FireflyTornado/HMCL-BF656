@@ -34,9 +34,11 @@ import org.jackhuang.hmcl.modpack.ModpackConfiguration;
 import org.jackhuang.hmcl.modpack.ModpackProvider;
 import org.jackhuang.hmcl.setting.GameSettings;
 import org.jackhuang.hmcl.setting.JavaVersionType;
+import org.jackhuang.hmcl.java.BundledJava;
 import org.jackhuang.hmcl.setting.LauncherVisibility;
 import org.jackhuang.hmcl.task.*;
 import org.jackhuang.hmcl.ui.*;
+import org.jackhuang.hmcl.ui.game.JavaCompatibilityWarningDialog;
 import org.jackhuang.hmcl.ui.construct.DialogCloseEvent;
 import org.jackhuang.hmcl.ui.construct.MessageDialogPane.MessageType;
 import org.jackhuang.hmcl.ui.construct.MessageDialogPane;
@@ -459,15 +461,20 @@ public final class LauncherHelper {
         GameComponentAnalyzer analyzer = GameComponentAnalyzer.analyze(manifest, gameInstance.getVersion());
         GameVersionNumber gameVersion = gameInstance.getVersion();
 
+        JavaVersionType javaVersionType = setting.getInheritable(GameSettings::javaTypeProperty);
         Task<JavaRuntime> getJavaTask = Task.supplyAsync(() -> {
             try {
-                return setting.getJava(gameVersion, manifest);
+                @Nullable JavaRuntime java = setting.getJava(gameVersion, manifest);
+                if (java == null && javaVersionType == JavaVersionType.BUNDLED) {
+                    throw new IOException(i18n("launch.failed.bundled_java",
+                            setting.getInheritable(GameSettings::bundledJavaPathProperty), BundledJava.launcherDirectory()));
+                }
+                return java;
             } catch (InterruptedException e) {
                 throw new CancellationException();
             }
         });
         Task<JavaRuntime> task;
-        JavaVersionType javaVersionType = setting.getInheritable(GameSettings::javaTypeProperty);
         if (setting.getInheritable(GameSettings::notCheckJVMProperty)) {
             task = getJavaTask.thenApplyAsync(java -> Lang.requireNonNullElse(java, JavaRuntime.getDefault()));
         } else if (javaVersionType == JavaVersionType.AUTO || javaVersionType == JavaVersionType.VERSION) {
@@ -643,6 +650,7 @@ public final class LauncherHelper {
                 }
 
                 List<String> suggestions = new ArrayList<>();
+                boolean hasIgnorableJavaAdvice = false;
 
                 if (Architecture.SYSTEM_ARCH == Architecture.X86_64 && java.getPlatform().getArchitecture() == Architecture.X86) {
                     suggestions.add(i18n("launch.advice.different_platform"));
@@ -655,7 +663,13 @@ public final class LauncherHelper {
                     suggestions.add(i18n("launch.advice.too_large_memory_for_32bit"));
                 }
 
+                @Nullable String javaAdviceForgeVersion = analyzer.getVersion(GameComponentType.FORGE);
                 for (JavaVersionConstraint violatedSuggestedConstraint : violatedSuggestedConstraints) {
+                    if (JavaCompatibilityWarnings.shouldIgnore(setting.getInstance(), violatedSuggestedConstraint, javaAdviceForgeVersion)) {
+                        LOG.info("Optional Java advice hidden for this instance: " + violatedSuggestedConstraint);
+                        continue;
+                    }
+                    hasIgnorableJavaAdvice |= JavaCompatibilityWarnings.canIgnore(violatedSuggestedConstraint, javaAdviceForgeVersion);
                     switch (violatedSuggestedConstraint) {
                         case MODDED_JAVA_7:
                             suggestions.add(i18n("launch.advice.java.modded_java_7"));
@@ -742,12 +756,16 @@ public final class LauncherHelper {
                         message = i18n("launch.advice.multi", suggestions.stream().map(it -> "→ " + it).collect(Collectors.joining("\n")));
                     }
 
-                    FXUtils.runInFX(() -> Controllers.confirm(
-                            message,
-                            i18n("message.warning"),
-                            MessageType.WARNING,
-                            () -> future.complete(java),
-                            breakAction));
+                    boolean rememberJavaAdvice = hasIgnorableJavaAdvice;
+                    FXUtils.runInFX(() -> {
+                        if (rememberJavaAdvice) {
+                            Controllers.dialog(JavaCompatibilityWarningDialog.create(message, setting.getInstance(),
+                                    !gameInstance.isSettingsReadOnly(), () -> future.complete(java), breakAction));
+                        } else {
+                            Controllers.confirm(message, i18n("message.warning"), MessageType.WARNING,
+                                    () -> future.complete(java), breakAction);
+                        }
+                    });
                 }
 
                 return result;

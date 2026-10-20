@@ -25,6 +25,7 @@ import org.jetbrains.annotations.NotNullByDefault;
 /// - [VERSION] uses `customJavaVersion` as the user-entered Java version selector.
 /// - [DETECTED] uses `detectedJava` as the detected runtime reference.
 /// - [CUSTOM] uses `customJavaPath` as the executable path selected by the user.
+/// - [BUNDLED] uses `bundledJavaPath` relative to the launcher's EXE/JAR directory.
 ///
 /// @author Glavo
 @NotNullByDefault
@@ -39,5 +40,8 @@ public enum JavaVersionType {
     DETECTED,
 
     /// Uses a user-provided Java executable path.
-    CUSTOM
+    CUSTOM,
+
+    /// Uses a portable Java executable located beneath the launcher directory.
+    BUNDLED
 }
