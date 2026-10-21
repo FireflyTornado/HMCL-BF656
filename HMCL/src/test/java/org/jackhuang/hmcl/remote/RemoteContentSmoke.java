@@ -17,20 +17,23 @@
  */
 package org.jackhuang.hmcl.remote;
 
+import com.google.gson.JsonObject;
+import com.sun.net.httpserver.HttpServer;
 import javafx.application.Platform;
 import javafx.scene.Node;
 import javafx.scene.Parent;
 import javafx.scene.Scene;
 import javafx.scene.control.ButtonBase;
-import javafx.scene.input.KeyCode;
-import javafx.scene.input.KeyEvent;
-import javafx.scene.layout.StackPane;
+import javafx.scene.image.ImageView;
 import org.jackhuang.hmcl.Launcher;
-import org.jackhuang.hmcl.setting.SettingsManager;
+import org.jackhuang.hmcl.game.GameInstanceID;
+import org.jackhuang.hmcl.game.HMCLGameInstance;
+import org.jackhuang.hmcl.game.HMCLGameRepository;
+import org.jackhuang.hmcl.setting.GameDirectoryManager;
 import org.jackhuang.hmcl.setting.LauncherSettings;
+import org.jackhuang.hmcl.setting.SettingsManager;
 import org.jackhuang.hmcl.setting.StyleSheets;
 import org.jackhuang.hmcl.ui.Controllers;
-import org.jackhuang.hmcl.ui.construct.DialogCloseEvent;
 import org.jackhuang.hmcl.ui.decorator.Decorator;
 import org.jetbrains.annotations.NotNullByDefault;
 import org.jetbrains.annotations.Nullable;
@@ -38,178 +41,277 @@ import org.jetbrains.annotations.Unmodifiable;
 
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
+import java.io.ByteArrayOutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
-import java.util.List;
 import java.util.concurrent.Callable;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BooleanSupplier;
 
-/// Runs isolated offscreen desktop smoke checks and writes screenshots without opening a visible window.
+/// Isolated offscreen desktop verification using real instance selection and a real loopback content server.
 @NotNullByDefault
 public final class RemoteContentSmoke {
-    /// Prevents construction of the standalone verification entry point.
+    /// Prevents construction of this standalone verifier.
     private RemoteContentSmoke() { }
 
-    /// Exercises actual agreement controls, keyboard routing, persistence and home-card rendering.
+    /// Exits deterministically even if a JavaFX assertion fails after toolkit startup.
     public static void main(String @Unmodifiable [] args) {
         try {
-            run(args);
+            run(Path.of(args[0]).toAbsolutePath());
+            System.exit(0);
         } catch (Throwable e) {
             e.printStackTrace();
             System.exit(1);
         }
     }
 
-    /// Runs in its own JVM so actual settings and JavaFX lifecycle cannot affect the regular test suite.
-    private static void run(String @Unmodifiable [] args) throws Exception {
-        Path output = Path.of(args[0]).toAbsolutePath();
-        Files.createDirectories(output);
-        System.setProperty("hmcl.home", output.resolve("user").toString());
-        System.setProperty("hmcl.dir", output.resolve("local").toString());
+    /// Exercises selection notices, Markdown images, per-instance consent, cancellation and expiry cleanup.
+    private static void run(Path output) throws Exception {
+        Path state = output.resolve("run-" + System.nanoTime());
+        Files.createDirectories(state);
+        System.setProperty("hmcl.home", state.resolve("user").toString());
+        System.setProperty("hmcl.dir", state.resolve("local").toString());
         SettingsManager.init();
         SettingsManager.settings().animationDisabledProperty().set(true);
         Platform.startup(() -> Platform.setImplicitExit(false));
         var runtime = Launcher.class.getDeclaredMethod("initializeSettingsRuntime");
         runtime.setAccessible(true);
+        onFx(() -> { runtime.invoke(null); return true; });
+        byte[] image = image();
+        String markdown = "# Markdown 图文公告\n\n欢迎 **正式服玩家**，支持 *斜体* 与 ~~删除线~~。\n\n"
+                + "![下载并缓存的示例图片](assets/banner.png)\n\n"
+                + "## 活动安排\n\n| 时间 | 活动 |\n| --- | --- |\n| 20:00 | 开始活动 |\n\n"
+                + "> 通知与公告在选中实例时加载。\n\n1. 更新客户端\n2. 进入服务器\n\n```text\n这是代码块\n```";
+        JsonObject a = catalog("a", markdown, image);
+        JsonObject b = catalog("b", markdown.replace("正式服玩家", "测试服玩家"), image);
+        AtomicInteger aChecks = new AtomicInteger();
+        AtomicInteger bChecks = new AtomicInteger();
+        HttpServer http = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        http.createContext("/", exchange -> {
+            String path = exchange.getRequestURI().getPath();
+            byte[] bytes;
+            if (path.endsWith("manifest.json")) {
+                boolean first = path.contains("/a/");
+                (first ? aChecks : bChecks).incrementAndGet();
+                bytes = (first ? a : b).toString().getBytes(StandardCharsets.UTF_8);
+            } else if (path.endsWith("news.md")) {
+                bytes = (path.contains("/a/") ? markdown : markdown.replace("正式服玩家", "测试服玩家")).getBytes(StandardCharsets.UTF_8);
+            } else {
+                bytes = image;
+            }
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        http.start();
+        String base = "http://127.0.0.1:" + http.getAddress().getPort() + "/";
+        HMCLGameRepository repo = onFx(GameDirectoryManager::getSelectedRepository);
+        String suffix = Long.toString(System.nanoTime());
+        GameInstanceID aId = new GameInstanceID("Content-A-" + suffix);
+        GameInstanceID bId = new GameInstanceID("Content-B-" + suffix);
+        createInstance(repo, aId, base, "a");
+        createInstance(repo, bId, base, "b");
+        repo.refresh();
+        HMCLGameInstance gameA = onFx(() -> repo.getInstance(aId));
+        HMCLGameInstance gameB = onFx(() -> repo.getInstance(bId));
+        Decorator decorator = onFx(() -> new Decorator(Controllers.getRootPage(), stage -> { }));
+        var field = Controllers.class.getDeclaredField("decorator");
+        field.setAccessible(true);
+        field.set(null, decorator);
+        Scene scene = onFx(() -> {
+            Scene value = new Scene(decorator.getRoot(), 1000, 650);
+            StyleSheets.init(value);
+            repo.setSelectedInstance(gameA);
+            RemoteContentController.initialize();
+            value.getRoot().applyCss();
+            value.getRoot().layout();
+            return value;
+        });
+        await(() -> hasButton(decorator.getRoot(), "我已知晓"));
+        onFx(() -> { snapshot(scene, output.resolve("instance-debug.png")); return true; });
+        await(() -> imageReady(decorator.getRoot()));
         onFx(() -> {
-            runtime.invoke(null);
+            require(decorator.getRoot().lookup("#bf656-instance-agreement") == null, "Selecting must not present a protocol");
+            snapshot(scene, output.resolve("instance-notice.png"));
+            findButton(decorator.getRoot(), "我已知晓").fire();
             return true;
         });
-        Path document = output.resolve("documents/用户协议.html");
-        Files.createDirectories(document.getParent());
-        Files.writeString(document, "<html><meta charset='utf-8'>测试协议正文</html>");
-        var continuation = new CountDownLatch(1);
-        var store = new ContentStore(output, "smoke-" + System.nanoTime());
-        var constructor = RemoteContentController.class.getDeclaredConstructor(Path.class, Runnable.class);
-        constructor.setAccessible(true);
-        var controller = onFx(() -> constructor.newInstance(output, (Runnable) continuation::countDown));
-        var decorator = onFx(() -> new Decorator(Controllers.getRootPage(), stage -> { }));
-        var decoratorField = Controllers.class.getDeclaredField("decorator");
-        decoratorField.setAccessible(true);
-        decoratorField.set(null, decorator);
-        var instanceField = RemoteContentController.class.getDeclaredField("instance");
-        instanceField.setAccessible(true);
-        instanceField.set(null, controller);
-        var storeField = RemoteContentController.class.getDeclaredField("store");
-        storeField.setAccessible(true);
-        storeField.set(controller, store);
-        var receive = RemoteContentController.class.getDeclaredMethod("receive", ContentSync.Result.class);
-        receive.setAccessible(true);
-        var scene = onFx(() -> {
-            Scene result = new Scene(decorator.getRoot(), 1000, 620);
-            StyleSheets.init(result);
-            return result;
-        });
-        String agreementText = RemoteContentTest.AGREEMENT.replace("正文",
-                "欢迎使用六五六大战场。<br/><br/>请阅读<a href='documents/用户协议.html'>《用户协议》</a>。<br/><br/>同意后继续，不同意则退出。");
-        var agreement = RemoteContent.parse(RemoteContent.Kind.AGREEMENT, agreementText).get(0);
+        AtomicInteger launchedA = new AtomicInteger();
+        AtomicInteger launchedB = new AtomicInteger();
         onFx(() -> {
-            receive.invoke(controller, result(RemoteContent.Kind.AGREEMENT, List.of(agreement), false, null));
-            require(!RemoteContentController.canLaunch(), "New installation must remain gated");
-            var root = (StackPane) decorator.getRoot();
-            require(root.getChildren().get(0).isDisabled(), "Background controls must be disabled");
-            var gate = root.lookup("#bf656-agreement-gate");
-            gate.fireEvent(new KeyEvent(KeyEvent.KEY_PRESSED, "", "", KeyCode.ESCAPE, false, false, false, false));
-            gate.fireEvent(new DialogCloseEvent());
-            require(!RemoteContentController.canLaunch(), "Escape and ordinary dialog-close cannot grant consent");
-            AtomicInteger keys = new AtomicInteger();
-            gate.addEventHandler(KeyEvent.KEY_PRESSED, event -> keys.incrementAndGet());
-            ButtonBase accept = findButton(gate, "同意并继续");
-            accept.fireEvent(new KeyEvent(KeyEvent.KEY_PRESSED, "a", "a", KeyCode.A, false, false, false, false));
-            require(keys.get() == 1, "Decorator must route keyboard input to the mandatory gate");
-            snapshot(scene, output.resolve("agreement.png"));
+            RemoteContentController.beforeLaunch(gameA, launchedA::incrementAndGet);
+            require(launchedA.get() == 0, "First launch must await consent");
+            snapshot(scene, output.resolve("instance-agreement.png"));
             SettingsManager.settings().getThemeAppearanceOverrides().add(LauncherSettings.THEME_APPEARANCE_BRIGHTNESS_MODE);
             SettingsManager.settings().themeBrightnessModeProperty().set("dark");
-            snapshot(scene, output.resolve("agreement-dark.png"));
+            snapshot(scene, output.resolve("instance-agreement-dark.png"));
             SettingsManager.settings().themeBrightnessModeProperty().set("light");
-            accept.fire();
+            findButton(decorator.getRoot(), "不同意 / 取消启动").fire();
+            require(launchedA.get() == 0, "Refusal must cancel without launching");
+            RemoteContentController.beforeLaunch(gameA, launchedA::incrementAndGet);
+            findButton(decorator.getRoot(), "同意并启动").fire();
             return true;
         });
-        require(continuation.await(10, TimeUnit.SECONDS), "Consent write must release startup continuation");
-        require(store.accepted(agreement), "Acceptance must survive a new state read");
-        var announcements = RemoteContent.parse(RemoteContent.Kind.ANNOUNCEMENTS, """
-                {"schemaVersion":1,"announcements":[
-                  {"id":"news","revision":1,"title":"六五六大战场服务器公告","content":"欢迎来到六五六大战场！<br/><br/>活动安排、维护通知和服务器更新将显示在这里。<br/><a href='documents/用户协议.html'>查看本地用户协议</a>","pinned":true},
-                  {"id":"older","revision":1,"title":"往期活动","content":"这是一条较早的公告。"}
-                ]}
-                """);
+        await(() -> launchedA.get() == 1);
         onFx(() -> {
-            require(RemoteContentController.canLaunch(), "Consent must unlock launcher actions");
-            receive.invoke(controller, result(RemoteContent.Kind.ANNOUNCEMENTS, announcements, false, null));
-            snapshot(scene, output.resolve("announcements.png"));
-            findButton(decorator.getRoot(), "关闭").fire();
-            snapshot(scene, output.resolve("announcement-dismissed.png"));
-            var notices = RemoteContent.parse(RemoteContent.Kind.NOTICES, """
-                    {"schemaVersion":1,"notices":[{"id":"smoke-notice","revision":1,
-                    "title":"临时通知","content":"这是一条临时通知。确认后，同一修订版本不会重复显示。"}]}
-                    """);
-            receive.invoke(controller, result(RemoteContent.Kind.NOTICES, notices, false, null));
-            snapshot(scene, output.resolve("notice.png"));
-            findButton(decorator.getRoot(), "我已知晓").fire();
-            var updated = RemoteContent.parse(RemoteContent.Kind.AGREEMENT, agreementText.replace("\"revision\":1", "\"revision\":2")).get(0);
-            receive.invoke(controller, result(RemoteContent.Kind.AGREEMENT, List.of(updated), false, null));
-            require(!RemoteContentController.canLaunch(), "Updated revision must require fresh consent");
-            Files.delete(document);
-            receive.invoke(controller, result(RemoteContent.Kind.AGREEMENT, List.of(updated), false, null));
-            require(!hasButton(decorator.getRoot(), "同意并继续"), "Missing local agreement document must disable acceptance");
-            snapshot(scene, output.resolve("missing-document.png"));
-            Files.writeString(document, "restored");
-            receive.invoke(controller, result(RemoteContent.Kind.AGREEMENT, List.of(agreement), true, "offline"));
-            require(RemoteContentController.canLaunch(), "Previously accepted cache must work offline");
-            receive.invoke(controller, result(RemoteContent.Kind.AGREEMENT, List.of(), false, "offline"));
-            require(!RemoteContentController.canLaunch(), "An installation without an available agreement must stay gated");
+            RemoteContentController.beforeLaunch(gameA, launchedA::incrementAndGet);
+            require(launchedA.get() == 2, "Accepted protocol must continue immediately");
+            snapshot(scene, output.resolve("instance-markdown.png"));
+            a.getAsJsonObject("agreement").addProperty("revision", 2);
+            RemoteContentController.showInformation();
+            findButton(decorator.getRoot(), "刷新当前实例").fire();
+            return true;
+        });
+        await(() -> currentRevision() == 2);
+        onFx(() -> {
+            require(decorator.getRoot().lookup("#bf656-instance-agreement") == null, "A protocol update must wait for the next game launch");
+            RemoteContentController.beforeLaunch(gameA, launchedA::incrementAndGet);
+            require(hasButton(decorator.getRoot(), "同意并启动"), "Updated protocol must require fresh consent");
+            snapshot(scene, output.resolve("instance-updated-agreement.png"));
+            b.getAsJsonArray("announcements").get(0).getAsJsonObject().addProperty("expiresAt", Instant.now().plusSeconds(4).toString());
+            RemoteContentController.beforeLaunch(gameB, launchedB::incrementAndGet);
+            return true;
+        });
+        await(() -> hasButton(decorator.getRoot(), "同意并启动") && bChecks.get() == 1);
+        onFx(() -> {
+            require(launchedB.get() == 0, "A's consent must not authorize B");
+            repo.setSelectedInstance(gameA);
+            require(launchedB.get() == 0, "Switching must cancel B's pending launch");
+            require(decorator.getRoot().lookup("#bf656-instance-agreement") == null, "Old confirmation must be removed");
+            repo.setSelectedInstance(gameB);
+            RemoteContentController.beforeLaunch(gameB, launchedB::incrementAndGet);
+            findButton(decorator.getRoot(), "同意并启动").fire();
+            return true;
+        });
+        await(() -> launchedB.get() == 1);
+        onFx(() -> {
+            repo.setSelectedInstance(gameA);
+            repo.setSelectedInstance(gameB);
+            require(aChecks.get() == 2 && bChecks.get() == 1, "Successful selections must not recheck manifests after the explicit refresh");
+            snapshot(scene, output.resolve("instance-B.png"));
+            return true;
+        });
+        var bManifest = RemoteContent.parse(b.toString(), "b");
+        var bStore = new ContentStore(RemoteContentController.root(gameB), base + "instances/b/");
+        await(() -> !Files.exists(bStore.file(bManifest.files().get(ContentFixtures.BODY)))
+                && java.util.Objects.requireNonNull(bStore.cache("b")).body().contains("\"announcements\":[]"));
+        onFx(() -> {
+            require(aChecks.get() == 2 && bChecks.get() == 1, "Local expiry must not make HTTP requests");
+            snapshot(scene, output.resolve("instance-expired.png"));
             RemoteContentController.shutdown();
             return true;
         });
+        http.stop(0);
         Platform.exit();
         SettingsManager.shutdown();
-        System.out.println("REMOTE_CONTENT_SMOKE_OK: consent, persistence, keyboard gate, revision, local documents, offline fallback and screenshots");
-        System.exit(0);
+        System.out.println("INSTANCE_CONTENT_SMOKE_OK: selection notices, Markdown tables/images, cancel-only rejection, durable per-instance consent, updated protocol timing, stale-launch cancellation, local expiry cleanup, light/dark themes, no duplicate manifest requests");
     }
 
-    /// Creates a synthetic completed transport event for UI tests; HTTP behavior is covered separately.
-    private static ContentSync.Result result(RemoteContent.Kind kind, @Unmodifiable List<RemoteContent.Item> items,
-                                             boolean cached, @Nullable String error) {
-        return new ContentSync.Result(kind, items, cached, Instant.now(), error, false);
+    /// Creates a public fixture catalog with one notice and one local-document protocol.
+    private static JsonObject catalog(String key, String markdown, byte[] image) {
+        JsonObject root = ContentFixtures.markdown(key, markdown, image);
+        root.getAsJsonObject("agreement").addProperty("content", "请阅读<a href='client/documents/用户协议.html'>本实例协议</a>。不同意只取消本次启动。");
+        JsonObject notice = new JsonObject();
+        notice.addProperty("id", "notice-" + key);
+        notice.addProperty("revision", 1);
+        notice.addProperty("title", "实例 " + key + " 的通知");
+        notice.addProperty("content", "选中实例即可查看通知，无需先同意游戏协议。");
+        root.getAsJsonArray("notices").add(notice);
+        return root;
     }
 
-    /// Executes a desktop action without blocking the JavaFX thread itself.
+    /// Creates valid repository metadata and the explicit instance-key mapping beneath its own version root.
+    private static void createInstance(HMCLGameRepository repo, GameInstanceID id, String base, String key) throws Exception {
+        Path folder = repo.getLayout().getInstanceRoot(id);
+        Files.createDirectories(folder.resolve(".launcher/client/documents"));
+        Files.writeString(repo.getLayout().getInstanceJson(id), "{\"id\":\"" + id + "\",\"mainClass\":\"net.minecraft.client.main.Main\",\"type\":\"release\",\"libraries\":[]}");
+        Files.writeString(folder.resolve(".launcher/client/config.json"), "{\"enabled\":true,\"serverBaseUrl\":\"" + base + "\",\"instanceKey\":\"" + key + "\"}");
+        Files.writeString(folder.resolve(".launcher/client/documents/用户协议.html"), "<html><meta charset='utf-8'>Instance " + key + " terms</html>");
+    }
+
+    /// Creates an image decoding fixture rather than relying on network-hosted media.
+    private static byte[] image() throws Exception {
+        BufferedImage bitmap = new BufferedImage(420, 110, BufferedImage.TYPE_INT_RGB);
+        for (int y = 0; y < bitmap.getHeight(); y++) {
+            for (int x = 0; x < bitmap.getWidth(); x++)
+                bitmap.setRGB(x, y, ((45 + x / 4) << 16) | ((80 + y / 2) << 8) | 180);
+        }
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        ImageIO.write(bitmap, "png", output);
+        return output.toByteArray();
+    }
+
+    /// Waits outside the FX thread while asynchronous synchronization and image decoding complete.
+    private static void await(BooleanSupplier condition) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+        while (System.nanoTime() < deadline) {
+            if (onFx(condition::getAsBoolean))
+                return;
+            Thread.sleep(25);
+        }
+        throw new AssertionError("Desktop condition timed out");
+    }
+
+    /// Observes completed model state without adding production-only test hooks.
+    private static int currentRevision() {
+        try {
+            var manager = RemoteContentController.class.getDeclaredField("instance");
+            manager.setAccessible(true);
+            var current = RemoteContentController.class.getDeclaredField("current");
+            current.setAccessible(true);
+            Object session = current.get(manager.get(null));
+            var result = session.getClass().getDeclaredField("result");
+            result.setAccessible(true);
+            @Nullable ContentSync.Result snapshot = (ContentSync.Result) result.get(session);
+            return snapshot == null || snapshot.manifest() == null ? 0 : snapshot.manifest().agreement().revision();
+        } catch (ReflectiveOperationException e) {
+            throw new AssertionError(e);
+        }
+    }
+
+    /// Runs one action on the FX thread with a bounded wait.
     private static <T> T onFx(Callable<T> action) throws Exception {
-        var task = new FutureTask<>(action);
+        FutureTask<T> task = new FutureTask<>(action);
         Platform.runLater(task);
         return task.get(30, TimeUnit.SECONDS);
     }
 
-    /// Requires a named actual button rather than invoking controller internals for acceptance.
+    /// Locates a semantic button in the actual skinned scene graph.
     private static ButtonBase findButton(Node root, String label) {
         if (root instanceof ButtonBase button && label.equals(button.getText()))
             return button;
         if (root instanceof Parent parent) {
-            for (Node node : parent.getChildrenUnmodifiable()) {
-                if (hasButton(node, label))
-                    return findButton(node, label);
+            for (Node child : parent.getChildrenUnmodifiable()) {
+                if (hasButton(child, label))
+                    return findButton(child, label);
             }
         }
         throw new AssertionError("Missing button: " + label);
     }
 
-    /// Tests whether a semantic control is present before and after skin creation.
+    /// Checks button presence without relying on coordinates or visible desktop automation.
     private static boolean hasButton(Node root, String label) {
-        if (root instanceof ButtonBase button && label.equals(button.getText()))
-            return true;
-        return root instanceof Parent parent && parent.getChildrenUnmodifiable().stream().anyMatch(node -> hasButton(node, label));
+        return root instanceof ButtonBase button && label.equals(button.getText())
+                || root instanceof Parent parent && parent.getChildrenUnmodifiable().stream().anyMatch(child -> hasButton(child, label));
     }
 
-    /// Renders a real themed scene to PNG for visual review without showing a desktop window.
+    /// Requires the remote image fixture to have actually decoded into an image view.
+    private static boolean imageReady(Node root) {
+        return root instanceof ImageView image && image.getImage() != null && "下载并缓存的示例图片".equals(image.getAccessibleText())
+                || root instanceof Parent parent && parent.getChildrenUnmodifiable().stream().anyMatch(RemoteContentSmoke::imageReady);
+    }
+
+    /// Writes a real themed scene snapshot without showing a desktop window.
     private static void snapshot(Scene scene, Path path) throws Exception {
         scene.getRoot().applyCss();
         scene.getRoot().layout();
         var image = scene.snapshot(null);
-        var bitmap = new BufferedImage((int) image.getWidth(), (int) image.getHeight(), BufferedImage.TYPE_INT_ARGB);
+        BufferedImage bitmap = new BufferedImage((int) image.getWidth(), (int) image.getHeight(), BufferedImage.TYPE_INT_ARGB);
         for (int y = 0; y < bitmap.getHeight(); y++) {
             for (int x = 0; x < bitmap.getWidth(); x++)
                 bitmap.setRGB(x, y, image.getPixelReader().getArgb(x, y));
@@ -217,7 +319,7 @@ public final class RemoteContentSmoke {
         ImageIO.write(bitmap, "png", path.toFile());
     }
 
-    /// Fails the standalone process on a behavioral regression.
+    /// Fails the process when a desktop behavior regresses.
     private static void require(boolean condition, String message) {
         if (!condition)
             throw new AssertionError(message);

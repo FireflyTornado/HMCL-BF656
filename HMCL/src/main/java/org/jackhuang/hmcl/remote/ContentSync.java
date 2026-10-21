@@ -26,211 +26,355 @@ import org.jetbrains.annotations.Unmodifiable;
 import java.io.IOException;
 import java.net.HttpURLConnection;
 import java.net.URI;
+import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
-import java.util.EnumMap;
-import java.util.List;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
-/// Synchronizes independent resources once, retrying failures only, with no periodic polling.
+/// One selectable instance session: conditional manifest check, digest-based downloads and failure-only retries.
 @NotNullByDefault
 public final class ContentSync implements AutoCloseable {
-    /// Production retry intervals in seconds following the initial request.
+    /// Retry delays following each failed cycle; pause/resume preserves the remaining budget.
     private static final long @Unmodifiable [] RETRY_SECONDS = {15, 60, 180};
-    /// Content source configuration, loaded beside the actual launcher artifact.
+    /// Instance-scoped settings and server endpoint.
     private final Config config;
-    /// Source-specific durable cache and receipts.
+    /// Cache and receipts beneath this instance's `.launcher` directory.
     private final ContentStore store;
-    /// Receives results on worker threads; UI clients must marshal them to the FX thread.
+    /// Worker-thread result consumer; desktop callers marshal updates to JavaFX.
     private final Consumer<Result> listener;
-    /// Daemon workers allow independent downloads without preventing application exit.
-    private final ScheduledExecutorService workers = Executors.newScheduledThreadPool(3, runnable -> {
-        Thread thread = new Thread(runnable, "BF656 content sync");
+    /// Retry intervals, injectable in HTTP integration tests.
+    private final long @Unmodifiable [] retrySeconds;
+    /// Serial worker prevents overlapping writes and preserves result ordering for this instance.
+    private final ScheduledExecutorService worker = Executors.newSingleThreadScheduledExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "BF656 instance content");
         thread.setDaemon(true);
         return thread;
     });
-    /// Per-resource running, completion and retry state.
-    private final EnumMap<RemoteContent.Kind, Resource> resources = new EnumMap<>(RemoteContent.Kind.class);
-    /// Retry delays, injectable for deterministic integration tests.
-    private final long @Unmodifiable [] retrySeconds;
+    /// Current validated manifest, possibly restored from disk or missing some payloads.
+    private @Nullable RemoteContent.Manifest manifest;
+    /// Previous manifest retained while a replacement downloads, avoiding premature deletion of old files.
+    private @Nullable RemoteContent.Manifest previous;
+    /// Conditional-request validator and original response.
+    private @Nullable ContentStore.Cache cache;
+    /// Whether the manifest has been checked successfully during this process session.
+    private boolean checked;
+    /// Whether all current resources are available and no automatic requests remain necessary.
+    private boolean success;
+    /// Whether this instance is selected and allowed to issue requests.
+    private boolean active;
+    /// Whether one synchronization cycle is running or queued.
+    private boolean running;
+    /// Consecutive failed cycles, excluding selection-driven cancellation.
+    private int failures;
+    /// Generation invalidates in-flight results after pause or shutdown.
+    private volatile long generation;
+    /// Scheduled retry, cancelled when leaving the instance.
+    private @Nullable ScheduledFuture<?> retry;
+    /// Active connection is disconnected on selection changes rather than waiting for its read timeout.
+    private volatile @Nullable HttpURLConnection connection;
 
-    /// Configuration is opt-in; HTTPS is required except for loopback development servers.
+    /// Settings read only from the selected instance; folder names are not used as server identifiers.
     @NotNullByDefault
-    public record Config(boolean enabled, URI baseUrl) {
-        /// Reads installation-local settings; missing configuration leaves upstream behavior intact.
-        public static Config load(Path directory) throws IOException {
-            Path path = directory.resolve(".hmcl/remote-content.json");
+    public record Config(boolean enabled, URI serverBaseUrl, String instanceKey) {
+        /// Reads `.launcher/client/config.json`; ordinary instances without it remain unaffected.
+        public static Config load(Path launcherDirectory) throws IOException {
+            Path path = launcherDirectory.resolve("client/config.json");
             if (!Files.exists(path))
-                return new Config(false, URI.create("https://example.com/launcher/"));
+                return new Config(false, URI.create("https://example.com/launcher/"), "unconfigured");
             try {
                 if (Files.size(path) > 16_384)
-                    throw new IOException("Remote content configuration is too large");
+                    throw new IOException("Instance content configuration is too large");
                 JsonObject json = JsonParser.parseString(Files.readString(path, StandardCharsets.UTF_8)).getAsJsonObject();
-                boolean enabled = json.get("enabled").getAsBoolean();
-                URI base = URI.create(json.get("baseUrl").getAsString());
-                validateBase(base);
-                return new Config(enabled, base);
+                Config config = new Config(RemoteContent.bool(json, "enabled", false),
+                        URI.create(RemoteContent.string(json, "serverBaseUrl", "https://example.com/launcher/")),
+                        RemoteContent.string(json, "instanceKey", "unconfigured"));
+                config.validate();
+                return config;
             } catch (RuntimeException e) {
-                throw new IOException("远程内容配置无效：" + path, e);
+                throw new IOException("实例内容配置无效：" + path + "\n" + e.getMessage(), e);
             }
         }
 
-        /// Rejects credential-bearing URLs, non-directory URLs and non-HTTPS public endpoints.
-        public static void validateBase(URI base) throws IOException {
-            boolean local = "http".equals(base.getScheme())
-                    && ("localhost".equals(base.getHost()) || "127.0.0.1".equals(base.getHost())
-                    || "[::1]".equals(base.getHost()));
-            if ((!"https".equals(base.getScheme()) && !local) || base.getHost() == null
-                    || base.getUserInfo() != null || base.getQuery() != null || base.getFragment() != null
-                    || base.getPath() == null || !base.getPath().endsWith("/"))
-                throw new IOException("baseUrl 必须是以 / 结尾的 HTTPS 地址（本机测试允许 HTTP）");
+        /// Validates public HTTPS endpoints and a stable portable instance key.
+        public void validate() {
+            RemoteContent.validateHttp(serverBaseUrl);
+            if (serverBaseUrl.getQuery() != null || serverBaseUrl.getFragment() != null
+                    || !serverBaseUrl.getPath().endsWith("/")
+                    || !instanceKey.matches("[A-Za-z0-9][A-Za-z0-9._-]{0,63}"))
+                throw new IllegalArgumentException("Invalid serverBaseUrl or instanceKey");
+        }
+
+        /// Resolves the public directory corresponding to this instance's explicit key.
+        public URI endpoint() {
+            return serverBaseUrl.resolve("instances/" + instanceKey + "/");
         }
     }
 
-    /// One attempt's parsed result; cached data is fallback data, never a successful synchronization.
+    /// Snapshot carries latest known metadata even when a newer agreement's file is still unavailable.
     @NotNullByDefault
-    public record Result(RemoteContent.Kind kind, @Unmodifiable List<RemoteContent.Item> items,
-                         boolean cached, @Nullable Instant fetchedAt, @Nullable String error, boolean exhausted) { }
+    public record Result(@Nullable RemoteContent.Manifest manifest, boolean cached, boolean pending,
+                         boolean success, @Nullable Instant checkedAt, @Nullable String error, boolean exhausted) { }
 
-    /// Mutable scheduling state, accessed under this sync object's monitor.
-    @NotNullByDefault
-    private static final class Resource {
-        /// Whether a request is currently executing.
-        boolean running;
-        /// Whether this resource synchronized successfully.
-        boolean success;
-        /// Number of attempts in the current automatic retry cycle.
-        int attempts;
-        /// Scheduled retry, if any.
-        @Nullable ScheduledFuture<?> retry;
-    }
-
-    /// Creates a production synchronizer.
+    /// Creates a session with production retry intervals.
     public ContentSync(Config config, ContentStore store, Consumer<Result> listener) {
         this(config, store, listener, RETRY_SECONDS);
     }
 
-    /// Creates a synchronizer with explicit retry intervals for tests.
+    /// Creates a session with deterministic retry intervals for tests.
     ContentSync(Config config, ContentStore store, Consumer<Result> listener, long @Unmodifiable [] retrySeconds) {
+        config.validate();
         this.config = config;
         this.store = store;
         this.listener = listener;
         this.retrySeconds = retrySeconds.clone();
-        for (var kind : RemoteContent.Kind.values())
-            resources.put(kind, new Resource());
     }
 
-    /// Starts all three requests, exactly once unless explicitly refreshed.
-    public void start() {
-        for (var kind : RemoteContent.Kind.values())
-            request(kind, false);
-    }
-
-    /// Explicitly refreshes all resources; automatic retries never invoke this method.
-    public void refresh() {
-        for (var kind : RemoteContent.Kind.values())
-            request(kind, true);
-    }
-
-    /// Retries a failed agreement at the user's request, resetting its finite retry budget.
-    public void retryAgreement() {
-        request(RemoteContent.Kind.AGREEMENT, true);
-    }
-
-    /// Schedules a request while preventing duplicate or already-successful automatic requests.
-    private synchronized void request(RemoteContent.Kind kind, boolean manual) {
-        Resource resource = resources.get(kind);
-        if (workers.isShutdown() || resource.running || (!manual && resource.success))
-            return;
-        if (manual) {
-            if (resource.retry != null)
-                resource.retry.cancel(false);
-            resource.attempts = 0;
+    /// Activates once per selection, retaining successful work across repeated selections in this process.
+    public synchronized void activate() {
+        active = true;
+        if (success) {
+            prune();
+        } else if (!running && failures <= retrySeconds.length) {
+            running = true;
+            long token = generation;
+            worker.execute(() -> run(token));
         }
-        resource.running = true;
-        workers.execute(() -> fetch(kind));
     }
 
-    /// Fetches a bounded response, validates before caching, and reports errors with last-good fallback.
-    private void fetch(RemoteContent.Kind kind) {
-        @Nullable ContentStore.Cache cache = store.cache(kind);
-        @Nullable ContentStore.Cache fresh = null;
-        @Unmodifiable List<RemoteContent.Item> downloadedItems = List.of();
-        boolean downloadedValid = false;
-        Result result;
+    /// Stops network work when deselected without resetting success or the finite retry budget.
+    public synchronized void pause() {
+        active = false;
+        generation++;
+        running = false;
+        if (retry != null)
+            retry.cancel(false);
+        @Nullable HttpURLConnection request = connection;
+        if (request != null)
+            java.util.concurrent.CompletableFuture.runAsync(request::disconnect);
+    }
+
+    /// Explicit refresh rechecks the manifest while reusing unchanged content-addressed files.
+    public synchronized void refresh() {
+        if (running)
+            return;
+        checked = false;
+        success = false;
+        failures = 0;
+        if (retry != null)
+            retry.cancel(false);
+        activate();
+    }
+
+    /// Explicit retry resets the finite failure budget while preserving a successfully checked manifest.
+    public synchronized void retryFailed() {
+        if (running)
+            return;
+        success = false;
+        failures = 0;
+        if (retry != null)
+            retry.cancel(false);
+        activate();
+    }
+
+    /// Runs local expiry cleanup even after all network work has stopped.
+    public void prune() {
+        if (!worker.isShutdown())
+            worker.execute(this::cleanup);
+    }
+
+    /// Executes one attempt, continuing past individual file failures so unrelated items can still become ready.
+    private void run(long token) {
+        StringBuilder errors = new StringBuilder();
         try {
-            fresh = download(kind, cache);
-            downloadedItems = RemoteContent.parse(kind, fresh.body());
-            downloadedValid = true;
-            store.cache(kind, fresh);
-            result = new Result(kind, downloadedItems, false, fresh.fetchedAt(), null, false);
-        } catch (IOException | RuntimeException e) {
-            @Unmodifiable List<RemoteContent.Item> fallback = List.of();
-            if (cache != null) {
-                try {
-                    fallback = RemoteContent.parse(kind, cache.body());
-                } catch (IOException ignored) { }
+            checkActive(token);
+            if (cache == null) {
+                cache = store.cache(config.instanceKey());
+                if (cache != null)
+                    manifest = RemoteContent.parse(cache.body(), config.instanceKey());
             }
-            result = new Result(kind, fallback, cache != null, cache == null ? null : cache.fetchedAt(),
-                    e.toString(), false);
-            // A known new agreement must never fall back to older consent merely because cache writing failed.
-            if (fresh != null && downloadedValid)
-                result = new Result(kind, downloadedItems, false, fresh.fetchedAt(), e.toString(), false);
+            emit(true, null);
+            if (!checked) {
+                ContentStore.Cache fresh = downloadManifest(token);
+                RemoteContent.Manifest next = RemoteContent.parse(fresh.body(), config.instanceKey());
+                checkActive(token);
+                previous = manifest;
+                manifest = next;
+                cache = fresh;
+                store.cache(fresh);
+                checked = true;
+                emit(true, null);
+            }
+            RemoteContent.Manifest current = java.util.Objects.requireNonNull(manifest);
+            for (RemoteContent.Resource resource : current.needed(Instant.now())) {
+                checkActive(token);
+                try {
+                    if (!store.verified(resource)) {
+                        byte[] bytes = download(resourceUri(resource), "", 16_777_216, token).bytes();
+                        checkActive(token);
+                        store.install(resource, bytes);
+                        emit(true, null);
+                    }
+                } catch (IOException | IllegalArgumentException e) {
+                    errors.append(resource.path()).append(": ").append(e.getMessage()).append('\n');
+                }
+            }
+            for (RemoteContent.Kind kind : RemoteContent.Kind.values()) {
+                for (RemoteContent.Item item : current.items(kind)) {
+                    if (!item.expired(Instant.now()) && store.ready(current, item)) {
+                        try {
+                            ContentDocuments.validate(Path.of("."), current, item, store, config.endpoint(), false);
+                        } catch (IOException e) {
+                            errors.append(item.id()).append(": ").append(e.getMessage()).append('\n');
+                        }
+                    }
+                }
+            }
+            checkActive(token);
+        } catch (CancellationException ignored) {
+            return;
+        } catch (IOException | RuntimeException e) {
+            if (generation != token)
+                return;
+            errors.append(e.getMessage() == null ? e.toString() : e.getMessage());
         }
         synchronized (this) {
-            Resource resource = resources.get(kind);
-            resource.running = false;
-            resource.attempts++;
-            resource.success = result.error() == null;
-            boolean exhausted = resource.attempts > retrySeconds.length;
-            result = new Result(result.kind(), result.items(), result.cached(), result.fetchedAt(), result.error(), exhausted);
-            if (!workers.isShutdown())
-                listener.accept(result);
-            if (!resource.success && !exhausted && !workers.isShutdown()) {
-                resource.retry = workers.schedule(() -> request(kind, false),
-                        retrySeconds[resource.attempts - 1], TimeUnit.SECONDS);
+            if (!active || generation != token || worker.isShutdown())
+                return;
+            running = false;
+            success = errors.isEmpty();
+            if (success) {
+                previous = null;
+            } else {
+                failures++;
+            }
+            cleanup();
+            emit(false, errors.isEmpty() ? null : errors.toString());
+            if (!success && failures <= retrySeconds.length) {
+                retry = worker.schedule(() -> {
+                    synchronized (ContentSync.this) {
+                        if (active)
+                            activate();
+                    }
+                }, retrySeconds[failures - 1], TimeUnit.SECONDS);
             }
         }
     }
 
-    /// Downloads UTF-8 JSON with ETag revalidation; redirects are rejected rather than downgrading HTTPS.
-    private ContentStore.Cache download(RemoteContent.Kind kind, @Nullable ContentStore.Cache cache) throws IOException {
-        var connection = (HttpURLConnection) config.baseUrl().resolve(kind.filename).toURL().openConnection();
-        connection.setConnectTimeout(5000);
-        connection.setReadTimeout(8000);
-        connection.setInstanceFollowRedirects(false);
-        connection.setRequestProperty("Accept", "application/json");
-        connection.setRequestProperty("Cache-Control", "no-cache");
-        if (cache != null && !cache.etag().isEmpty())
-            connection.setRequestProperty("If-None-Match", cache.etag());
+    /// Retains referenced active/future objects; failed updates keep valid previous payloads until replacement.
+    private void cleanup() {
         try {
-            int status = connection.getResponseCode();
-            if (status == 304 && cache != null)
-                return new ContentStore.Cache(cache.body(), cache.etag(), Instant.now());
+            Set<RemoteContent.Resource> keep = new HashSet<>();
+            @Nullable RemoteContent.Manifest current = manifest;
+            @Nullable RemoteContent.Manifest old = previous;
+            if (current != null)
+                keep.addAll(current.needed(Instant.now()));
+            if (old != null && !success) {
+                // Keep old revisions only for IDs still present; withdrawn content is immediately disposable.
+                for (RemoteContent.Kind kind : RemoteContent.Kind.values()) {
+                    for (RemoteContent.Item item : old.items(kind)) {
+                        boolean retained = current != null && current.items(kind).stream()
+                                .anyMatch(next -> next.id().equals(item.id()) && !next.expired(Instant.now()));
+                        if (retained && !item.expired(Instant.now())) {
+                            for (String path : item.files())
+                                keep.add(old.files().get(path));
+                        }
+                    }
+                }
+            }
+            if (current != null) {
+                store.prune(Set.copyOf(keep));
+                if (cache != null)
+                    cache = store.compact(cache, config.instanceKey(), Instant.now());
+            }
+        } catch (IOException | RuntimeException e) {
+            org.jackhuang.hmcl.util.logging.Logger.LOG.warning("Cannot prune instance content", e);
+        }
+    }
+
+    /// Delivers ordered snapshots; cancellation checks prevent old selection generations from updating the UI.
+    private void emit(boolean pending, @Nullable String error) {
+        if (!worker.isShutdown())
+            listener.accept(new Result(manifest, !checked, pending, success,
+                    cache == null ? null : cache.checkedAt(), error, failures > retrySeconds.length));
+    }
+
+    /// Conditional manifest request is the only network work when all referenced files are unchanged.
+    private ContentStore.Cache downloadManifest(long token) throws IOException {
+        @Nullable ContentStore.Cache old = cache;
+        Response response = download(config.endpoint().resolve("manifest.json"), old == null ? "" : old.etag(), 2_097_152, token);
+        if (response.notModified()) {
+            if (old == null)
+                throw new IOException("HTTP 304 without cached manifest");
+            return new ContentStore.Cache(old.body(), old.etag(), Instant.now());
+        }
+        return new ContentStore.Cache(new String(response.bytes(), StandardCharsets.UTF_8), response.etag(), Instant.now());
+    }
+
+    /// Resolves an indexed public resource without interpreting logical paths as URL query syntax.
+    private URI resourceUri(RemoteContent.Resource resource) throws IOException {
+        if (!resource.url().isEmpty())
+            return URI.create(resource.url());
+        try {
+            return config.endpoint().resolve(new URI(null, null, resource.path(), null));
+        } catch (URISyntaxException e) {
+            throw new IOException("Invalid resource URL", e);
+        }
+    }
+
+    /// Bounded response bytes and optional ETag from an explicit non-redirected endpoint.
+    @NotNullByDefault
+    private record Response(byte @Unmodifiable [] bytes, String etag, boolean notModified) { }
+
+    /// Downloads one resource with finite timeouts; TLS downgrades and untracked redirects are rejected.
+    private Response download(URI uri, String etag, int limit, long token) throws IOException {
+        checkActive(token);
+        RemoteContent.validateHttp(uri);
+        HttpURLConnection request = (HttpURLConnection) URI.create(uri.toASCIIString()).toURL().openConnection();
+        connection = request;
+        request.setConnectTimeout(5000);
+        request.setReadTimeout(8000);
+        request.setInstanceFollowRedirects(false);
+        request.setRequestProperty("Cache-Control", "no-cache");
+        if (!etag.isEmpty())
+            request.setRequestProperty("If-None-Match", etag);
+        try {
+            int status = request.getResponseCode();
+            if (status == 304)
+                return new Response(new byte[0], etag, true);
             if (status != 200)
-                throw new IOException("HTTP " + status + " (" + kind.filename + ")");
-            try (var input = connection.getInputStream()) {
-                byte[] bytes = input.readNBytes(1_048_577);
-                if (bytes.length > 1_048_576)
-                    throw new IOException("Response exceeds 1 MiB");
-                @Nullable String etag = connection.getHeaderField("ETag");
-                return new ContentStore.Cache(new String(bytes, StandardCharsets.UTF_8),
-                        etag == null ? "" : etag, Instant.now());
+                throw new IOException("HTTP " + status);
+            try (var input = request.getInputStream()) {
+                byte[] bytes = input.readNBytes(limit + 1);
+                if (bytes.length > limit)
+                    throw new IOException("Response exceeds size limit");
+                @Nullable String validator = request.getHeaderField("ETag");
+                return new Response(bytes, validator == null ? "" : validator, false);
             }
         } finally {
-            connection.disconnect();
+            request.disconnect();
+            connection = null;
         }
     }
 
-    /// Cancels future retries and ignores late results after the launcher closes.
+    /// Rejects obsolete work before another request or filesystem mutation is issued.
+    private synchronized void checkActive(long token) {
+        if (!active || generation != token || worker.isShutdown())
+            throw new CancellationException();
+    }
+
+    /// Stops requests and removes all scheduled retries for this instance.
     @Override
-    public void close() {
-        workers.shutdownNow();
+    public synchronized void close() {
+        pause();
+        worker.shutdownNow();
     }
 }

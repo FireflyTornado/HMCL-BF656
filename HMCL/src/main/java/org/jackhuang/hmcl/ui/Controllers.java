@@ -388,7 +388,8 @@ public final class Controllers {
                     }, updateShowTips);
         }
 
-        RemoteContentController.initialize(() -> tryInstallBundledModpack(GameDirectoryManager.getSelectedRepository()));
+        RemoteContentController.initialize();
+        tryInstallBundledModpack(GameDirectoryManager.getSelectedRepository());
     }
 
     /// Offers automatic install when a package exists under `.hmcl/modpack/`.

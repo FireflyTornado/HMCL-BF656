@@ -21,30 +21,24 @@ import com.jfoenix.controls.JFXButton;
 import com.jfoenix.controls.JFXDialogLayout;
 import javafx.animation.PauseTransition;
 import javafx.application.Platform;
+import javafx.beans.value.ChangeListener;
 import javafx.geometry.Insets;
-import javafx.event.EventHandler;
-import javafx.scene.Cursor;
 import javafx.scene.Node;
-import javafx.scene.Scene;
 import javafx.scene.control.Label;
 import javafx.scene.control.ScrollPane;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyEvent;
-import javafx.scene.input.DragEvent;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
-import javafx.scene.layout.Region;
-import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
-import javafx.scene.text.Text;
-import javafx.scene.text.TextFlow;
+import javafx.scene.layout.Region;
 import javafx.util.Duration;
-import org.jackhuang.hmcl.Metadata;
+import org.jackhuang.hmcl.game.HMCLGameInstance;
+import org.jackhuang.hmcl.setting.GameDirectoryManager;
 import org.jackhuang.hmcl.ui.Controllers;
-import org.jackhuang.hmcl.ui.FXUtils;
-import org.jackhuang.hmcl.ui.construct.DialogCloseEvent;
+import org.jackhuang.hmcl.ui.DialogUtils;
 import org.jackhuang.hmcl.ui.construct.DialogAware;
-import org.jackhuang.hmcl.util.io.JarUtils;
+import org.jackhuang.hmcl.ui.construct.DialogCloseEvent;
 import org.jetbrains.annotations.NotNullByDefault;
 import org.jetbrains.annotations.Nullable;
 import org.jetbrains.annotations.Unmodifiable;
@@ -54,492 +48,739 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
-import java.util.EnumMap;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Consumer;
 
 import static org.jackhuang.hmcl.util.logging.Logger.LOG;
 
-/// Coordinates mandatory agreement gating, queued notices, server cards and manual refresh on the FX thread.
+/// Projects per-instance content onto the homepage and confirms agreements only for captured launch requests.
 @NotNullByDefault
 public final class RemoteContentController {
-    /// Current installation's content coordinator, created after the main scene is attached.
+    /// Desktop coordinator, installed after the main scene is ready.
     private static @Nullable RemoteContentController instance;
-    /// Base for configuration and relative documents, independent of the shell working directory.
-    private final Path directory;
-    /// Startup work held until the server agreement permits entry.
-    private final Runnable continuation;
-    /// Full-window gate, above ordinary dialogs and drag/drop targets.
-    private final StackPane gate = new StackPane();
-    /// Inline document errors remain visible even while ordinary dialogs are disabled behind the gate.
-    private final Label linkError = new Label();
-    /// Scene-level interception runs before the decorator's authentication drag/drop filters.
-    private final EventHandler<DragEvent> gateDragHandler = event -> {
-        if (!this.allowed)
-            event.consume();
-    };
-    /// Last result for each independently synchronized endpoint.
-    private final EnumMap<RemoteContent.Kind, ContentSync.Result> results = new EnumMap<>(RemoteContent.Kind.class);
-    /// Notices queued during this process, avoiding duplicate dialogs across retries and refreshes.
-    private final Set<String> queuedNotices = new HashSet<>();
-    /// Whether one remote notice is waiting for or occupying the ordinary dialog queue.
-    private boolean noticePending;
-    /// Announcements hidden in this process, in addition to persisted dismissals.
-    private final Set<String> dismissed = new HashSet<>();
-    /// Validated source and state, unavailable when configuration fails.
-    private @Nullable ContentStore store;
-    /// Active finite synchronizer.
-    private @Nullable ContentSync sync;
-    /// Most recently fetched or cached agreement, if any.
-    private @Nullable RemoteContent.Item agreement;
-    /// Whether launcher actions are currently permitted.
-    private boolean allowed;
-    /// Whether startup continuation has already run.
-    private boolean continued;
-    /// Whether this controller has been shut down.
+    /// Sessions are identified by fixed version roots rather than configurable game run directories.
+    private final Map<Path, Session> sessions = new HashMap<>();
+    /// Session currently projected onto the homepage.
+    private @Nullable Session current;
+    /// Selection changes invalidate pending launches.
+    private long epoch;
+    /// One captured launch awaiting network data or user consent.
+    private @Nullable LaunchRequest pending;
+    /// Selection listener follows repository snapshot replacements.
+    private final ChangeListener<@Nullable HMCLGameInstance> listener = (observable, oldValue, newValue) -> select(newValue);
+    /// Publication/expiry boundaries cause local rendering and cleanup, never periodic HTTP polling.
+    private @Nullable PauseTransition timer;
+    /// Late worker callbacks are ignored after shutdown.
     private boolean closed;
-    /// Whether the home card includes all active announcements.
-    private boolean expanded;
-    /// Next publication/expiry boundary; this updates local presentation without polling the server.
-    private @Nullable PauseTransition boundaryTimer;
 
-    /// Creates the coordinator and its non-dismissable interaction gate.
-    private RemoteContentController(Path directory, Runnable continuation) {
-        this.directory = directory;
-        this.continuation = continuation;
-        gate.setStyle("-fx-background-color: rgba(24, 28, 36, 0.94);");
-        gate.setId("bf656-agreement-gate");
-        gate.setPadding(new Insets(20));
-        linkError.setWrapText(true);
-        linkError.setStyle("-fx-text-fill: -monet-error;");
-        gate.setFocusTraversable(true);
-        gate.addEventFilter(KeyEvent.KEY_PRESSED, event -> {
-            if (event.getCode() == KeyCode.ESCAPE)
-                event.consume();
-        });
-        gate.addEventFilter(DragEvent.ANY, DragEvent::consume);
+    /// Binds existing HMCL instance selection without requiring global protocol acceptance.
+    private RemoteContentController() {
+        GameDirectoryManager.selectedInstanceProperty().addListener(listener);
+        select(GameDirectoryManager.getSelectedInstance());
     }
 
-    /// Initializes optional server content and delays bundled installation until agreement acceptance.
-    public static void initialize(Runnable continuation) {
-        @Nullable Path artifact = JarUtils.thisJarPath();
-        Path directory = artifact == null ? Metadata.CURRENT_DIRECTORY : artifact.getParent();
-        var controller = new RemoteContentController(directory, continuation);
-        instance = controller;
-        controller.configure();
+    /// Initializes per-instance content without delaying ordinary launcher startup.
+    public static void initialize() {
+        if (instance == null)
+            instance = new RemoteContentController();
     }
 
-    /// Whether central launch operations may proceed; disabled installations retain normal HMCL behavior.
-    public static boolean canLaunch() {
-        return instance == null || instance.allowed;
+    /// Captures a game or script launch target before presenting any protocol.
+    public static void beforeLaunch(HMCLGameInstance game, Runnable continuation) {
+        initialize();
+        Objects.requireNonNull(instance).launch(game, continuation);
     }
 
-    /// Opens the server information panel from the home sidebar.
+    /// Opens status and documents for the selected instance.
     public static void showInformation() {
         if (instance != null)
             instance.information();
     }
 
-    /// Stops retry workers and presentation timers before application shutdown.
+    /// Cancels workers, dialogs and pending continuations without deleting persistent receipts.
     public static void shutdown() {
-        if (instance != null) {
-            instance.closed = true;
-            if (instance.sync != null)
-                instance.sync.close();
-            if (instance.boundaryTimer != null)
-                instance.boundaryTimer.stop();
-            @Nullable Scene scene = Controllers.getDecorator().getRoot().getScene();
-            if (scene != null)
-                scene.removeEventFilter(DragEvent.ANY, instance.gateDragHandler);
+        if (instance == null)
+            return;
+        instance.closed = true;
+        instance.cancelLaunch();
+        GameDirectoryManager.selectedInstanceProperty().removeListener(instance.listener);
+        for (Session session : instance.sessions.values()) {
+            if (session.sync != null)
+                session.sync.close();
         }
+        if (instance.timer != null)
+            instance.timer.stop();
+        instance = null;
     }
 
-    /// Loads explicit configuration; invalid enabled configurations cannot silently bypass the gate.
-    private void configure() {
-        try {
-            var config = ContentSync.Config.load(directory);
-            if (!config.enabled()) {
-                unlock();
-                return;
+    /// Mutable process history for one instance and configured source.
+    @NotNullByDefault
+    private final class Session {
+        /// Fixed version-root `.launcher` directory.
+        final Path root;
+        /// Explicit instance-to-server mapping, absent on validation failure.
+        final @Nullable ContentSync.Config config;
+        /// Configuration failure displayed only in status or when launching.
+        final @Nullable String error;
+        /// Source-specific receipts and local payloads.
+        final @Nullable ContentStore store;
+        /// Conditional synchronizer, absent for disabled or invalid configuration.
+        final @Nullable ContentSync sync;
+        /// Latest immutable worker result.
+        @Nullable ContentSync.Result result;
+        /// Notices already acknowledged or queued during this launcher process.
+        final Set<String> notices = new HashSet<>();
+        /// In-process announcement dismissals, including unsaved preferences.
+        final Set<String> dismissals = new HashSet<>();
+        /// One queued/displayed notice at a time for this instance.
+        @Nullable NoticePane notice;
+        /// Read-only documents currently open or queued for this instance.
+        final Set<DocumentPane> documents = new HashSet<>();
+        /// Independent announcement expansion state.
+        boolean expanded;
+
+        /// Creates an idle session; selection explicitly activates synchronization.
+        Session(Path root, @Nullable ContentSync.Config config, @Nullable String error) {
+            this.root = root;
+            this.config = config;
+            this.error = error;
+            if (config != null && config.enabled()) {
+                store = new ContentStore(root, config.endpoint().toString());
+                sync = new ContentSync(config, store, update -> Platform.runLater(() -> receive(this, update)));
+            } else {
+                store = null;
+                sync = null;
             }
-            var contentStore = new ContentStore(directory, config.baseUrl().toString());
-            store = contentStore;
-            var contentSync = new ContentSync(config, contentStore, result -> Platform.runLater(() -> receive(result)));
-            sync = contentSync;
-            showGate("正在检查用户协议", "首次使用及协议更新后，需要同意服务器用户协议才能继续。", List.of(exitButton()));
-            contentSync.start();
-        } catch (IOException | RuntimeException e) {
-            LOG.warning("Cannot configure BF656 remote content", e);
-            showGate("远程内容配置错误", e.getMessage() == null ? e.toString() : e.getMessage(),
-                    List.of(button("重新读取配置", this::configure), exitButton()));
         }
     }
 
-    /// Applies successful data or fallback without converting a failed request into successful synchronization.
-    private void receive(ContentSync.Result result) {
+    /// Captured target prevents protocol completion from accidentally launching another selected instance.
+    @NotNullByDefault
+    private final class LaunchRequest {
+        /// Fixed target session.
+        final Session session;
+        /// Original launch continuation.
+        final Runnable action;
+        /// Selection epoch at creation.
+        final long selectionEpoch;
+        /// Request-owned protocol dialog, if needed.
+        @Nullable AgreementPane pane;
+
+        /// Captures target and selection identity.
+        LaunchRequest(Session session, Runnable action) {
+            this.session = session;
+            this.action = action;
+            selectionEpoch = epoch;
+        }
+    }
+
+    /// Returns a session, replacing it only when its own configuration changes.
+    private Session session(Path root) {
+        @Nullable ContentSync.Config config = null;
+        @Nullable String error = null;
+        try {
+            config = ContentSync.Config.load(root);
+        } catch (IOException | RuntimeException e) {
+            error = e.getMessage() == null ? e.toString() : e.getMessage();
+        }
+        @Nullable Session old = sessions.get(root);
+        if (old != null && Objects.equals(old.config, config) && Objects.equals(old.error, error))
+            return old;
+        if (old != null && old.sync != null)
+            old.sync.close();
+        Session next = new Session(root, config, error);
+        sessions.put(root, next);
+        return next;
+    }
+
+    /// Switches presentation and cancels obsolete network/launch work while retaining successful session state.
+    private void select(@Nullable HMCLGameInstance game) {
         if (closed)
             return;
-        results.put(result.kind(), result);
-        if (result.error() != null)
-            LOG.warning("BF656 " + result.kind().filename + " sync failed: " + result.error());
-        if (result.kind() == RemoteContent.Kind.AGREEMENT) {
-            agreement = result.items().isEmpty() ? null : result.items().get(0);
-            checkAgreement(result);
+        @Nullable Session next = game == null ? null : session(root(game));
+        if (next == current)
+            return;
+        epoch++;
+        cancelLaunch();
+        @Nullable Session old = current;
+        current = next;
+        if (old != null) {
+            if (old.sync != null)
+                old.sync.pause();
+            if (old.notice != null)
+                DialogUtils.close(old.notice);
+            for (DocumentPane document : Set.copyOf(old.documents))
+                DialogUtils.close(document);
         }
-        renderAnnouncements();
-        enqueueNotices();
-        scheduleBoundary();
+        render();
+        if (next != null) {
+            if (next.sync != null)
+                next.sync.activate();
+            enqueueNotice(next);
+        }
+        boundaries();
     }
 
-    /// Requires current consent; cached consent is usable only after a failed online check.
-    private void checkAgreement(ContentSync.Result result) {
-        @Nullable RemoteContent.Item current = agreement;
-        @Nullable ContentStore contentStore = store;
-        if (current == null || contentStore == null) {
-            showGate("无法获取用户协议", "当前没有可用的协议，暂时无法继续。\n"
-                            + retryDescription(result) + "\n" + result.error(),
-                    List.of(button("立即重试", this::retryAgreement), exitButton()));
+    /// Returns fixed `versions/<id>/.launcher`, independent of custom run-directory settings.
+    public static Path root(HMCLGameInstance game) {
+        return game.getInstanceRoot().toAbsolutePath().normalize().resolve(".launcher");
+    }
+
+    /// Context-menu launches select their exact target before obtaining a source-specific protocol decision.
+    private void launch(HMCLGameInstance game, Runnable action) {
+        if (closed)
+            return;
+        GameDirectoryManager.setSelectedGameDirectory(game.getRepository().getGameDirectory());
+        game.getRepository().setSelectedInstance(game);
+        select(game);
+        cancelLaunch();
+        Session owner = Objects.requireNonNull(current);
+        if (owner.config != null && !owner.config.enabled()) {
+            action.run();
             return;
         }
-        try {
-            ContentLinks.validateAgreement(directory, current);
-        } catch (IOException e) {
-            showGate("协议文档不可用", e.getMessage() == null ? e.toString() : e.getMessage(),
-                    List.of(button("检查文档并重试", this::retryAgreement), exitButton()));
+        LaunchRequest request = new LaunchRequest(owner, action);
+        pending = request;
+        if (owner.notice != null)
+            DialogUtils.close(owner.notice);
+        if (owner.sync != null)
+            owner.sync.activate();
+        checkLaunch(request);
+    }
+
+    /// Stores results on their owner; inactive sessions never replace another instance's homepage.
+    private void receive(Session owner, ContentSync.Result update) {
+        if (closed)
             return;
-        }
-        if (contentStore.accepted(current)) {
-            unlock();
+        owner.result = update;
+        if (update.error() != null)
+            LOG.warning("Instance content sync failed at " + owner.root + ": " + update.error());
+        if (owner != current)
             return;
+        if (owner.notice != null && !present(owner, owner.notice.manifest, owner.notice.item, RemoteContent.Kind.NOTICES))
+            DialogUtils.close(owner.notice);
+        for (DocumentPane document : Set.copyOf(owner.documents)) {
+            if (!present(owner, document.manifest, document.item, document.kind))
+                DialogUtils.close(document);
         }
-        String source = result.cached() ? "\n（网络暂不可用，当前显示上次缓存的协议。）" : "";
-        var accept = button("同意并继续", () -> accept(current, contentStore));
-        showGate(current.title() + " · 第 " + current.revision() + " 版",
-                current.content() + source, List.of(accept, exitButton()));
+        render();
+        @Nullable LaunchRequest request = pending;
+        if (request != null && request.session == owner)
+            checkLaunch(request);
+        enqueueNotice(owner);
+        boundaries();
     }
 
-    /// Describes the finite retry policy without promising another retry after exhaustion.
-    private static String retryDescription(ContentSync.Result result) {
-        return result.exhausted() ? "自动重试已结束，请检查网络后手动重试。" : "将稍后自动重试，也可以立即重试。";
+    /// Reuses consent only for the latest known protocol, after the initial online check has completed or failed.
+    private void checkLaunch(LaunchRequest request) {
+        if (!valid(request))
+            return;
+        Session owner = request.session;
+        @Nullable ContentSync.Result result = owner.result;
+        @Nullable RemoteContent.Manifest manifest = result == null ? null : result.manifest();
+        String problem = owner.error == null ? "正在检查此实例的用户协议…" : owner.error;
+        if (owner.store != null && owner.config != null && manifest != null && !(result.cached() && result.pending())) {
+            try {
+                ContentDocuments.validate(owner.root, manifest, manifest.agreement(), owner.store, owner.config.endpoint(), true);
+                if (owner.store.accepted(manifest)) {
+                    resume(request);
+                    return;
+                }
+                agreement(request, manifest, null);
+                return;
+            } catch (IOException | RuntimeException e) {
+                problem = e.getMessage() == null ? e.toString() : e.getMessage();
+            }
+        } else if (result != null && result.error() != null) {
+            problem = result.error();
+        }
+        agreement(request, null, problem);
     }
 
-    /// Rechecks local documents immediately and explicitly retries only the agreement endpoint.
-    private void retryAgreement() {
-        @Nullable ContentSync.Result previous = results.get(RemoteContent.Kind.AGREEMENT);
-        if (previous != null)
-            checkAgreement(previous);
-        if (sync != null)
-            sync.retryAgreement();
+    /// Updates one protocol dialog rather than stacking dialogs during download progress.
+    private void agreement(LaunchRequest request, @Nullable RemoteContent.Manifest manifest, @Nullable String problem) {
+        if (request.pane == null) {
+            AgreementPane pane = new AgreementPane(request);
+            request.pane = pane;
+            pane.update(manifest, problem);
+            Controllers.dialog(pane);
+        } else {
+            request.pane.update(manifest, problem);
+        }
     }
 
-    /// Saves consent off the FX thread, unlocking only after successful persistence.
-    private void accept(RemoteContent.Item current, ContentStore contentStore) {
-        gate.setDisable(true);
+    /// Ordinary modal protocol; every rejection/close cancels only the captured game launch.
+    @NotNullByDefault
+    private final class AgreementPane extends JFXDialogLayout implements DialogAware {
+        /// Captured launch owner.
+        private final LaunchRequest request;
+        /// Prevents progress updates while the durable consent write is executing.
+        private boolean saving;
+        /// Inline link and persistence errors.
+        private final Label error = new Label();
+
+        /// Creates a cancellable protocol dialog without a global interaction gate.
+        AgreementPane(LaunchRequest request) {
+            this.request = request;
+            setId("bf656-instance-agreement");
+            error.setWrapText(true);
+            addEventFilter(KeyEvent.KEY_PRESSED, event -> {
+                if (event.getCode() == KeyCode.ESCAPE) {
+                    cancelLaunch();
+                    event.consume();
+                }
+            });
+        }
+
+        /// Presents the protocol or an unavailable-content state with retry/cancel actions.
+        void update(@Nullable RemoteContent.Manifest manifest, @Nullable String problem) {
+            if (saving)
+                return;
+            setHeading(heading(manifest == null ? "暂时无法启动此实例" : manifest.agreement().title()
+                    + " · 第 " + manifest.agreement().revision() + " 版"));
+            error.setText("");
+            error.setManaged(false);
+            if (manifest == null) {
+                Label message = new Label(problem == null ? "正在获取协议" : problem);
+                message.setWrapText(true);
+                setBody(scroll(new VBox(12, message, new Label("取消后仍可使用启动器。")), 220));
+                setActions(button("重试", () -> retry(request)), button("取消本次启动", RemoteContentController.this::cancelLaunch));
+            } else {
+                VBox body = new VBox(10, view(request.session, manifest, manifest.agreement(), text -> {
+                    error.setText(text);
+                    error.setManaged(true);
+                }), error);
+                @Nullable ContentSync.Result result = request.session.result;
+                if (result != null && result.cached())
+                    body.getChildren().add(new Label("网络暂不可用，使用此实例缓存的协议。"));
+                setBody(scroll(body, 290));
+                setActions(button("同意并启动", () -> accept(request, manifest)),
+                        button("不同意 / 取消启动", RemoteContentController.this::cancelLaunch));
+            }
+        }
+
+        /// Delayed obsolete dialogs cannot authorize a new selection.
+        @Override
+        public void onDialogShown() {
+            if (!valid(request))
+                Platform.runLater(() -> DialogUtils.close(this));
+        }
+
+        /// External closure never grants consent.
+        @Override
+        public void onDialogClosed() {
+            if (pending == request)
+                pending = null;
+            Platform.runLater(() -> enqueueNotice(request.session));
+        }
+    }
+
+    /// Explicit retry reloads invalid configuration and otherwise refreshes the current source.
+    private void retry(LaunchRequest request) {
+        if (!valid(request))
+            return;
+        Session owner = request.session;
+        if (owner.sync != null) {
+            owner.sync.retryFailed();
+        } else {
+            Session next = session(owner.root);
+            if (next != owner) {
+                cancelLaunch();
+                current = next;
+                if (next.sync != null)
+                    next.sync.activate();
+                if (next.config != null && !next.config.enabled()) {
+                    request.action.run();
+                    return;
+                }
+                LaunchRequest replacement = new LaunchRequest(next, request.action);
+                pending = replacement;
+                checkLaunch(replacement);
+            }
+        }
+    }
+
+    /// Consent must be durable, and selection/protocol identity is rechecked after the background save.
+    private void accept(LaunchRequest request, RemoteContent.Manifest manifest) {
+        if (!valid(request) || request.session.store == null || request.session.config == null)
+            return;
+        Session owner = request.session;
+        ContentStore store = owner.store;
+        ContentSync.Config config = owner.config;
+        @Nullable AgreementPane pane = request.pane;
+        if (pane != null) {
+            pane.saving = true;
+            pane.setDisable(true);
+        }
         CompletableFuture.runAsync(() -> {
             try {
-                ContentLinks.validateAgreement(directory, current);
-                contentStore.accept(current);
+                ContentDocuments.validate(owner.root, manifest, manifest.agreement(), store, config.endpoint(), true);
+                store.accept(manifest);
                 Platform.runLater(() -> {
-                    gate.setDisable(false);
-                    if (!closed && agreement != null && agreement.key().equals(current.key())) {
-                        unlock();
-                        enqueueNotices();
+                    if (pane != null) {
+                        pane.saving = false;
+                        pane.setDisable(false);
                     }
+                    @Nullable ContentSync.Result latest = owner.result;
+                    if (valid(request) && latest != null && latest.manifest() != null
+                            && latest.manifest().key(latest.manifest().agreement()).equals(manifest.key(manifest.agreement())))
+                        resume(request);
+                    else if (valid(request))
+                        checkLaunch(request);
                 });
             } catch (IOException | RuntimeException e) {
                 Platform.runLater(() -> {
-                    gate.setDisable(false);
-                    showGate("无法保存同意记录", "请检查客户端目录的写入权限和协议文件。\n" + e,
-                            List.of(button("重试", () -> accept(current, contentStore)), exitButton()));
+                    if (pane != null) {
+                        pane.saving = false;
+                        pane.setDisable(false);
+                        pane.error.setManaged(true);
+                        pane.error.setText("无法保存同意记录或协议资源不可用：" + e.getMessage());
+                    }
                 });
             }
         });
     }
 
-    /// Places an opaque interaction gate above normal dialogs; only explicit acceptance removes it.
-    private void showGate(String title, String body, @Unmodifiable List<JFXButton> actions) {
-        allowed = false;
-        linkError.setVisible(false);
-        linkError.setManaged(false);
-        VBox card = new VBox(16, heading(title), scroll(richText(body), 260), linkError,
-                new HBox(12, actions.toArray(Node[]::new)));
-        card.getStyleClass().add("card");
-        card.setPadding(new Insets(24));
-        card.setMaxSize(640, Region.USE_PREF_SIZE);
-        gate.getChildren().setAll(card);
-        Controllers.getDecorator().setInteractionGate(gate);
-        var root = Controllers.getDecorator().getRoot();
-        if (root.getScene() != null) {
-            root.getScene().removeEventFilter(DragEvent.ANY, gateDragHandler);
-            root.getScene().addEventFilter(DragEvent.ANY, gateDragHandler);
-        }
-        gate.toFront();
-        gate.requestFocus();
+    /// The continuation remains valid only for its original request and selection epoch.
+    private boolean valid(LaunchRequest request) {
+        return !closed && pending == request && current == request.session && epoch == request.selectionEpoch;
     }
 
-    /// Releases startup once, while allowing a newly discovered protocol update to gate later launches again.
-    private void unlock() {
-        allowed = true;
-        Controllers.getDecorator().setInteractionGate(null);
-        if (!continued) {
-            continued = true;
-            Platform.runLater(continuation);
-        }
-    }
-
-    /// Queues active unseen notices after consent, behind existing application dialogs.
-    private void enqueueNotices() {
-        @Nullable ContentStore contentStore = store;
-        @Nullable ContentSync.Result result = results.get(RemoteContent.Kind.NOTICES);
-        if (!allowed || contentStore == null || result == null || noticePending)
+    /// Resumes exactly one launch after removing its own confirmation dialog.
+    private void resume(LaunchRequest request) {
+        if (!valid(request))
             return;
-        for (var item : result.items()) {
-            if (!item.active(Instant.now()) || queuedNotices.contains(item.key())
-                    || (!item.repeat().equals("each_start") && contentStore.remembered("notices", item.key())))
+        pending = null;
+        if (request.pane != null)
+            DialogUtils.close(request.pane);
+        request.action.run();
+    }
+
+    /// Cancels only the game launch, leaving navigation and the application alive.
+    private void cancelLaunch() {
+        @Nullable LaunchRequest request = pending;
+        pending = null;
+        if (request != null && request.pane != null)
+            DialogUtils.close(request.pane);
+    }
+
+    /// Offers notices on selection without requiring protocol acceptance or duplicating same-session messages.
+    private void enqueueNotice(Session owner) {
+        @Nullable ContentSync.Result result = owner.result;
+        @Nullable ContentStore store = owner.store;
+        if (closed || current != owner || pending != null || owner.notice != null || result == null
+                || result.manifest() == null || store == null)
+            return;
+        RemoteContent.Manifest manifest = result.manifest();
+        for (RemoteContent.Item item : manifest.notices()) {
+            String key = manifest.key(item);
+            if (!item.active(Instant.now()) || !store.ready(manifest, item) || owner.notices.contains(key)
+                    || (!item.repeat().equals("each_start") && store.remembered("notices", key)))
                 continue;
-            queuedNotices.add(item.key());
-            noticePending = true;
-            Controllers.dialogLater(new NoticePane(item));
+            owner.notices.add(key);
+            NoticePane pane = new NoticePane(owner, manifest, item);
+            owner.notice = pane;
+            Controllers.dialogLater(pane);
             break;
         }
     }
 
-    /// A queued notification participates in normal dialog closure even if withdrawn before display.
+    /// Whether an item still belongs to the current valid server snapshot and publication window.
+    private boolean present(Session owner, RemoteContent.Manifest snapshot, RemoteContent.Item item, RemoteContent.Kind kind) {
+        @Nullable ContentSync.Result result = owner.result;
+        return result != null && result.manifest() != null && item.active(Instant.now())
+                && result.manifest().items(kind).stream().anyMatch(next -> result.manifest().key(next).equals(snapshot.key(item)));
+    }
+
+    /// A queued notice belongs to exactly one instance and one published revision.
     @NotNullByDefault
     private final class NoticePane extends JFXDialogLayout implements DialogAware {
-        /// Published snapshot represented by this dialog.
+        /// Owning instance session.
+        private final Session owner;
+        /// Immutable body/resource snapshot.
+        private final RemoteContent.Manifest manifest;
+        /// Notice represented by this dialog.
         private final RemoteContent.Item item;
-        /// Whether this user explicitly confirmed the notice.
+        /// Explicit user confirmation, independent of close/cancel events.
         private boolean acknowledged;
 
-        /// Creates the actual dialog while deferring publication checks until it is shown.
-        private NoticePane(RemoteContent.Item item) {
+        /// Creates a Markdown-capable notice in the normal dialog queue.
+        NoticePane(Session owner, RemoteContent.Manifest manifest, RemoteContent.Item item) {
+            this.owner = owner;
+            this.manifest = manifest;
             this.item = item;
             setHeading(heading(item.title()));
-            setBody(scroll(richText(item.content()), 280));
+            setBody(scroll(view(owner, manifest, item, text -> Controllers.dialog(text, "无法打开文档")), 280));
             setActions(button("我已知晓", () -> {
                 acknowledged = true;
-                remember("notices", item.key());
+                remember(owner, "notices", manifest.key(item));
                 fireEvent(new DialogCloseEvent());
             }));
         }
 
-        /// Discards expired or withdrawn queued messages using normal queue advancement.
+        /// Obsolete or deselected notices close normally so the global dialog queue keeps advancing.
         @Override
         public void onDialogShown() {
-            if (!allowed || !item.active(Instant.now()) || !isCurrentNotice(item))
-                Platform.runLater(() -> fireEvent(new DialogCloseEvent()));
+            @Nullable ContentSync.Result latest = owner.result;
+            boolean present = latest != null && latest.manifest() != null && latest.manifest().notices().stream()
+                    .anyMatch(next -> latest.manifest().key(next).equals(manifest.key(item)));
+            if (current != owner || !item.active(Instant.now()) || !present || pending != null)
+                Platform.runLater(() -> DialogUtils.close(this));
         }
 
-        /// Advances only one remote notice at a time and permits requeueing after agreement gating.
+        /// Unacknowledged notices may be offered when their owning instance is selected again.
         @Override
         public void onDialogClosed() {
             if (!acknowledged)
-                queuedNotices.remove(item.key());
-            noticePending = false;
-            Platform.runLater(RemoteContentController.this::enqueueNotices);
+                owner.notices.remove(manifest.key(item));
+            if (owner.notice == this)
+                owner.notice = null;
+            Platform.runLater(() -> enqueueNotice(owner));
         }
     }
 
-    /// Whether a queued notice still belongs to the latest complete server snapshot.
-    private boolean isCurrentNotice(RemoteContent.Item item) {
-        @Nullable ContentSync.Result result = results.get(RemoteContent.Kind.NOTICES);
-        return result != null && result.items().stream().anyMatch(current -> current.key().equals(item.key()));
-    }
-
-    /// Builds dismissible server cards; empty successful responses also remove previous cards.
-    private void renderAnnouncements() {
-        @Nullable ContentSync.Result result = results.get(RemoteContent.Kind.ANNOUNCEMENTS);
-        @Nullable ContentStore contentStore = store;
-        if (result == null || contentStore == null)
+    /// Renders ready, active, unhidden Markdown cards for the current session only.
+    private void render() {
+        @Nullable Session owner = current;
+        @Nullable ContentSync.Result result = owner == null ? null : owner.result;
+        @Nullable ContentStore store = owner == null ? null : owner.store;
+        if (owner == null || result == null || result.manifest() == null || store == null) {
+            Controllers.getRootPage().getMainPage().setRemoteAnnouncements(null);
             return;
-        @Unmodifiable List<RemoteContent.Item> visible = result.items().stream().filter(item -> item.active(Instant.now()))
-                .filter(item -> !dismissed.contains(item.key()) && !contentStore.remembered("announcements", item.key())).toList();
-        VBox entries = new VBox(12);
-        for (var item : expanded ? visible : visible.stream().limit(1).toList()) {
+        }
+        RemoteContent.Manifest manifest = result.manifest();
+        @Unmodifiable List<RemoteContent.Item> visible = manifest.announcements().stream()
+                .filter(item -> item.active(Instant.now()) && store.ready(manifest, item))
+                .filter(item -> !owner.dismissals.contains(manifest.key(item))
+                        && !store.remembered("announcements", manifest.key(item))).toList();
+        if (visible.isEmpty()) {
+            Controllers.getRootPage().getMainPage().setRemoteAnnouncements(null);
+            return;
+        }
+        VBox entries = new VBox(14);
+        for (RemoteContent.Item item : owner.expanded ? visible : visible.stream().limit(1).toList()) {
             Label title = heading((item.pinned() ? "[置顶] " : "") + item.title());
             HBox.setHgrow(title, Priority.ALWAYS);
-            var hide = button("关闭", () -> {
-                dismissed.add(item.key());
-                remember("announcements", item.key());
-                renderAnnouncements();
+            JFXButton hide = button("关闭", () -> {
+                owner.dismissals.add(manifest.key(item));
+                remember(owner, "announcements", manifest.key(item));
+                render();
             });
-            VBox entry = new VBox(8, new HBox(10, title, hide));
+            Label error = new Label();
+            error.setWrapText(true);
+            error.setManaged(false);
+            VBox entry = new VBox(8, new HBox(8, title, hide));
             if (!item.publishedAt().isEmpty())
                 entry.getChildren().add(new Label(item.publishedAt()));
-            entry.getChildren().add(richText(item.content()));
+            entry.getChildren().addAll(view(owner, manifest, item, text -> {
+                error.setText(text);
+                error.setManaged(true);
+            }), error, button("阅读全文", () -> document(owner, manifest, item)));
             entries.getChildren().add(entry);
         }
         if (visible.size() > 1)
-            entries.getChildren().add(button(expanded ? "收起公告" : "展开其他 " + (visible.size() - 1) + " 条公告", () -> {
-                expanded = !expanded;
-                renderAnnouncements();
+            entries.getChildren().add(button(owner.expanded ? "收起公告" : "展开其他 " + (visible.size() - 1) + " 条公告", () -> {
+                owner.expanded = !owner.expanded;
+                render();
             }));
-        if (result.cached() && !visible.isEmpty())
-            entries.getChildren().add(new Label("离线缓存 · 上次同步 " + formatTime(result.fetchedAt())));
-        VBox card = new VBox(10, scroll(entries, 220));
+        if (result.cached())
+            entries.getChildren().add(new Label("离线缓存 · 上次同步 " + time(result.checkedAt())));
+        VBox card = new VBox(scroll(entries, 245));
         card.getStyleClass().addAll("card", "announcement");
-        card.setPadding(new Insets(16));
-        card.setMaxSize(500, Region.USE_PREF_SIZE);
-        Controllers.getRootPage().getMainPage().setRemoteAnnouncements(visible.isEmpty() ? null : card);
+        card.setPadding(new Insets(14));
+        card.setMaxSize(510, Region.USE_PREF_SIZE);
+        Controllers.getRootPage().getMainPage().setRemoteAnnouncements(card);
     }
 
-    /// Refreshes local publication windows without issuing another successful HTTP request.
-    private void scheduleBoundary() {
-        if (boundaryTimer != null)
-            boundaryTimer.stop();
-        Instant now = Instant.now();
+    /// Schedules only local publication/expiry updates, including cleanup for previously loaded inactive instances.
+    private void boundaries() {
+        if (timer != null)
+            timer.stop();
         @Nullable Instant next = null;
-        for (var result : results.values()) {
-            for (var item : result.items()) {
-                @Nullable Instant start = item.startsAt();
-                @Nullable Instant expiry = item.expiresAt();
-                if (start != null && start.isAfter(now) && (next == null || start.isBefore(next)))
-                    next = start;
-                if (expiry != null && expiry.isAfter(now) && (next == null || expiry.isBefore(next)))
-                    next = expiry;
+        Instant now = Instant.now();
+        for (Session owner : sessions.values()) {
+            @Nullable ContentSync.Result result = owner.result;
+            if (result == null || result.manifest() == null)
+                continue;
+            for (RemoteContent.Kind kind : RemoteContent.Kind.values()) {
+                for (RemoteContent.Item item : result.manifest().items(kind)) {
+                    @Nullable Instant start = item.startsAt();
+                    @Nullable Instant expiry = item.expiresAt();
+                    if (start != null && start.isAfter(now) && (next == null || start.isBefore(next)))
+                        next = start;
+                    if (expiry != null && expiry.isAfter(now) && (next == null || expiry.isBefore(next)))
+                        next = expiry;
+                }
             }
         }
         if (next != null) {
-            var timer = new PauseTransition(Duration.millis(Math.max(50, java.time.Duration.between(now, next).toMillis() + 20)));
-            timer.setOnFinished(event -> {
-                renderAnnouncements();
-                enqueueNotices();
-                scheduleBoundary();
+            PauseTransition boundary = new PauseTransition(Duration.millis(Math.max(50, java.time.Duration.between(now, next).toMillis() + 20)));
+            boundary.setOnFinished(event -> {
+                for (Session owner : sessions.values()) {
+                    if (owner.sync != null)
+                        owner.sync.prune();
+                    if (owner.notice != null && !owner.notice.item.active(Instant.now()))
+                        DialogUtils.close(owner.notice);
+                    for (DocumentPane document : Set.copyOf(owner.documents)) {
+                        if (!document.item.active(Instant.now()))
+                            DialogUtils.close(document);
+                    }
+                }
+                render();
+                if (current != null)
+                    enqueueNotice(current);
+                boundaries();
             });
-            boundaryTimer = timer;
-            timer.play();
+            timer = boundary;
+            boundary.play();
         }
     }
 
-    /// Opens status, manual refresh, agreement and all announcements including dismissed entries.
+    /// Presents the selected instance's source, status, protocol and all active announcements.
     private void information() {
+        @Nullable Session owner = current;
         VBox body = new VBox(12);
-        if (sync == null) {
-            body.getChildren().add(new Label("远程内容尚未启用。配置文件：\n" + directory.resolve(".hmcl/remote-content.json")));
+        if (owner == null) {
+            body.getChildren().add(new Label("请先选择一个游戏实例。"));
         } else {
-            for (var kind : RemoteContent.Kind.values()) {
-                @Nullable ContentSync.Result result = results.get(kind);
-                body.getChildren().add(new Label(kind.filename + "：" + (result == null ? "正在同步"
-                        : result.error() == null ? "同步成功 · " + formatTime(result.fetchedAt())
-                        : "同步失败" + (result.cached() ? "（使用缓存）" : "") + " · " + retryDescription(result))));
+            Label path = new Label("实例配置：\n" + owner.root.resolve("client/config.json"));
+            path.setWrapText(true);
+            body.getChildren().add(path);
+            if (owner.error != null) {
+                body.getChildren().add(new Label(owner.error));
+            } else if (owner.sync == null) {
+                body.getChildren().add(new Label("此实例未启用远程内容。"));
+            } else {
+                body.getChildren().add(new Label("内容标识：" + Objects.requireNonNull(owner.config).instanceKey()));
+                @Nullable ContentSync.Result result = owner.result;
+                String status = result == null ? "正在同步" : result.success() ? "同步成功"
+                        : result.pending() ? "正在同步正文或图片" : "同步失败，" + (result.exhausted() ? "自动重试已结束" : "将有限重试");
+                body.getChildren().add(new Label(status));
+                if (result != null && result.manifest() != null) {
+                    RemoteContent.Manifest manifest = result.manifest();
+                    body.getChildren().add(new Label("上次检查：" + time(result.checkedAt())));
+                    body.getChildren().add(button("查看用户协议", () -> document(owner, manifest, manifest.agreement())));
+                    for (RemoteContent.Item item : manifest.announcements()) {
+                        if (item.active(Instant.now()))
+                            body.getChildren().add(button(item.title(), () -> document(owner, manifest, item)));
+                    }
+                }
             }
         }
-        @Nullable RemoteContent.Item current = agreement;
-        if (current != null)
-            body.getChildren().add(button("查看用户协议", () -> showDocument(current)));
-        @Nullable ContentSync.Result announcements = results.get(RemoteContent.Kind.ANNOUNCEMENTS);
-        if (announcements != null) {
-            for (var item : announcements.items()) {
-                if (item.active(Instant.now()))
-                    body.getChildren().add(button(item.title(), () -> showDocument(item)));
-            }
-        }
-        JFXDialogLayout pane = contentPane("服务器信息", body);
-        pane.setActions(button("刷新全部内容", () -> {
-            if (sync != null)
-                sync.refresh();
+        JFXDialogLayout pane = pane("实例服务器信息", body);
+        pane.setActions(button("刷新当前实例", () -> {
             pane.fireEvent(new DialogCloseEvent());
+            select(GameDirectoryManager.getSelectedInstance());
+            if (current != null && current.sync != null)
+                current.sync.refresh();
         }), button("关闭", () -> pane.fireEvent(new DialogCloseEvent())));
         Controllers.dialog(pane);
     }
 
-    /// Displays a read-only copy of a published item.
-    private void showDocument(RemoteContent.Item item) {
-        JFXDialogLayout pane = contentPane(item.title() + " · 第 " + item.revision() + " 版", richText(item.content()));
-        pane.setActions(button("关闭", () -> pane.fireEvent(new DialogCloseEvent())));
-        Controllers.dialog(pane);
+    /// Opens a read-only full document without changing receipts or dismissals.
+    private void document(Session owner, RemoteContent.Manifest manifest, RemoteContent.Item item) {
+        DocumentPane document = new DocumentPane(owner, manifest, item);
+        owner.documents.add(document);
+        Controllers.dialog(document);
     }
 
-    /// Persists acknowledgements without delaying FX rendering; failures remain visible to the user.
-    private void remember(String category, String key) {
-        @Nullable ContentStore contentStore = store;
-        if (contentStore == null)
+    /// Read-only views close on withdrawal, expiry, replacement or instance deselection.
+    @NotNullByDefault
+    private final class DocumentPane extends JFXDialogLayout implements DialogAware {
+        /// Instance owning this view.
+        private final Session owner;
+        /// Immutable resource snapshot used by the renderer.
+        private final RemoteContent.Manifest manifest;
+        /// Document item represented by this view.
+        private final RemoteContent.Item item;
+        /// Public category determines whether the current snapshot still contains this revision.
+        private final RemoteContent.Kind kind;
+
+        /// Creates a read-only view without altering agreement or dismissal receipts.
+        DocumentPane(Session owner, RemoteContent.Manifest manifest, RemoteContent.Item item) {
+            this.owner = owner;
+            this.manifest = manifest;
+            this.item = item;
+            setId("bf656-document");
+            kind = item == manifest.agreement() ? RemoteContent.Kind.AGREEMENT : RemoteContent.Kind.ANNOUNCEMENTS;
+            setHeading(heading(item.title()));
+            setBody(scroll(view(owner, manifest, item, text -> Controllers.dialog(text, "无法打开文档")), 290));
+            setActions(button("关闭", () -> fireEvent(new DialogCloseEvent())));
+        }
+
+        /// Delayed views cannot display another instance's or already withdrawn content.
+        @Override
+        public void onDialogShown() {
+            if (current != owner || !present(owner, manifest, item, kind))
+                Platform.runLater(() -> DialogUtils.close(this));
+        }
+
+        /// Releases the instance's reference when the view closes.
+        @Override
+        public void onDialogClosed() {
+            owner.documents.remove(this);
+        }
+    }
+
+    /// Constructs a Markdown view with explicit instance and source context.
+    private MarkdownView view(Session owner, RemoteContent.Manifest manifest, RemoteContent.Item item, Consumer<String> error) {
+        return new MarkdownView(owner.root, manifest, item, Objects.requireNonNull(owner.store),
+                Objects.requireNonNull(owner.config).endpoint(), error);
+    }
+
+    /// Saves confirmation preferences off the FX thread without opening dialogs over another selected instance.
+    private void remember(Session owner, String category, String key) {
+        @Nullable ContentStore store = owner.store;
+        if (store == null)
             return;
         CompletableFuture.runAsync(() -> {
             try {
-                contentStore.remember(category, key);
+                store.remember(category, key);
             } catch (IOException | RuntimeException e) {
-                LOG.warning("Cannot save BF656 content acknowledgement", e);
-                Platform.runLater(() -> Controllers.dialog("无法保存通知记录，下次启动可能再次显示。\n" + e));
+                LOG.warning("Cannot save instance content receipt", e);
+                Platform.runLater(() -> {
+                    if (!closed && current == owner)
+                        Controllers.dialog("无法保存确认记录，下次可能再次显示。\n" + e.getMessage());
+                });
             }
         });
     }
 
-    /// Renders restricted markup with a dedicated local-document-aware link handler.
-    private TextFlow richText(String content) {
-        TextFlow flow = new TextFlow();
-        flow.setStyle("-fx-font-size: 14px;");
-        flow.setLineSpacing(5);
-        try {
-            for (var run : ContentLinks.parse(content)) {
-                Text text = new Text(run.text());
-                text.setStyle("-fx-fill: -monet-on-surface;");
-                if (run.bold())
-                    text.getStyleClass().add("bold");
-                if (run.href() != null) {
-                    String href = run.href();
-                    text.getStyleClass().add("hyperlink");
-                    text.setStyle("-fx-fill: -monet-primary;");
-                    text.setUnderline(true);
-                    text.setCursor(Cursor.HAND);
-                    text.setOnMouseClicked(event -> openLink(href));
-                }
-                flow.getChildren().add(text);
-            }
-        } catch (IOException e) {
-            flow.getChildren().setAll(new Text(content));
-        }
-        return flow;
-    }
-
-    /// Opens a checked document URI without supporting arbitrary protocols or executable files.
-    private void openLink(String href) {
-        try {
-            FXUtils.openLink(ContentLinks.resolve(directory, href).toASCIIString());
-        } catch (IOException e) {
-            if (!allowed) {
-                linkError.setText("无法打开文档：" + e.getMessage());
-                linkError.setVisible(true);
-                linkError.setManaged(true);
-            } else {
-                Controllers.dialog(e.getMessage(), "无法打开文档");
-            }
-        }
-    }
-
-    /// Creates a wrapping heading shared by gates, cards and dialogs.
+    /// Creates a wrapping heading that respects the active launcher theme.
     private static Label heading(String title) {
         Label label = new Label(title);
         label.setWrapText(true);
         label.setMinWidth(0);
         label.setStyle("-fx-font-size: 16px; -fx-font-weight: bold;");
-        label.getStyleClass().add("title");
         return label;
     }
 
-    /// Creates a bounded scroll region so long server text cannot extend beyond the window.
-    private static ScrollPane scroll(Node content, double height) {
-        ScrollPane scroll = new ScrollPane(content);
+    /// Keeps long documents and images inside the available card/dialog viewport.
+    private static ScrollPane scroll(Node body, double height) {
+        ScrollPane scroll = new ScrollPane(body);
         scroll.setFitToWidth(true);
+        scroll.setPrefViewportWidth(550);
         scroll.setPrefViewportHeight(height);
-        scroll.setPrefViewportWidth(540);
         scroll.setMinHeight(80);
         VBox.setVgrow(scroll, Priority.ALWAYS);
         return scroll;
     }
 
-    /// Builds an ordinary queued dialog with bounded body content.
-    private static JFXDialogLayout contentPane(String title, Node body) {
+    /// Creates a normal read-only document/status pane.
+    private static JFXDialogLayout pane(String title, Node body) {
         JFXDialogLayout pane = new JFXDialogLayout();
         pane.setHeading(heading(title));
-        pane.setBody(scroll(body, 280));
+        pane.setBody(scroll(body, 290));
         return pane;
     }
 
-    /// Creates a button whose action does not automatically close mandatory gates.
+    /// Creates a button whose callback explicitly controls closure and continuation.
     private static JFXButton button(String title, Runnable action) {
         JFXButton button = new JFXButton(title);
         button.getStyleClass().add("dialog-accept");
@@ -547,13 +788,8 @@ public final class RemoteContentController {
         return button;
     }
 
-    /// Creates the explicit rejection/exit action.
-    private static JFXButton exitButton() {
-        return button("不同意 / 退出启动器", Platform::exit);
-    }
-
-    /// Formats synchronization timestamps for the current desktop timezone.
-    private static String formatTime(@Nullable Instant instant) {
+    /// Formats HTTP validation time in the desktop timezone.
+    private static String time(@Nullable Instant instant) {
         return instant == null ? "未知" : DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
                 .withZone(ZoneId.systemDefault()).format(instant);
     }

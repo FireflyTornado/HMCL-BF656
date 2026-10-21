@@ -25,6 +25,7 @@ import org.jetbrains.annotations.Nullable;
 import org.jetbrains.annotations.Unmodifiable;
 
 import java.io.IOException;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -34,142 +35,270 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.HexFormat;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
-/// Validated, immutable version-one server content and its display rules.
+/// Immutable instance-specific version-two manifests, content identities and resource ownership.
 @NotNullByDefault
 public final class RemoteContent {
     /// Prevents construction of the manifest utility.
     private RemoteContent() { }
 
-    /// Independently synchronized resources; filenames are relative to the configured base URL.
+    /// Types of instance content sharing one manifest and synchronization cycle.
     @NotNullByDefault
     public enum Kind {
-        /// Mandatory launcher agreement.
-        AGREEMENT("agreement.json", "agreement"),
-        /// Acknowledged startup messages.
-        NOTICES("notices.json", "notices"),
-        /// Dismissible home-page cards.
-        ANNOUNCEMENTS("announcements.json", "announcements");
-
-        /// Resource filename.
-        public final String filename;
-        /// Response member holding the content.
-        final String member;
-
-        /// Creates a resource descriptor.
-        Kind(String filename, String member) {
-            this.filename = filename;
-            this.member = member;
-        }
+        /// Agreement checked immediately before launching this instance.
+        AGREEMENT,
+        /// Notices shown when selecting this instance.
+        NOTICES,
+        /// Markdown cards displayed for the selected instance.
+        ANNOUNCEMENTS
     }
 
-    /// One published item; revisions are positive integers independent of launcher versions.
+    /// One remotely managed file; optional URL allows an explicitly indexed CDN resource.
     @NotNullByDefault
-    public record Item(String id, int revision, String title, String content, String publishedAt,
-                       @Nullable Instant startsAt, @Nullable Instant expiresAt, int priority,
-                       boolean pinned, String repeat) {
-        /// Includes content in identity so accidental same-revision edits also require acknowledgement.
-        public String key() {
-            return hash(id + "\n" + revision + "\n" + title + "\n" + content);
-        }
-
-        /// Whether the item is within its publication window.
-        public boolean active(Instant now) {
-            return (startsAt == null || !now.isBefore(startsAt))
-                    && (expiresAt == null || now.isBefore(expiresAt));
+    public record Resource(String path, String sha256, String url) {
+        /// Stable content-addressed filename retains the extension needed by document viewers.
+        public String cacheName() {
+            String name = path.substring(path.lastIndexOf('/') + 1);
+            int dot = name.lastIndexOf('.');
+            String extension = dot < 0 ? "bin" : name.substring(dot + 1).toLowerCase(java.util.Locale.ROOT);
+            return sha256 + "." + (extension.matches("[a-z0-9]{1,12}") ? extension : "bin");
         }
     }
 
-    /// Parses a complete resource; malformed items fail that resource without affecting other kinds.
-    public static @Unmodifiable List<Item> parse(Kind kind, String text) throws IOException {
-        try {
-            JsonObject root = JsonParser.parseString(text).getAsJsonObject();
-            if (integer(root, "schemaVersion", -1) != 1)
-                throw new IllegalArgumentException("Unsupported schemaVersion");
-            List<JsonObject> objects = new ArrayList<>();
-            if (kind == Kind.AGREEMENT) {
-                objects.add(root.getAsJsonObject(kind.member));
-            } else {
-                for (JsonElement element : root.getAsJsonArray(kind.member)) {
-                    if (objects.size() >= 100)
-                        throw new IllegalArgumentException("Too many items");
-                    objects.add(element.getAsJsonObject());
+    /// Published item metadata; Markdown bodies are stored separately from the manifest.
+    @NotNullByDefault
+    public record Item(String id, int revision, String title, String content, String contentFile,
+                       @Unmodifiable List<String> resources, String publishedAt,
+                       @Nullable Instant startsAt, @Nullable Instant expiresAt,
+                       int priority, boolean pinned, String repeat) {
+        /// Whether the item should currently be presented.
+        public boolean active(Instant now) {
+            return (startsAt == null || !now.isBefore(startsAt)) && !expired(now);
+        }
+
+        /// Future scheduled content is retained; only content past its expiry is disposable.
+        public boolean expired(Instant now) {
+            return expiresAt != null && !now.isBefore(expiresAt);
+        }
+
+        /// Every file owned by this item, including its Markdown body.
+        public @Unmodifiable Set<String> files() {
+            Set<String> result = new HashSet<>(resources);
+            if (!contentFile.isEmpty())
+                result.add(contentFile);
+            return Set.copyOf(result);
+        }
+    }
+
+    /// A complete instance catalog; one conditional request checks all three content types.
+    @NotNullByDefault
+    public record Manifest(String instanceKey, Item agreement, @Unmodifiable List<Item> notices,
+                           @Unmodifiable List<Item> announcements, @Unmodifiable Map<String, Resource> files) {
+        /// Returns an immutable list for one content type.
+        public @Unmodifiable List<Item> items(Kind kind) {
+            return switch (kind) {
+                case AGREEMENT -> List.of(agreement);
+                case NOTICES -> notices;
+                case ANNOUNCEMENTS -> announcements;
+            };
+        }
+
+        /// All current and future files, excluding expired notices and announcements.
+        public @Unmodifiable Set<Resource> needed(Instant now) {
+            Set<Resource> needed = new HashSet<>();
+            for (Kind kind : Kind.values()) {
+                for (Item item : items(kind)) {
+                    if (!item.expired(now)) {
+                        for (String path : item.files())
+                            needed.add(files.get(path));
+                    }
                 }
             }
-            List<Item> items = new ArrayList<>();
-            var ids = new HashSet<String>();
-            for (JsonObject object : objects) {
-                String id = required(object, "id", 200);
-                int revision = integer(object, "revision", 0);
-                if (revision < 1 || !ids.add(id))
-                    throw new IllegalArgumentException("Invalid revision or duplicate id");
-                String content = required(object, "content", 200_000);
-                ContentLinks.parse(content);
-                @Nullable Instant starts = timestamp(object, "startsAt");
-                @Nullable Instant expires = timestamp(object, "expiresAt");
-                if (starts != null && expires != null && !expires.isAfter(starts))
-                    throw new IllegalArgumentException("expiresAt must follow startsAt");
-                String repeat = optional(object, "repeat", "once");
-                if (!repeat.equals("once") && !repeat.equals("each_start"))
-                    throw new IllegalArgumentException("Unsupported repeat policy");
-                String published = optional(object, "publishedAt", "");
-                if (!published.isEmpty())
-                    OffsetDateTime.parse(published);
-                if (kind == Kind.AGREEMENT && (starts != null || expires != null))
-                    throw new IllegalArgumentException("Agreements cannot have a publication window");
-                items.add(new Item(id, revision, required(object, "title", 500), content, published,
-                        starts, expires, integer(object, "priority", 0),
-                        object.has("pinned") && object.get("pinned").getAsBoolean(), repeat));
-            }
-            // List.sort is stable, preserving server order when priorities match.
-            items.sort(Comparator.comparing(Item::pinned).reversed()
-                    .thenComparing(Comparator.comparingInt(Item::priority).reversed()));
-            return List.copyOf(items);
-        } catch (RuntimeException e) {
-            throw new IOException("Invalid " + kind.filename + ": " + e.getMessage(), e);
+            return Set.copyOf(needed);
+        }
+
+        /// Receipt identity changes when the body or any associated file changes, even with an unchanged revision.
+        public String key(Item item) {
+            StringBuilder identity = new StringBuilder(item.id()).append('\n').append(item.revision())
+                    .append('\n').append(item.title()).append('\n').append(item.content());
+            item.files().stream().sorted().forEach(path -> identity.append('\n').append(path)
+                    .append(':').append(files.get(path).sha256()));
+            return hash(identity.toString());
         }
     }
 
-    /// Reads a bounded nonempty string.
-    private static String required(JsonObject object, String name, int limit) {
-        String value = optional(object, name, "");
-        if (value.isBlank() || value.length() > limit)
-            throw new IllegalArgumentException("Missing or oversized " + name);
-        return value;
+    /// Parses and validates an instance-bound manifest before it can replace known-good metadata.
+    public static Manifest parse(String text, String expectedInstanceKey) throws IOException {
+        try {
+            JsonObject root = JsonParser.parseString(text).getAsJsonObject();
+            if (integer(root, "schemaVersion", 0) != 2)
+                throw new IllegalArgumentException("schemaVersion must be 2");
+            String key = required(root, "instanceKey", 64);
+            if (!key.matches("[A-Za-z0-9][A-Za-z0-9._-]{0,63}") || !key.equals(expectedInstanceKey))
+                throw new IllegalArgumentException("Manifest instanceKey does not match client configuration");
+            Map<String, Resource> files = new LinkedHashMap<>();
+            for (var entry : root.getAsJsonObject("files").entrySet()) {
+                String path = logicalPath(entry.getKey());
+                JsonObject descriptor = entry.getValue().getAsJsonObject();
+                String digest = required(descriptor, "sha256", 64).toLowerCase(java.util.Locale.ROOT);
+                if (!digest.matches("[0-9a-f]{64}"))
+                    throw new IllegalArgumentException("Invalid SHA-256: " + path);
+                String url = string(descriptor, "url", "");
+                if (!url.isEmpty())
+                    validateHttp(URI.create(url));
+                if (files.size() >= 500)
+                    throw new IllegalArgumentException("Too many managed files");
+                files.put(path, new Resource(path, digest, url));
+            }
+            Item agreement = item(root.getAsJsonObject("agreement"), true);
+            @Unmodifiable List<Item> notices = items(root, "notices");
+            @Unmodifiable List<Item> announcements = items(root, "announcements");
+            Manifest manifest = new Manifest(key, agreement, notices, announcements, Map.copyOf(files));
+            for (Kind kind : Kind.values()) {
+                for (Item item : manifest.items(kind)) {
+                    for (String path : item.files()) {
+                        if (!files.containsKey(path))
+                            throw new IllegalArgumentException("File missing from index: " + path);
+                    }
+                }
+            }
+            return manifest;
+        } catch (RuntimeException e) {
+            throw new IOException("Invalid manifest.json: " + e.getMessage(), e);
+        }
     }
 
-    /// Reads an optional string, rejecting implicit number/boolean conversion.
-    private static String optional(JsonObject object, String name, String fallback) {
-        if (!object.has(name))
+    /// Parses a bounded list and rejects duplicate IDs within the content type.
+    private static @Unmodifiable List<Item> items(JsonObject root, String name) throws IOException {
+        List<Item> result = new ArrayList<>();
+        Set<String> ids = new HashSet<>();
+        for (JsonElement element : root.getAsJsonArray(name)) {
+            Item item = item(element.getAsJsonObject(), false);
+            if (result.size() >= 100 || !ids.add(item.id()))
+                throw new IllegalArgumentException("Duplicate ID or too many items: " + name);
+            result.add(item);
+        }
+        result.sort(Comparator.comparing(Item::pinned).reversed()
+                .thenComparing(Comparator.comparingInt(Item::priority).reversed()));
+        return List.copyOf(result);
+    }
+
+    /// Reads one item with either inline rich text or a UTF-8 Markdown resource.
+    private static Item item(JsonObject json, boolean agreement) throws IOException {
+        int revision = integer(json, "revision", 0);
+        if (revision < 1)
+            throw new IllegalArgumentException("revision must be a positive integer");
+        String content = string(json, "content", "");
+        String file = string(json, "contentFile", "");
+        if (content.isBlank() == file.isBlank() || content.length() > 200_000)
+            throw new IllegalArgumentException("Specify exactly one of content and contentFile");
+        if (!content.isEmpty())
+            ContentLinks.parse(content);
+        if (!file.isEmpty()) {
+            logicalPath(file);
+            if (!file.toLowerCase(java.util.Locale.ROOT).endsWith(".md"))
+                throw new IllegalArgumentException("contentFile must be a Markdown file");
+        }
+        List<String> resources = new ArrayList<>();
+        if (json.has("resources")) {
+            for (JsonElement resource : json.getAsJsonArray("resources"))
+                resources.add(logicalPath(resource.getAsString()));
+        }
+        @Nullable Instant starts = timestamp(json, "startsAt");
+        @Nullable Instant expires = timestamp(json, "expiresAt");
+        if (agreement && (starts != null || expires != null))
+            throw new IllegalArgumentException("Agreements cannot expire or be scheduled");
+        if (starts != null && expires != null && !expires.isAfter(starts))
+            throw new IllegalArgumentException("expiresAt must follow startsAt");
+        String published = string(json, "publishedAt", "");
+        if (!published.isEmpty())
+            OffsetDateTime.parse(published);
+        String repeat = string(json, "repeat", "once");
+        if (!repeat.equals("once") && !repeat.equals("each_start"))
+            throw new IllegalArgumentException("Unsupported repeat policy");
+        return new Item(required(json, "id", 200), revision, required(json, "title", 500), content, file,
+                List.copyOf(resources), published, starts, expires, integer(json, "priority", 0),
+                bool(json, "pinned", false), repeat);
+    }
+
+    /// Accepts only unambiguous portable paths within the instance's public content namespace.
+    public static String logicalPath(String path) {
+        if (path.isBlank() || path.length() > 500 || path.startsWith("/") || path.contains("\\")
+                || path.contains(":") || path.contains("%") || path.contains("?") || path.contains("#")
+                || path.chars().anyMatch(c -> c < 32))
+            throw new IllegalArgumentException("Invalid relative resource path: " + path);
+        for (String component : path.split("/", -1)) {
+            if (component.isEmpty() || component.equals(".") || component.equals(".."))
+                throw new IllegalArgumentException("Resource path escapes its directory: " + path);
+        }
+        return path;
+    }
+
+    /// Requires HTTPS except for a loopback development endpoint.
+    public static void validateHttp(URI uri) {
+        boolean loopback = "http".equals(uri.getScheme()) && Set.of("localhost", "127.0.0.1", "[::1]")
+                .contains(uri.getHost() == null ? "" : uri.getHost());
+        if ((!"https".equals(uri.getScheme()) && !loopback) || uri.getHost() == null || uri.getUserInfo() != null)
+            throw new IllegalArgumentException("HTTPS required (loopback HTTP is allowed for tests)");
+    }
+
+    /// Reads a strictly typed optional string.
+    static String string(JsonObject json, String name, String fallback) {
+        if (!json.has(name))
             return fallback;
-        JsonElement value = object.get(name);
+        JsonElement value = json.get(name);
         if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isString())
             throw new IllegalArgumentException("Expected string: " + name);
         return value.getAsString();
     }
 
-    /// Reads an exact integer rather than silently truncating decimals.
-    private static int integer(JsonObject object, String name, int fallback) {
-        if (!object.has(name))
+    /// Reads a nonempty string with a bounded length.
+    private static String required(JsonObject json, String name, int limit) {
+        String value = string(json, name, "");
+        if (value.isBlank() || value.length() > limit)
+            throw new IllegalArgumentException("Missing or oversized " + name);
+        return value;
+    }
+
+    /// Reads a boolean without accepting string coercion.
+    static boolean bool(JsonObject json, String name, boolean fallback) {
+        if (!json.has(name))
             return fallback;
-        JsonElement value = object.get(name);
+        JsonElement value = json.get(name);
+        if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isBoolean())
+            throw new IllegalArgumentException("Expected boolean: " + name);
+        return value.getAsBoolean();
+    }
+
+    /// Reads an exact numeric integer.
+    private static int integer(JsonObject json, String name, int fallback) {
+        if (!json.has(name))
+            return fallback;
+        JsonElement value = json.get(name);
         if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isNumber())
             throw new IllegalArgumentException("Expected integer: " + name);
         return value.getAsBigDecimal().intValueExact();
     }
 
-    /// Reads an optional timestamp with an explicit UTC offset.
-    private static @Nullable Instant timestamp(JsonObject object, String name) {
-        String value = optional(object, name, "");
+    /// Reads a timestamp carrying an explicit UTC offset.
+    private static @Nullable Instant timestamp(JsonObject json, String name) {
+        String value = string(json, name, "");
         return value.isEmpty() ? null : OffsetDateTime.parse(value).toInstant();
     }
 
-    /// Produces a stable UTF-8 SHA-256 identifier for source and content state.
+    /// Computes an ASCII SHA-256 digest for a UTF-8 identifier.
     public static String hash(String value) {
+        return digest(value.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /// Computes a digest for downloaded bytes and local file verification.
+    public static String digest(byte[] bytes) {
         try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
-                    .digest(value.getBytes(StandardCharsets.UTF_8)));
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
         } catch (NoSuchAlgorithmException e) {
             throw new AssertionError(e);
         }

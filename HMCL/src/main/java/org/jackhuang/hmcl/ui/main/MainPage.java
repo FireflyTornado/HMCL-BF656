@@ -374,10 +374,8 @@ public final class MainPage extends StackPane implements DecoratorPage {
         Instances.launch(repository.getSelectedInstance());
     }
 
-    /// Installs the first game only after required server agreement confirmation has completed.
+    /// Installs a first game without requiring consent for an unrelated instance.
     private void launchNoGame() {
-        if (!org.jackhuang.hmcl.remote.RemoteContentController.canLaunch())
-            return;
         DownloadProvider downloadProvider = DownloadProviders.getDownloadProvider();
 
         Holder<GameInstanceID> instanceHolder = new Holder<>();

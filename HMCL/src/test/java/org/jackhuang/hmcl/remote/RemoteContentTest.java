@@ -24,134 +24,197 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/// Tests publication windows, independent consent identity, safe relative documents and durable state.
+/// Verifies instance identity, protocol receipts, Markdown resources and ownership-bounded cleanup.
 @NotNullByDefault
 final class RemoteContentTest {
-    /// An isolated installation, including paths with Chinese names and spaces.
+    /// Isolated instance `.launcher` directory.
     @TempDir
-    Path directory;
+    Path root;
 
-    /// Minimal valid agreement manifest reused by transport and state tests.
-    static final String AGREEMENT = """
-            {"schemaVersion":1,"agreement":{"id":"terms","revision":1,"title":"协议","content":"正文"}}
-            """;
-
-    /// Empty lists are valid server snapshots and remove previous content.
+    /// A key mismatch cannot bind another server instance's protocol or announcements.
     @Test
-    void acceptsEmptyListsAndRequiresAgreement() throws Exception {
-        assertTrue(RemoteContent.parse(RemoteContent.Kind.NOTICES, "{\"schemaVersion\":1,\"notices\":[]}").isEmpty());
-        assertTrue(RemoteContent.parse(RemoteContent.Kind.ANNOUNCEMENTS, "{\"schemaVersion\":1,\"announcements\":[]}").isEmpty());
-        assertThrows(IOException.class, () -> RemoteContent.parse(RemoteContent.Kind.AGREEMENT, "{\"schemaVersion\":1}"));
+    void requiresMatchingInstanceAndNewSchema() throws Exception {
+        String body = ContentFixtures.basic("main").toString();
+        assertEquals("main", RemoteContent.parse(body, "main").instanceKey());
+        assertThrows(IOException.class, () -> RemoteContent.parse(body, "test"));
+        assertThrows(IOException.class, () -> RemoteContent.parse(body.replace("\"schemaVersion\":2", "\"schemaVersion\":1"), "main"));
     }
 
-    /// Invalid schema, fractional versions and unsupported markup cannot become cached consent.
-    @ParameterizedTest
-    @ValueSource(strings = {
-            "{\"schemaVersion\":2}",
-            "{\"schemaVersion\":1,\"agreement\":null}",
-            "{\"schemaVersion\":1,\"agreement\":{\"id\":\"a\",\"revision\":1.5,\"title\":\"t\",\"content\":\"x\"}}",
-            "{\"schemaVersion\":1,\"agreement\":{\"id\":\"a\",\"revision\":1,\"title\":\"t\",\"content\":\"<script>x</script>\"}}"
-    })
-    void rejectsMalformedAgreement(String manifest) {
-        assertThrows(IOException.class, () -> RemoteContent.parse(RemoteContent.Kind.AGREEMENT, manifest));
+    /// Item identity changes when a Markdown payload changes even if the administrator forgets to bump revision.
+    @Test
+    void keysIncludeResourceDigestsButIgnoreDisplayOrdering() throws Exception {
+        var first = RemoteContent.parse(ContentFixtures.markdown("main", "# Old", new byte[0]).toString(), "main");
+        var nextJson = ContentFixtures.markdown("main", "# New", new byte[0]);
+        var next = RemoteContent.parse(nextJson.toString(), "main");
+        assertNotEquals(first.key(first.announcements().get(0)), next.key(next.announcements().get(0)));
+        nextJson.getAsJsonArray("announcements").get(0).getAsJsonObject().addProperty("priority", 999);
+        var reordered = RemoteContent.parse(nextJson.toString(), "main");
+        assertEquals(next.key(next.announcements().get(0)), reordered.key(reordered.announcements().get(0)));
     }
 
-    /// Same-ID revisions and accidental body changes both require fresh consent after restart.
+    /// Receipts belong to an instance directory and server source, and survive payload garbage collection.
     @Test
-    void persistsConsentAndSeparatesSources() throws Exception {
-        var first = RemoteContent.parse(RemoteContent.Kind.AGREEMENT, AGREEMENT).get(0);
-        var revision = RemoteContent.parse(RemoteContent.Kind.AGREEMENT, AGREEMENT.replace("\"revision\":1", "\"revision\":2")).get(0);
-        var changed = RemoteContent.parse(RemoteContent.Kind.AGREEMENT, AGREEMENT.replace("正文", "新正文")).get(0);
-        var store = new ContentStore(directory, "https://one.example/launcher/");
-        assertFalse(store.accepted(first));
-        store.accept(first);
-        var restored = new ContentStore(directory, "https://one.example/launcher/");
-        assertTrue(restored.accepted(first));
-        assertFalse(restored.accepted(revision));
-        assertFalse(restored.accepted(changed));
-        assertFalse(new ContentStore(directory, "https://two.example/launcher/").accepted(first));
-        restored.remember("notices", "message");
-        assertTrue(new ContentStore(directory, "https://one.example/launcher/").remembered("notices", "message"));
-        assertTrue(restored.accepted(first));
+    void isolatesAndPersistsReceipts() throws Exception {
+        var manifest = RemoteContent.parse(ContentFixtures.basic("main").toString(), "main");
+        var store = new ContentStore(root.resolve("A/.launcher"), "source-main");
+        store.accept(manifest);
+        store.remember("notices", "notice-key");
+        store.prune(Set.of());
+        var restored = new ContentStore(root.resolve("A/.launcher"), "source-main");
+        assertTrue(restored.accepted(manifest));
+        assertTrue(restored.remembered("notices", "notice-key"));
+        assertFalse(new ContentStore(root.resolve("B/.launcher"), "source-main").accepted(manifest));
+        assertFalse(new ContentStore(root.resolve("A/.launcher"), "different-source").accepted(manifest));
     }
 
-    /// A failed state write never produces consent even within the same process.
+    /// A failed write must never create in-memory-only consent.
     @Test
-    void doesNotAcceptWhenPersistenceFails() throws Exception {
-        Path file = directory.resolve("not-a-directory");
+    void rejectsUnsavableConsent() throws Exception {
+        Path file = root.resolve("not-a-directory");
         Files.writeString(file, "x");
         var store = new ContentStore(file, "source");
-        var item = RemoteContent.parse(RemoteContent.Kind.AGREEMENT, AGREEMENT).get(0);
-        assertThrows(IOException.class, () -> store.accept(item));
-        assertFalse(store.accepted(item));
+        var manifest = RemoteContent.parse(ContentFixtures.basic("main").toString(), "main");
+        assertThrows(IOException.class, () -> store.accept(manifest));
+        assertFalse(store.accepted(manifest));
     }
 
-    /// A start boundary is inclusive and expiry is exclusive, independent of timestamp timezone.
+    /// Expired and withdrawn payloads are deleted while shared active/future resources and manual documents remain.
     @Test
-    void honorsPublicationWindowAndPriority() throws Exception {
-        var items = RemoteContent.parse(RemoteContent.Kind.NOTICES, """
-                {"schemaVersion":1,"notices":[
-                  {"id":"a","revision":1,"title":"a","content":"a","priority":0},
-                  {"id":"b","revision":1,"title":"b","content":"b","priority":10,
-                   "startsAt":"2026-10-21T12:00:00+08:00","expiresAt":"2026-10-21T13:00:00+08:00"}
-                ]}
-                """);
-        assertEquals("b", items.get(0).id());
-        assertFalse(items.get(0).active(Instant.parse("2026-10-21T03:59:59Z")));
-        assertTrue(items.get(0).active(Instant.parse("2026-10-21T04:00:00Z")));
-        assertFalse(items.get(0).active(Instant.parse("2026-10-21T05:00:00Z")));
+    void cleansManagedFilesOnly() throws Exception {
+        var store = new ContentStore(root, "source");
+        var old = new RemoteContent.Resource("announcements/old.md", RemoteContent.hash("old"), "");
+        var image = new RemoteContent.Resource("announcements/shared.png", RemoteContent.hash("image"), "");
+        store.install(old, "old".getBytes(StandardCharsets.UTF_8));
+        store.install(image, "image".getBytes(StandardCharsets.UTF_8));
+        Path manual = root.resolve("client/documents/用户协议.html");
+        Files.createDirectories(manual.getParent());
+        Files.writeString(manual, "manual");
+        Path unknown = root.resolve("server/files/user-note.txt");
+        Files.writeString(unknown, "not managed");
+        store.prune(Set.of(image));
+        assertFalse(Files.exists(store.file(old)));
+        assertTrue(Files.exists(store.file(image)));
+        assertTrue(Files.exists(manual));
+        assertTrue(Files.exists(unknown));
+        store.prune(Set.of());
+        assertFalse(Files.exists(store.file(image)));
     }
 
-    /// Relative files are resolved against the supplied installation, including percent-encoded Unicode.
+    /// Wrong bytes and later local corruption cannot be reused as a successful digest cache hit.
     @Test
-    void opensRelativeDocumentsAndRequiresFilesBeforeConsent() throws Exception {
-        Path documents = Files.createDirectories(directory.resolve("documents"));
-        Path document = documents.resolve("用户 协议.html");
-        Files.writeString(document, "terms");
-        assertEquals(document.toRealPath().toUri(), ContentLinks.resolve(directory, "documents/用户 协议.html"));
-        assertEquals(document.toRealPath().toUri(), ContentLinks.resolve(directory,
-                "documents/%E7%94%A8%E6%88%B7%20%E5%8D%8F%E8%AE%AE.html"));
-        var item = RemoteContent.parse(RemoteContent.Kind.AGREEMENT,
-                AGREEMENT.replace("正文", "<a href='documents/用户 协议.html'>协议</a>")).get(0);
-        ContentLinks.validateAgreement(directory, item);
-        Files.delete(document);
-        assertThrows(IOException.class, () -> ContentLinks.validateAgreement(directory, item));
+    void validatesPayloadHashes() throws Exception {
+        var store = new ContentStore(root, "source");
+        var resource = new RemoteContent.Resource("a.md", RemoteContent.hash("expected"), "");
+        assertThrows(IOException.class, () -> store.install(resource, "wrong".getBytes(StandardCharsets.UTF_8)));
+        assertFalse(Files.exists(store.file(resource)));
+        store.install(resource, "expected".getBytes(StandardCharsets.UTF_8));
+        assertTrue(store.verified(resource));
+        Files.writeString(store.file(resource), "changed");
+        assertFalse(store.verified(resource));
     }
 
-    /// Remote text cannot open executables, invoke launcher protocols or escape via encoded paths.
+    /// Relative resource identifiers cannot escape the server namespace or become absolute Windows paths.
     @ParameterizedTest
-    @ValueSource(strings = {"../outside.txt", "%2e%2e/outside.txt", "/absolute.txt", "C:/Windows/test.txt",
-            "file:///C:/Windows/test.txt", "hmcl://game/launch", "javascript:alert(1)",
-            "//server/share.txt", "documents\\test.txt", "tool.exe", "missing.pdf"})
-    void rejectsUnsafeOrMissingLinks(String href) {
-        assertThrows(IOException.class, () -> ContentLinks.resolve(directory, href));
+    @ValueSource(strings = {"../x.md", "/x.md", "a/../x.md", "a//b.png", "C:/x.md", "a\\x.md", "%2e%2e/x.md", "a.md?x"})
+    void rejectsEscapingResourcePaths(String path) {
+        assertThrows(IllegalArgumentException.class, () -> RemoteContent.logicalPath(path));
     }
 
-    /// Rich text is bounded to display elements and does not expand declarations or external entities.
+    /// Local document links now resolve beneath the instance `.launcher` and remain required before consent.
     @Test
-    void rejectsEntitiesAndParsesSupportedMarkup() throws Exception {
+    void validatesInstanceLocalAgreementDocuments() throws Exception {
+        Path file = root.resolve("client/documents/用户 协议.html");
+        Files.createDirectories(file.getParent());
+        Files.writeString(file, "terms");
+        var json = ContentFixtures.basic("main");
+        json.getAsJsonObject("agreement").addProperty("content", "请阅读<a href='client/documents/用户 协议.html'>协议</a>");
+        var manifest = RemoteContent.parse(json.toString(), "main");
+        var store = new ContentStore(root, "source");
+        ContentDocuments.validate(root, manifest, manifest.agreement(), store, URI.create("https://example.com/main/"), true);
+        assertEquals(file.toRealPath().toUri(), ContentLinks.resolve(root, "client/documents/用户 协议.html"));
+        Files.delete(file);
+        assertThrows(IOException.class, () -> ContentDocuments.validate(root, manifest, manifest.agreement(), store,
+                URI.create("https://example.com/main/"), true));
+    }
+
+    /// Markdown images resolve against the Markdown URL, not the EXE or game working directory.
+    @Test
+    void resolvesAndRequiresIndexedImages() throws Exception {
+        byte[] image = "image-bytes".getBytes(StandardCharsets.UTF_8);
+        String body = "# News\n![banner](assets/banner.png)";
+        var manifest = RemoteContent.parse(ContentFixtures.markdown("main", body, image).toString(), "main");
+        var store = new ContentStore(root, "source");
+        store.install(manifest.files().get(ContentFixtures.BODY), body.getBytes(StandardCharsets.UTF_8));
+        store.install(manifest.files().get(ContentFixtures.IMAGE), image);
+        URI endpoint = URI.create("https://example.com/instances/main/");
+        var item = manifest.announcements().get(0);
+        assertEquals(manifest.files().get(ContentFixtures.IMAGE), ContentDocuments.resource(manifest, item, endpoint, "assets/banner.png"));
+        ContentDocuments.validate(root, manifest, item, store, endpoint, false);
+        Files.delete(store.file(manifest.files().get(ContentFixtures.IMAGE)));
+        assertThrows(IOException.class, () -> ContentDocuments.validate(root, manifest, item, store, endpoint, false));
+    }
+
+    /// Future resources stay referenced, while expiry is exclusive and does not depend on publication labels.
+    @Test
+    void retainsScheduledContentAndDropsExpiredReferences() throws Exception {
+        var json = ContentFixtures.markdown("main", "future", new byte[0]);
+        var item = json.getAsJsonArray("announcements").get(0).getAsJsonObject();
+        item.addProperty("startsAt", "2026-10-23T12:00:00+08:00");
+        item.addProperty("expiresAt", "2026-10-24T12:00:00+08:00");
+        var manifest = RemoteContent.parse(json.toString(), "main");
+        Instant before = Instant.parse("2026-10-23T00:00:00Z");
+        assertFalse(manifest.announcements().get(0).active(before));
+        assertEquals(1, manifest.needed(before).size());
+        assertTrue(manifest.needed(Instant.parse("2026-10-24T04:00:00Z")).isEmpty());
+    }
+
+    /// Configuration lives under the instance and an explicit key determines the public server directory.
+    @Test
+    void loadsInstanceConfiguration() throws Exception {
+        assertFalse(ContentSync.Config.load(root).enabled());
+        Files.createDirectories(root.resolve("client"));
+        Files.writeString(root.resolve("client/config.json"), """
+                {"enabled":true,"serverBaseUrl":"https://example.com/launcher/","instanceKey":"bf656-main"}
+                """);
+        var config = ContentSync.Config.load(root);
+        assertEquals("https://example.com/launcher/instances/bf656-main/", config.endpoint().toString());
+        assertThrows(IllegalArgumentException.class, () -> new ContentSync.Config(true, URI.create("http://example.com/"), "main").validate());
+        assertThrows(IllegalArgumentException.class, () -> new ContentSync.Config(true, URI.create("https://example.com/"), "../other").validate());
+    }
+
+    /// Restricted inline markup cannot expand external XML entities.
+    @Test
+    void rejectsXmlEntities() {
         assertThrows(IOException.class, () -> ContentLinks.parse("<!DOCTYPE x [<!ENTITY e SYSTEM 'file:///secret'>]>&e;"));
-        var segments = ContentLinks.parse("请阅读<b>协议</b><br/><a href='documents/terms.pdf'>打开</a>");
-        assertEquals(4, segments.size());
-        assertTrue(segments.get(1).bold());
-        assertEquals("documents/terms.pdf", segments.get(3).href());
     }
 
-    /// Public endpoints must use HTTPS; loopback HTTP remains available for deployment checks.
+    /// Expired inline text is removed from persisted metadata while its conditional HTTP validator remains usable.
     @Test
-    void validatesConfiguration() throws Exception {
-        assertFalse(ContentSync.Config.load(directory).enabled());
-        ContentSync.Config.validateBase(java.net.URI.create("http://127.0.0.1:8000/"));
-        assertThrows(IOException.class, () -> ContentSync.Config.validateBase(java.net.URI.create("http://example.com/")));
-        assertThrows(IOException.class, () -> ContentSync.Config.validateBase(java.net.URI.create("https://example.com/launcher")));
-        Files.createDirectories(directory.resolve(".hmcl"));
-        Files.writeString(directory.resolve(".hmcl/remote-content.json"), "broken");
-        assertThrows(IOException.class, () -> ContentSync.Config.load(directory));
+    void compactsExpiredBodiesAndKeepsEtag() throws Exception {
+        var json = ContentFixtures.basic("main");
+        var notice = new com.google.gson.JsonObject();
+        notice.addProperty("id", "expired");
+        notice.addProperty("revision", 1);
+        notice.addProperty("title", "old");
+        notice.addProperty("content", "expired-secret-marker");
+        notice.addProperty("expiresAt", "2026-10-20T00:00:00Z");
+        json.getAsJsonArray("notices").add(notice);
+        var store = new ContentStore(root, "source");
+        var cache = new ContentStore.Cache(json.toString(), "\"etag\"", Instant.EPOCH);
+        store.cache(cache);
+        var compacted = store.compact(cache, "main", Instant.parse("2026-10-21T00:00:00Z"));
+        assertFalse(compacted.body().contains("expired-secret-marker"));
+        assertEquals("\"etag\"", compacted.etag());
+        assertTrue(RemoteContent.parse(compacted.body(), "main").notices().isEmpty());
+        assertFalse(Files.readString(root.resolve("server/manifest.json")).contains("expired-secret-marker"));
     }
 }

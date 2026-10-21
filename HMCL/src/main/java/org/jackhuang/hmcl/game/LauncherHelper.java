@@ -136,17 +136,15 @@ public final class LauncherHelper {
         disableOfflineSkin = true;
     }
 
-    /// Starts a game or creates a script only after the installation's remote agreement gate permits it.
+    /// Starts this captured instance only after its own current agreement has been accepted.
     public void launch() {
         FXUtils.checkFxUserThread();
 
-        if (!RemoteContentController.canLaunch())
-            return;
-
-        LOG.info("Launching game instance: " + gameInstance.getId());
-
-        Controllers.dialog(launchingStepsPane);
-        launch0();
+        RemoteContentController.beforeLaunch(gameInstance, () -> {
+            LOG.info("Launching game instance: " + gameInstance.getId());
+            Controllers.dialog(launchingStepsPane);
+            launch0();
+        });
     }
 
     public void makeLaunchScript(Path scriptFile) {
