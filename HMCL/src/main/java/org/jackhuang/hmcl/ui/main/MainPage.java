@@ -110,6 +110,8 @@ public final class MainPage extends StackPane implements DecoratorPage {
     private TransitionPane announcementPane;
     /// Current server announcement card, independently refreshed and removed by the remote content coordinator.
     private @Nullable Region remoteAnnouncements;
+    /// Bottom controls determine the space reserved below the announcement feed.
+    private final HBox launchPane = new HBox();
     private final StackPane updatePane;
     private final JFXButton menuButton;
 
@@ -217,7 +219,6 @@ public final class MainPage extends StackPane implements DecoratorPage {
             updatePane.getChildren().setAll(hBox, closeUpdateButton);
         }
 
-        HBox launchPane = new HBox();
         launchPane.getStyleClass().add("launch-pane");
         FXUtils.onChangeAndOperate(selectedRepositorySnapshot, ignored -> mutableInstances.setAll(GameDirectoryManager.getSelectedRepository().getDisplayInstances().toList()));
         FXUtils.onScroll(launchPane, instances, list -> {
@@ -317,6 +318,10 @@ public final class MainPage extends StackPane implements DecoratorPage {
         }
 
         getChildren().addAll(updatePane, launchPane);
+        launchPane.heightProperty().addListener((observable, oldValue, newValue) -> {
+            if (remoteAnnouncements != null)
+                StackPane.setMargin(remoteAnnouncements, new Insets(0, 0, newValue.doubleValue() + 16, 0));
+        });
 
     }
 
@@ -331,6 +336,7 @@ public final class MainPage extends StackPane implements DecoratorPage {
         }
         if (card != null) {
             StackPane.setAlignment(card, Pos.TOP_LEFT);
+            StackPane.setMargin(card, new Insets(0, 0, launchPane.getHeight() + 16, 0));
             getChildren().add(0, card);
         }
     }

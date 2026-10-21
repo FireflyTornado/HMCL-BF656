@@ -40,6 +40,19 @@ final class RemoteContentTest {
     @TempDir
     Path root;
 
+    /// Local file dispatch receives the original Unicode path rather than a percent-encoded URL string.
+    @Test
+    void localDocumentUrisRoundTripUnicodeSpacesAndPercentSigns() throws Exception {
+        Path file = root.resolve("client/documents/用户 协议 100%.html");
+        Files.createDirectories(file.getParent());
+        Files.writeString(file, "<html>协议</html>");
+        String href = new URI(null, null, "client/documents/用户 协议 100%.html", null).toASCIIString();
+        URI target = ContentLinks.resolve(root, href);
+        assertEquals("file", target.getScheme());
+        assertEquals(file.toRealPath(), Path.of(target));
+        assertFalse(Path.of(target).toString().contains("%E7"));
+    }
+
     /// A key mismatch cannot bind another server instance's protocol or announcements.
     @Test
     void requiresMatchingInstanceAndNewSchema() throws Exception {

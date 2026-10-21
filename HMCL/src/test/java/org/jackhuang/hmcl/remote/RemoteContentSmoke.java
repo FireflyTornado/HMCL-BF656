@@ -24,7 +24,11 @@ import javafx.scene.Node;
 import javafx.scene.Parent;
 import javafx.scene.Scene;
 import javafx.scene.control.ButtonBase;
+import javafx.scene.control.CheckBox;
+import javafx.scene.control.ScrollPane;
 import javafx.scene.image.ImageView;
+import javafx.scene.layout.Region;
+import javafx.scene.layout.VBox;
 import org.jackhuang.hmcl.Launcher;
 import org.jackhuang.hmcl.game.GameInstanceID;
 import org.jackhuang.hmcl.game.HMCLGameInstance;
@@ -119,6 +123,9 @@ public final class RemoteContentSmoke {
         repo.refresh();
         HMCLGameInstance gameA = onFx(() -> repo.getInstance(aId));
         HMCLGameInstance gameB = onFx(() -> repo.getInstance(bId));
+        var initial = RemoteContent.parse(a.toString(), "a");
+        new ContentStore(RemoteContentController.root(gameA), base + "instances/a/")
+                .remember("announcements", initial.key(initial.announcements().get(0)));
         Decorator decorator = onFx(() -> new Decorator(Controllers.getRootPage(), stage -> { }));
         var field = Controllers.class.getDeclaredField("decorator");
         field.setAccessible(true);
@@ -139,22 +146,40 @@ public final class RemoteContentSmoke {
             require(decorator.getRoot().lookup("#bf656-instance-agreement") == null, "Selecting must not present a protocol");
             snapshot(scene, output.resolve("instance-notice.png"));
             findButton(decorator.getRoot(), "我已知晓").fire();
+            verifyAnnouncements(scene, output);
             return true;
         });
         AtomicInteger launchedA = new AtomicInteger();
         AtomicInteger launchedB = new AtomicInteger();
-        onFx(() -> {
+        double imageProtocolHeight = onFx(() -> {
             RemoteContentController.beforeLaunch(gameA, launchedA::incrementAndGet);
             require(launchedA.get() == 0, "First launch must await consent");
+            require(findButton(decorator.getRoot(), "同意").isDisabled(), "Agreement must start unchecked");
+            findButton(decorator.getRoot(), "同意").fire();
+            require(launchedA.get() == 0, "Unchecked consent must not authorize launch");
             snapshot(scene, output.resolve("instance-agreement.png"));
             SettingsManager.settings().getThemeAppearanceOverrides().add(LauncherSettings.THEME_APPEARANCE_BRIGHTNESS_MODE);
             SettingsManager.settings().themeBrightnessModeProperty().set("dark");
             snapshot(scene, output.resolve("instance-agreement-dark.png"));
             SettingsManager.settings().themeBrightnessModeProperty().set("light");
-            findButton(decorator.getRoot(), "不同意 / 取消启动").fire();
+            verifyAgreementSizes(scene, output, a);
+            return showImageProtocol(scene, gameA, base, a);
+        });
+        await(() -> imageReady(agreementPane(scene), "协议动态尺寸图片"));
+        onFx(() -> {
+            snapshot(scene, output.resolve("agreement-image-loaded.png"));
+            require(agreementPane(scene).getHeight() > imageProtocolHeight + 20,
+                    "Decoded protocol images must increase natural dialog height");
+            verifyAgreementBounds(scene);
+            updateAgreement(scene, a);
+            findButton(decorator.getRoot(), "不同意").fire();
             require(launchedA.get() == 0, "Refusal must cancel without launching");
             RemoteContentController.beforeLaunch(gameA, launchedA::incrementAndGet);
-            findButton(decorator.getRoot(), "同意并启动").fire();
+            consent(decorator.getRoot()).setSelected(true);
+            // Re-render the same revision while checked, as file-download progress does in production.
+            refreshAgreement();
+            require(consent(decorator.getRoot()).isSelected(), "Progress must preserve acknowledgement of the same protocol");
+            findButton(decorator.getRoot(), "同意").fire();
             return true;
         });
         await(() -> launchedA.get() == 1);
@@ -171,13 +196,15 @@ public final class RemoteContentSmoke {
         onFx(() -> {
             require(decorator.getRoot().lookup("#bf656-instance-agreement") == null, "A protocol update must wait for the next game launch");
             RemoteContentController.beforeLaunch(gameA, launchedA::incrementAndGet);
-            require(hasButton(decorator.getRoot(), "同意并启动"), "Updated protocol must require fresh consent");
+            require(hasButton(decorator.getRoot(), "同意"), "Updated protocol must require fresh consent");
+            require(!consent(decorator.getRoot()).isSelected(), "Updated protocol must reset acknowledgement");
             snapshot(scene, output.resolve("instance-updated-agreement.png"));
-            b.getAsJsonArray("announcements").get(0).getAsJsonObject().addProperty("expiresAt", Instant.now().plusSeconds(4).toString());
+            for (var entry : b.getAsJsonArray("announcements"))
+                entry.getAsJsonObject().addProperty("expiresAt", Instant.now().plusSeconds(4).toString());
             RemoteContentController.beforeLaunch(gameB, launchedB::incrementAndGet);
             return true;
         });
-        await(() -> hasButton(decorator.getRoot(), "同意并启动") && bChecks.get() == 1);
+        await(() -> hasButton(decorator.getRoot(), "同意") && bChecks.get() == 1);
         onFx(() -> {
             require(launchedB.get() == 0, "A's consent must not authorize B");
             repo.setSelectedInstance(gameA);
@@ -185,7 +212,9 @@ public final class RemoteContentSmoke {
             require(decorator.getRoot().lookup("#bf656-instance-agreement") == null, "Old confirmation must be removed");
             repo.setSelectedInstance(gameB);
             RemoteContentController.beforeLaunch(gameB, launchedB::incrementAndGet);
-            findButton(decorator.getRoot(), "同意并启动").fire();
+            require(!consent(decorator.getRoot()).isSelected(), "Another instance must start with unchecked acknowledgement");
+            consent(decorator.getRoot()).setSelected(true);
+            findButton(decorator.getRoot(), "同意").fire();
             return true;
         });
         await(() -> launchedB.get() == 1);
@@ -215,6 +244,10 @@ public final class RemoteContentSmoke {
     /// Creates a public fixture catalog with one notice and one local-document protocol.
     private static JsonObject catalog(String key, String markdown, byte[] image) {
         JsonObject root = ContentFixtures.markdown(key, markdown, image);
+        JsonObject second = root.getAsJsonArray("announcements").get(0).getAsJsonObject().deepCopy();
+        second.addProperty("id", "second-news");
+        second.addProperty("title", "第二条独立公告");
+        root.getAsJsonArray("announcements").add(second);
         root.getAsJsonObject("agreement").addProperty("content", "请阅读<a href='client/documents/用户协议.html'>本实例协议</a>。不同意只取消本次启动。");
         JsonObject notice = new JsonObject();
         notice.addProperty("id", "notice-" + key);
@@ -250,7 +283,11 @@ public final class RemoteContentSmoke {
     private static void await(BooleanSupplier condition) throws Exception {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
         while (System.nanoTime() < deadline) {
-            if (onFx(condition::getAsBoolean))
+            if (onFx(() -> {
+                // No stage is shown, so explicitly request pulses for time-based production transitions.
+                Platform.requestNextPulse();
+                return condition.getAsBoolean();
+            }))
                 return;
             Thread.sleep(25);
         }
@@ -272,6 +309,149 @@ public final class RemoteContentSmoke {
         } catch (ReflectiveOperationException e) {
             throw new AssertionError(e);
         }
+    }
+
+    /// Replays a normal sync callback without a network request or a new launch request.
+    private static void refreshAgreement() throws Exception {
+        var field = RemoteContentController.class.getDeclaredField("instance");
+        field.setAccessible(true);
+        Object controller = field.get(null);
+        var current = RemoteContentController.class.getDeclaredField("current");
+        current.setAccessible(true);
+        Object session = current.get(controller);
+        var result = session.getClass().getDeclaredField("result");
+        result.setAccessible(true);
+        var receive = RemoteContentController.class.getDeclaredMethod("receive", session.getClass(), ContentSync.Result.class);
+        receive.setAccessible(true);
+        receive.invoke(controller, session, result.get(session));
+    }
+
+    /// Finds the actual acknowledgement control and checks the requested wording.
+    private static CheckBox consent(Node root) {
+        @Nullable CheckBox box = (CheckBox) root.lookup("#bf656-agreement-consent");
+        require(box != null && "我已阅读并同意遵守上述协议与规定".equals(box.getText()), "Missing acknowledgement checkbox");
+        return java.util.Objects.requireNonNull(box);
+    }
+
+    /// Tests short, medium and long text, compact failure states, proportional resizing and the absolute ceiling.
+    private static void verifyAgreementSizes(Scene scene, Path output, JsonObject catalog) throws Exception {
+        Region pane = agreementPane(scene);
+        snapshot(scene, output.resolve("agreement-short.png"));
+        double shortHeight = pane.getHeight();
+        require(shortHeight < 300, "Short protocol must not retain the old fixed-height blank space");
+        require(!hasLabel(pane, "不同意将取消本次游戏启动。"), "Removed footer text must not remain");
+        verifyAgreementBounds(scene);
+        JsonObject medium = catalog.deepCopy();
+        medium.getAsJsonObject("agreement").addProperty("content", "协议说明\n" + "请遵守服务器规则并尊重其他玩家。\n".repeat(10));
+        updateAgreement(scene, medium);
+        snapshot(scene, output.resolve("agreement-medium.png"));
+        require(pane.getHeight() > shortHeight + 60, "Medium protocol must grow with the text");
+        verifyAgreementBounds(scene);
+        JsonObject longText = catalog.deepCopy();
+        longText.getAsJsonObject("agreement").addProperty("content", "完整服务器协议\n" + "请遵守服务器规则并尊重其他玩家。\n".repeat(100));
+        updateAgreement(scene, longText);
+        snapshot(scene, output.resolve("agreement-long.png"));
+        verifyAgreementBounds(scene);
+        ScrollPane body = (ScrollPane) java.util.Objects.requireNonNull(pane.lookup("#bf656-agreement-body"));
+        require(body.getContent().getLayoutBounds().getHeight() > body.getViewportBounds().getHeight() + 100,
+                "Long protocols must scroll only within their body");
+        double beforeResize = pane.getHeight();
+        scene.getRoot().resize(820, 490);
+        scene.getRoot().layout();
+        verifyAgreementBounds(scene);
+        require(pane.getHeight() < beforeResize - 80, "Dialog maximum height must follow a smaller window");
+        scene.getRoot().resize(1300, 1100);
+        scene.getRoot().layout();
+        verifyAgreementBounds(scene);
+        require(Math.abs(pane.getHeight() - 720) < 2, "Large windows must retain the 720-unit ceiling");
+        scene.getRoot().resize(1000, 650);
+        scene.getRoot().layout();
+        var update = pane.getClass().getDeclaredMethod("update", RemoteContent.Manifest.class, String.class);
+        update.setAccessible(true);
+        update.invoke(pane, null, "暂时无法获取协议，请稍后重试。");
+        snapshot(scene, output.resolve("agreement-unavailable.png"));
+        require(pane.getHeight() < 300, "Loading and error states must also use compact natural height");
+        updateAgreement(scene, catalog);
+    }
+
+    /// Uses an actual cached Markdown body to verify asynchronous image-dependent layout.
+    private static double showImageProtocol(Scene scene, HMCLGameInstance game, String base, JsonObject catalog) throws Exception {
+        JsonObject illustrated = catalog.deepCopy();
+        String markdown = "# 图文协议\n\n![协议动态尺寸图片](" + ContentFixtures.IMAGE + ")";
+        ContentFixtures.file(illustrated, "protocol-layout.md", markdown.getBytes(StandardCharsets.UTF_8));
+        JsonObject protocol = illustrated.getAsJsonObject("agreement");
+        protocol.remove("content");
+        protocol.addProperty("contentFile", "protocol-layout.md");
+        protocol.add("resources", catalog.getAsJsonArray("announcements").get(0).getAsJsonObject().getAsJsonArray("resources").deepCopy());
+        var manifest = RemoteContent.parse(illustrated.toString(), catalog.get("instanceKey").getAsString());
+        var store = new ContentStore(RemoteContentController.root(game), base + "instances/a/");
+        store.install(manifest.files().get("protocol-layout.md"), markdown.getBytes(StandardCharsets.UTF_8));
+        updateAgreement(scene, illustrated);
+        scene.getRoot().applyCss();
+        scene.getRoot().layout();
+        return agreementPane(scene).getHeight();
+    }
+
+    /// Presents another protocol payload through the normal dialog update path without changing launch ownership.
+    private static void updateAgreement(Scene scene, JsonObject catalog) throws Exception {
+        Region pane = agreementPane(scene);
+        var update = pane.getClass().getDeclaredMethod("update", RemoteContent.Manifest.class, String.class);
+        update.setAccessible(true);
+        update.invoke(pane, RemoteContent.parse(catalog.toString(), catalog.get("instanceKey").getAsString()), null);
+        scene.getRoot().applyCss();
+        scene.getRoot().layout();
+    }
+
+    /// Returns the currently displayed protocol dialog from the real skinned scene.
+    private static Region agreementPane(Scene scene) {
+        return (Region) java.util.Objects.requireNonNull(scene.getRoot().lookup("#bf656-instance-agreement"));
+    }
+
+    /// Requires the entire dialog and all fixed controls to remain inside the proportional height limit.
+    private static void verifyAgreementBounds(Scene scene) {
+        Region pane = agreementPane(scene);
+        double limit = Math.min(720, Controllers.getDecorator().getDialogContainer().getHeight() * 0.8);
+        require(pane.getHeight() <= limit + 1, "Whole dialog must obey the window-dependent height limit");
+        for (Node control : java.util.List.of(consent(pane), findButton(pane, "同意"), findButton(pane, "不同意"))) {
+            var bounds = pane.sceneToLocal(control.localToScene(control.getLayoutBounds()));
+            require(bounds.getMinY() >= 0 && bounds.getMaxY() <= pane.getHeight() + 1,
+                    "Acknowledgement and actions must stay visible outside the scrolling body");
+        }
+    }
+
+    /// Finds unwanted footer labels without matching words inside a Markdown text flow.
+    private static boolean hasLabel(Node root, String text) {
+        return root instanceof javafx.scene.control.Label label && text.equals(label.getText())
+                || root instanceof Parent parent && parent.getChildrenUnmodifiable().stream().anyMatch(child -> hasLabel(child, text));
+    }
+
+    /// Checks full-width cards, independent collapse, legacy receipts and resize behavior in a real scene.
+    private static void verifyAnnouncements(Scene scene, Path output) throws Exception {
+        snapshot(scene, output.resolve("announcement-expanded.png"));
+        ScrollPane feed = (ScrollPane) java.util.Objects.requireNonNull(scene.getRoot().lookup("#bf656-announcement-feed"));
+        VBox entries = (VBox) feed.getContent();
+        require(entries.getChildren().size() == 2, "All active announcements must be shown");
+        VBox first = (VBox) entries.getChildren().get(0);
+        VBox second = (VBox) entries.getChildren().get(1);
+        Region firstBody = (Region) first.getChildren().get(1);
+        Region secondBody = (Region) second.getChildren().get(1);
+        require(firstBody.isManaged() && secondBody.isManaged(), "Every card must start expanded");
+        require(first.lookupAll(".scroll-pane").isEmpty(), "Cards must not contain nested scrollbars");
+        require(first.getWidth() >= feed.getViewportBounds().getWidth() - 20, "Cards must fill the viewport width");
+        require(!hasButton(first, "关闭") && !hasButton(first, "阅读全文"), "Cards must have no dismissal or full-text actions");
+        double height = first.getHeight();
+        ButtonBase toggle = (ButtonBase) java.util.Objects.requireNonNull(first.lookup(".toggle-icon"));
+        toggle.fire();
+        snapshot(scene, output.resolve("announcement-collapsed.png"));
+        require(!firstBody.isManaged() && secondBody.isManaged(), "Collapse must affect only its own card");
+        require(first.getHeight() < height, "Collapsed cards must release their body height");
+        toggle.fire();
+        double width = first.getWidth();
+        scene.getRoot().resize(1300, 850);
+        scene.getRoot().layout();
+        require(first.getWidth() > width + 200, "Card width must grow with the window");
+        scene.getRoot().resize(1000, 650);
+        scene.getRoot().layout();
     }
 
     /// Runs one action on the FX thread with a bounded wait.
@@ -302,8 +482,13 @@ public final class RemoteContentSmoke {
 
     /// Requires the remote image fixture to have actually decoded into an image view.
     private static boolean imageReady(Node root) {
-        return root instanceof ImageView image && image.getImage() != null && "下载并缓存的示例图片".equals(image.getAccessibleText())
-                || root instanceof Parent parent && parent.getChildrenUnmodifiable().stream().anyMatch(RemoteContentSmoke::imageReady);
+        return imageReady(root, "下载并缓存的示例图片");
+    }
+
+    /// Identifies a completed image in one document without confusing it with images in background cards.
+    private static boolean imageReady(Node root, String description) {
+        return root instanceof ImageView image && image.getImage() != null && description.equals(image.getAccessibleText())
+                || root instanceof Parent parent && parent.getChildrenUnmodifiable().stream().anyMatch(child -> imageReady(child, description));
     }
 
     /// Writes a real themed scene snapshot without showing a desktop window.

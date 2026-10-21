@@ -23,13 +23,13 @@ import javafx.geometry.Insets;
 import javafx.scene.control.Hyperlink;
 import javafx.scene.control.Label;
 import javafx.scene.control.Separator;
-import javafx.scene.control.TextArea;
 import javafx.scene.image.Image;
 import javafx.scene.image.ImageView;
 import javafx.scene.layout.ColumnConstraints;
 import javafx.scene.layout.GridPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
+import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
 import javafx.scene.text.Text;
 import javafx.scene.text.TextFlow;
@@ -44,6 +44,7 @@ import org.jackhuang.hmcl.ui.image.ImageUtils;
 import org.jetbrains.annotations.NotNullByDefault;
 import org.jetbrains.annotations.Nullable;
 
+import java.awt.Desktop;
 import java.io.IOException;
 import java.net.URI;
 import java.nio.file.Files;
@@ -52,6 +53,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.function.Consumer;
 
 /// Native JavaFX Markdown view with themed typography, tables, links and cached responsive images.
@@ -69,6 +71,8 @@ public final class MarkdownView extends VBox {
     private final URI endpoint;
     /// User-visible error callback owned by the containing card or dialog.
     private final Consumer<String> error;
+    /// Visible recovery action when a local document has no working default application.
+    private final Hyperlink documentFolder = new Hyperlink("打开文档所在文件夹");
 
     /// Builds a complete document; parsing and rendering never execute embedded HTML.
     public MarkdownView(Path root, RemoteContent.Manifest manifest, RemoteContent.Item item,
@@ -80,6 +84,8 @@ public final class MarkdownView extends VBox {
         this.store = store;
         this.endpoint = endpoint;
         this.error = error;
+        documentFolder.setVisible(false);
+        documentFolder.setManaged(false);
         setFillWidth(true);
         setMinWidth(0);
         try {
@@ -91,6 +97,7 @@ public final class MarkdownView extends VBox {
         } catch (IOException e) {
             getChildren().add(new Label("正文暂不可用：" + e.getMessage()));
         }
+        getChildren().add(documentFolder);
     }
 
     /// Renders legacy inline rich text using the same instance-local link policy.
@@ -235,13 +242,14 @@ public final class MarkdownView extends VBox {
         return box;
     }
 
-    /// Builds a selectable, horizontally scrollable code block with bounded height.
-    private static TextArea code(String literal) {
-        TextArea code = new TextArea(literal.stripTrailing());
-        code.setEditable(false);
-        code.setWrapText(false);
-        code.setStyle("-fx-font-family: monospace; -fx-font-size: 12px;");
-        code.setPrefRowCount(Math.max(2, Math.min(12, (int) literal.lines().count())));
+    /// Shows the entire code block without adding a nested document scrollbar.
+    private static Label code(String literal) {
+        Label code = new Label(literal.stripTrailing());
+        code.setWrapText(true);
+        code.setMinWidth(0);
+        code.setMinHeight(Region.USE_PREF_SIZE);
+        code.setStyle("-fx-font-family: monospace; -fx-font-size: 12px; -fx-padding: 10;"
+                + " -fx-background-color: -monet-surface-container-high; -fx-background-radius: 4;");
         code.setMaxWidth(Double.MAX_VALUE);
         return code;
     }
@@ -293,8 +301,37 @@ public final class MarkdownView extends VBox {
         link.setStyle("-fx-font-size: 14px; -fx-padding: 0;");
         link.setOnAction(event -> {
             try {
-                FXUtils.openLink(ContentDocuments.link(root, manifest, item, store, endpoint, destination).toASCIIString());
-            } catch (IOException e) {
+                URI target = ContentDocuments.link(root, manifest, item, store, endpoint, destination);
+                if (!"file".equalsIgnoreCase(target.getScheme())) {
+                    FXUtils.openLink(target.toASCIIString());
+                    return;
+                }
+                // Pass the decoded Unicode file path to the file-opening API, never to a URL command line.
+                Path file = Path.of(target);
+                link.setDisable(true);
+                CompletableFuture.runAsync(() -> {
+                    try {
+                        if (!Desktop.isDesktopSupported() || !Desktop.getDesktop().isSupported(Desktop.Action.OPEN))
+                            throw new IOException("系统不支持打开本地文档，请检查默认应用");
+                        Desktop.getDesktop().open(file.toFile());
+                    } catch (IOException | RuntimeException e) {
+                        throw new CompletionException(e);
+                    }
+                }).whenComplete((@Nullable Void ignored, @Nullable Throwable failure) -> Platform.runLater(() -> {
+                    link.setDisable(false);
+                    if (failure != null) {
+                        Throwable cause = failure.getCause() == null ? failure : failure.getCause();
+                        org.jackhuang.hmcl.util.logging.Logger.LOG.warning("Cannot open instance document " + file, cause);
+                        error.accept("无法打开本地文档：" + cause.getMessage());
+                        @Nullable Path folder = file.getParent();
+                        if (folder != null) {
+                            documentFolder.setOnAction(action -> FXUtils.openFolder(folder));
+                            documentFolder.setVisible(true);
+                            documentFolder.setManaged(true);
+                        }
+                    }
+                }));
+            } catch (IOException | RuntimeException e) {
                 error.accept(e.getMessage() == null ? e.toString() : e.getMessage());
             }
         });

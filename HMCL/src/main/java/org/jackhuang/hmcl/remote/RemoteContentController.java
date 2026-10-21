@@ -18,11 +18,15 @@
 package org.jackhuang.hmcl.remote;
 
 import com.jfoenix.controls.JFXButton;
+import com.jfoenix.controls.JFXCheckBox;
 import com.jfoenix.controls.JFXDialogLayout;
 import javafx.animation.PauseTransition;
 import javafx.application.Platform;
+import javafx.beans.InvalidationListener;
 import javafx.beans.value.ChangeListener;
 import javafx.geometry.Insets;
+import javafx.geometry.Pos;
+import javafx.scene.Cursor;
 import javafx.scene.Node;
 import javafx.scene.control.Label;
 import javafx.scene.control.ScrollPane;
@@ -37,6 +41,7 @@ import org.jackhuang.hmcl.game.HMCLGameInstance;
 import org.jackhuang.hmcl.setting.GameDirectoryManager;
 import org.jackhuang.hmcl.ui.Controllers;
 import org.jackhuang.hmcl.ui.DialogUtils;
+import org.jackhuang.hmcl.ui.SVG;
 import org.jackhuang.hmcl.ui.construct.DialogAware;
 import org.jackhuang.hmcl.ui.construct.DialogCloseEvent;
 import org.jetbrains.annotations.NotNullByDefault;
@@ -136,14 +141,14 @@ public final class RemoteContentController {
         @Nullable ContentSync.Result result;
         /// Notices already acknowledged or queued during this launcher process.
         final Set<String> notices = new HashSet<>();
-        /// In-process announcement dismissals, including unsaved preferences.
-        final Set<String> dismissals = new HashSet<>();
+        /// Individually collapsed revisions; new announcements and new revisions start expanded.
+        final Set<String> collapsed = new HashSet<>();
         /// One queued/displayed notice at a time for this instance.
         @Nullable NoticePane notice;
         /// Read-only documents currently open or queued for this instance.
         final Set<DocumentPane> documents = new HashSet<>();
-        /// Independent announcement expansion state.
-        boolean expanded;
+        /// Homepage scroll position retained across content refreshes and instance switches.
+        double announcementPosition;
 
         /// Creates an idle session; selection explicitly activates synchronization.
         Session(Path root, @Nullable ContentSync.Config config, @Nullable String error) {
@@ -324,11 +329,23 @@ public final class RemoteContentController {
         private boolean saving;
         /// Inline link and persistence errors.
         private final Label error = new Label();
+        /// Explicit acknowledgement remains outside the scrolling protocol body.
+        private final JFXCheckBox consent = new JFXCheckBox("我已阅读并同意遵守上述协议与规定");
+        /// Identity of the protocol the checkbox currently acknowledges.
+        private @Nullable String agreementKey;
+        /// Stable window content area determines the dialog's available height.
+        private final Region availableArea = Controllers.getDecorator().getDialogContainer();
+        /// Invalidates preferred size when the window changes without retaining closed dialogs.
+        private final InvalidationListener availableHeightListener = observable -> requestLayout();
 
         /// Creates a cancellable protocol dialog without a global interaction gate.
         AgreementPane(LaunchRequest request) {
             this.request = request;
             setId("bf656-instance-agreement");
+            setMaxHeight(Region.USE_PREF_SIZE);
+            availableArea.heightProperty().addListener(availableHeightListener);
+            consent.setId("bf656-agreement-consent");
+            consent.setWrapText(true);
             error.setWrapText(true);
             addEventFilter(KeyEvent.KEY_PRESSED, event -> {
                 if (event.getCode() == KeyCode.ESCAPE) {
@@ -347,11 +364,17 @@ public final class RemoteContentController {
             error.setText("");
             error.setManaged(false);
             if (manifest == null) {
+                agreementKey = null;
+                consent.setSelected(false);
                 Label message = new Label(problem == null ? "正在获取协议" : problem);
                 message.setWrapText(true);
-                setBody(scroll(new VBox(12, message, new Label("取消后仍可使用启动器。")), 220));
+                setBody(adaptiveScroll(new VBox(12, message, new Label("取消后仍可使用启动器。"))));
                 setActions(button("重试", () -> retry(request)), button("取消本次启动", RemoteContentController.this::cancelLaunch));
             } else {
+                String nextKey = manifest.key(manifest.agreement());
+                if (!nextKey.equals(agreementKey))
+                    consent.setSelected(false);
+                agreementKey = nextKey;
                 VBox body = new VBox(10, view(request.session, manifest, manifest.agreement(), text -> {
                     error.setText(text);
                     error.setManaged(true);
@@ -359,10 +382,25 @@ public final class RemoteContentController {
                 @Nullable ContentSync.Result result = request.session.result;
                 if (result != null && result.cached())
                     body.getChildren().add(new Label("网络暂不可用，使用此实例缓存的协议。"));
-                setBody(scroll(body, 290));
-                setActions(button("同意并启动", () -> accept(request, manifest)),
-                        button("不同意 / 取消启动", RemoteContentController.this::cancelLaunch));
+                setBody(new VBox(16, adaptiveScroll(body), consent));
+                JFXButton agree = button("同意", () -> accept(request, manifest));
+                agree.setId("bf656-agreement-accept");
+                agree.disableProperty().bind(consent.selectedProperty().not());
+                setActions(button("不同意", RemoteContentController.this::cancelLaunch), agree);
             }
+        }
+
+        /// A stale action or unchecked acknowledgement cannot authorize any protocol revision.
+        boolean confirmed(RemoteContent.Manifest manifest) {
+            return !saving && consent.isSelected() && manifest.key(manifest.agreement()).equals(agreementKey);
+        }
+
+        /// Caps the whole dialog, including fixed controls, while short bodies retain their natural height.
+        @Override
+        protected double computePrefHeight(double width) {
+            double available = availableArea.getHeight();
+            double limit = available > 0 ? Math.min(720, available * 0.8) : 720;
+            return Math.min(super.computePrefHeight(width), limit);
         }
 
         /// Delayed obsolete dialogs cannot authorize a new selection.
@@ -375,6 +413,7 @@ public final class RemoteContentController {
         /// External closure never grants consent.
         @Override
         public void onDialogClosed() {
+            availableArea.heightProperty().removeListener(availableHeightListener);
             if (pending == request)
                 pending = null;
             Platform.runLater(() -> enqueueNotice(request.session));
@@ -414,10 +453,10 @@ public final class RemoteContentController {
         ContentStore store = owner.store;
         ContentSync.Config config = owner.config;
         @Nullable AgreementPane pane = request.pane;
-        if (pane != null) {
-            pane.saving = true;
-            pane.setDisable(true);
-        }
+        if (pane == null || !pane.confirmed(manifest))
+            return;
+        pane.saving = true;
+        pane.setDisable(true);
         CompletableFuture.runAsync(() -> {
             try {
                 ContentDocuments.validate(owner.root, manifest, manifest.agreement(), store, config.endpoint(), true);
@@ -545,7 +584,7 @@ public final class RemoteContentController {
         }
     }
 
-    /// Renders ready, active, unhidden Markdown cards for the current session only.
+    /// Renders all ready active cards; legacy dismissal receipts no longer hide announcements.
     private void render() {
         @Nullable Session owner = current;
         @Nullable ContentSync.Result result = owner == null ? null : owner.result;
@@ -556,46 +595,69 @@ public final class RemoteContentController {
         }
         RemoteContent.Manifest manifest = result.manifest();
         @Unmodifiable List<RemoteContent.Item> visible = manifest.announcements().stream()
-                .filter(item -> item.active(Instant.now()) && store.ready(manifest, item))
-                .filter(item -> !owner.dismissals.contains(manifest.key(item))
-                        && !store.remembered("announcements", manifest.key(item))).toList();
+                .filter(item -> item.active(Instant.now()) && store.ready(manifest, item)).toList();
         if (visible.isEmpty()) {
             Controllers.getRootPage().getMainPage().setRemoteAnnouncements(null);
             return;
         }
         VBox entries = new VBox(14);
-        for (RemoteContent.Item item : owner.expanded ? visible : visible.stream().limit(1).toList()) {
+        entries.setMinWidth(0);
+        entries.setPadding(new Insets(4, 10, 10, 4));
+        for (RemoteContent.Item item : visible) {
+            String key = manifest.key(item);
             Label title = heading((item.pinned() ? "[置顶] " : "") + item.title());
+            title.setMaxWidth(Double.MAX_VALUE);
             HBox.setHgrow(title, Priority.ALWAYS);
-            JFXButton hide = button("关闭", () -> {
-                owner.dismissals.add(manifest.key(item));
-                remember(owner, "announcements", manifest.key(item));
-                render();
-            });
             Label error = new Label();
             error.setWrapText(true);
             error.setManaged(false);
-            VBox entry = new VBox(8, new HBox(8, title, hide));
+            VBox body = new VBox(10);
             if (!item.publishedAt().isEmpty())
-                entry.getChildren().add(new Label(item.publishedAt()));
-            entry.getChildren().addAll(view(owner, manifest, item, text -> {
+                body.getChildren().add(new Label(item.publishedAt()));
+            body.getChildren().addAll(view(owner, manifest, item, text -> {
                 error.setText(text);
                 error.setManaged(true);
-            }), error, button("阅读全文", () -> document(owner, manifest, item)));
-            entries.getChildren().add(entry);
+            }), error);
+            body.setVisible(!owner.collapsed.contains(key));
+            body.setManaged(body.isVisible());
+            JFXButton toggle = new JFXButton();
+            toggle.setId("bf656-announcement-toggle-" + item.id());
+            toggle.getStyleClass().add("toggle-icon");
+            toggle.setGraphic((body.isVisible() ? SVG.KEYBOARD_ARROW_UP : SVG.KEYBOARD_ARROW_DOWN).createIcon(20));
+            toggle.setAccessibleText((body.isVisible() ? "收起公告：" : "展开公告：") + item.title());
+            toggle.setOnAction(event -> {
+                boolean expanded = !body.isVisible();
+                if (expanded)
+                    owner.collapsed.remove(key);
+                else
+                    owner.collapsed.add(key);
+                body.setVisible(expanded);
+                body.setManaged(expanded);
+                toggle.setGraphic((expanded ? SVG.KEYBOARD_ARROW_UP : SVG.KEYBOARD_ARROW_DOWN).createIcon(20));
+                toggle.setAccessibleText((expanded ? "收起公告：" : "展开公告：") + item.title());
+            });
+            title.setCursor(Cursor.HAND);
+            title.setOnMouseClicked(event -> toggle.fire());
+            HBox header = new HBox(10, title, toggle);
+            header.setAlignment(Pos.CENTER_LEFT);
+            VBox card = new VBox(10, header, body);
+            card.getStyleClass().addAll("card", "announcement", "remote-announcement-card");
+            card.setMinWidth(0);
+            card.setMinHeight(Region.USE_PREF_SIZE);
+            card.setMaxWidth(Double.MAX_VALUE);
+            entries.getChildren().add(card);
         }
-        if (visible.size() > 1)
-            entries.getChildren().add(button(owner.expanded ? "收起公告" : "展开其他 " + (visible.size() - 1) + " 条公告", () -> {
-                owner.expanded = !owner.expanded;
-                render();
-            }));
         if (result.cached())
             entries.getChildren().add(new Label("离线缓存 · 上次同步 " + time(result.checkedAt())));
-        VBox card = new VBox(scroll(entries, 245));
-        card.getStyleClass().addAll("card", "announcement");
-        card.setPadding(new Insets(14));
-        card.setMaxSize(510, Region.USE_PREF_SIZE);
-        Controllers.getRootPage().getMainPage().setRemoteAnnouncements(card);
+        ScrollPane feed = new ScrollPane(entries);
+        feed.setId("bf656-announcement-feed");
+        feed.setFitToWidth(true);
+        feed.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
+        feed.setMinSize(0, 0);
+        feed.setMaxSize(Double.MAX_VALUE, Double.MAX_VALUE);
+        feed.setVvalue(owner.announcementPosition);
+        feed.vvalueProperty().addListener((observable, oldValue, newValue) -> owner.announcementPosition = newValue.doubleValue());
+        Controllers.getRootPage().getMainPage().setRemoteAnnouncements(feed);
     }
 
     /// Schedules only local publication/expiry updates, including cleanup for previously loaded inactive instances.
@@ -770,6 +832,37 @@ public final class RemoteContentController {
         scroll.setMinHeight(80);
         VBox.setVgrow(scroll, Priority.ALWAYS);
         return scroll;
+    }
+
+    /// Measures protocol text and asynchronously loaded images without imposing a fixed viewport height.
+    @NotNullByDefault
+    private static final class NaturalScrollPane extends ScrollPane {
+        /// Creates a width-fitting viewport whose minimum height allows the fixed controls to remain visible.
+        NaturalScrollPane(Node body) {
+            super(body);
+            setId("bf656-agreement-body");
+            setFitToWidth(true);
+            setHbarPolicy(ScrollBarPolicy.NEVER);
+            setPrefViewportWidth(550);
+            setMinHeight(0);
+            VBox.setVgrow(this, Priority.ALWAYS);
+        }
+
+        /// Uses the actual document's wrapping height, including viewport padding, for natural dialog sizing.
+        @Override
+        protected double computePrefHeight(double width) {
+            @Nullable Node content = getContent();
+            double availableWidth = Math.max(0, (width < 0 ? getPrefViewportWidth() : width)
+                    - snappedLeftInset() - snappedRightInset());
+            double height = content instanceof Region region ? region.prefHeight(availableWidth)
+                    : content == null ? 0 : content.getLayoutBounds().getHeight();
+            return height + snappedTopInset() + snappedBottomInset();
+        }
+    }
+
+    /// Gives protocol and loading/error bodies content-driven height while retaining one internal scroll viewport.
+    private static ScrollPane adaptiveScroll(Node body) {
+        return new NaturalScrollPane(body);
     }
 
     /// Creates a normal read-only document/status pane.
