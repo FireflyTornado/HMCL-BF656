@@ -122,6 +122,12 @@ public final class Decorator {
     /// The stable root exposed to the scene and responsible for shadow insets.
     private final StackPane root = new StackPane();
 
+    /// Optional mandatory gate above the normal window and dialog tree.
+    private @Nullable Node interactionGate;
+
+    /// Content disabled state to restore after a mandatory gate is removed.
+    private boolean disabledBeforeGate;
+
     /// The stable content host to which the optional window-shadow effect is applied.
     private final StackPane shadowContainer = new StackPane();
 
@@ -279,6 +285,29 @@ public final class Decorator {
     /// @return the stable scene root owned by this decorator
     public Parent getRoot() {
         return root;
+    }
+
+    /// Installs or removes a mandatory interaction gate, including keyboard routing and focus isolation.
+    ///
+    /// Ordinary window controls and dialogs remain disabled until the gate is explicitly removed.
+    ///
+    /// @param gate the full-window content, or `null` to restore normal interaction
+    public void setInteractionGate(@Nullable Node gate) {
+        if (interactionGate == gate)
+            return;
+        if (interactionGate != null)
+            root.getChildren().remove(interactionGate);
+        else if (gate != null)
+            disabledBeforeGate = shadowContainer.isDisable();
+        interactionGate = gate;
+        if (gate == null) {
+            shadowContainer.setDisable(disabledBeforeGate);
+        } else {
+            shadowContainer.setDisable(true);
+            root.getChildren().add(gate);
+            gate.toFront();
+            gate.requestFocus();
+        }
     }
 
     /// Returns the space reserved inside the scene for custom window shadows.
@@ -1138,7 +1167,9 @@ public final class Decorator {
                 @Nullable Stack<JFXDatePickerContent> stack =
                         (Stack<JFXDatePickerContent>) getDialogContainer().getProperties()
                         .get(JFXDatePickerSkin.PROPERTY_DATE_PICKER_CONTENTS);
-                if (stack != null && !stack.isEmpty()) {
+                if (interactionGate != null) {
+                    newTarget = interactionGate;
+                } else if (stack != null && !stack.isEmpty()) {
                     newTarget = stack.peek();
                 } else {
                     @Nullable JFXDialogPane currentDialogPane =

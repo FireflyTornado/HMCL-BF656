@@ -39,6 +39,7 @@ import javafx.scene.input.MouseButton;
 import javafx.scene.input.MouseEvent;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
+import javafx.scene.layout.Region;
 import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
 import javafx.scene.text.TextFlow;
@@ -107,6 +108,8 @@ public final class MainPage extends StackPane implements DecoratorPage {
                     .flatMap(HMCLGameRepository::snapshotProperty);
 
     private TransitionPane announcementPane;
+    /// Current server announcement card, independently refreshed and removed by the remote content coordinator.
+    private @Nullable Region remoteAnnouncements;
     private final StackPane updatePane;
     private final JFXButton menuButton;
 
@@ -317,6 +320,21 @@ public final class MainPage extends StackPane implements DecoratorPage {
 
     }
 
+    /// Replaces the server announcement card, restoring the upstream channel hint when none is visible.
+    public void setRemoteAnnouncements(@Nullable Region card) {
+        if (remoteAnnouncements != null)
+            getChildren().remove(remoteAnnouncements);
+        remoteAnnouncements = card;
+        if (announcementPane != null) {
+            announcementPane.setVisible(card == null);
+            announcementPane.setManaged(card == null);
+        }
+        if (card != null) {
+            StackPane.setAlignment(card, Pos.TOP_LEFT);
+            getChildren().add(0, card);
+        }
+    }
+
     private void showUpdateDialog(boolean show) {
         if (show && getLatestVersion() != null && !Objects.equals(getLatestVersion(), lastShownVersion)
                 && !Objects.equals(state().getPromptedVersion(), getLatestVersion().version())
@@ -356,7 +374,10 @@ public final class MainPage extends StackPane implements DecoratorPage {
         Instances.launch(repository.getSelectedInstance());
     }
 
+    /// Installs the first game only after required server agreement confirmation has completed.
     private void launchNoGame() {
+        if (!org.jackhuang.hmcl.remote.RemoteContentController.canLaunch())
+            return;
         DownloadProvider downloadProvider = DownloadProviders.getDownloadProvider();
 
         Holder<GameInstanceID> instanceHolder = new Holder<>();

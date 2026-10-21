@@ -20,6 +20,7 @@ package org.jackhuang.hmcl.game;
 import com.jfoenix.controls.JFXButton;
 import javafx.stage.Stage;
 import org.jackhuang.hmcl.Launcher;
+import org.jackhuang.hmcl.remote.RemoteContentController;
 import org.jackhuang.hmcl.auth.*;
 import org.jackhuang.hmcl.auth.authlibinjector.AuthlibInjectorDownloadException;
 import org.jackhuang.hmcl.auth.offline.OfflineAccount;
@@ -135,8 +136,12 @@ public final class LauncherHelper {
         disableOfflineSkin = true;
     }
 
+    /// Starts a game or creates a script only after the installation's remote agreement gate permits it.
     public void launch() {
         FXUtils.checkFxUserThread();
+
+        if (!RemoteContentController.canLaunch())
+            return;
 
         LOG.info("Launching game instance: " + gameInstance.getId());
 

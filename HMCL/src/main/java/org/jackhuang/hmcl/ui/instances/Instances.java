@@ -348,6 +348,8 @@ public final class Instances {
     /// @param injecters callbacks that configure the launcher before launch
     @SafeVarargs
     public static void launch(@Nullable HMCLGameInstance gameInstance, Consumer<LauncherHelper>... injecters) {
+        if (!org.jackhuang.hmcl.remote.RemoteContentController.canLaunch())
+            return;
         if (gameInstance == null) {
             JFXButton gotoDownload = new JFXButton(i18n("instance.empty.launch.goto_download"));
             gotoDownload.getStyleClass().add("dialog-accept");

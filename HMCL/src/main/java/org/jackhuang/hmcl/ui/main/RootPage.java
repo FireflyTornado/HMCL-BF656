@@ -23,6 +23,7 @@ import javafx.scene.layout.Region;
 import org.jackhuang.hmcl.game.GameInstanceID;
 import org.jackhuang.hmcl.game.HMCLGameInstance;
 import org.jackhuang.hmcl.game.ModpackHelper;
+import org.jackhuang.hmcl.remote.RemoteContentController;
 import org.jackhuang.hmcl.setting.Accounts;
 import org.jackhuang.hmcl.setting.GameDirectoryManager;
 import org.jackhuang.hmcl.terracotta.TerracottaMetadata;
@@ -198,6 +199,7 @@ public class RootPage extends DecoratorAnimatedPage implements DecoratorPage {
                     .startCategory(i18n("settings.launcher.general").toUpperCase(Locale.ROOT))
                     .add(launcherSettingsItem)
                     .add(terracottaItem)
+                    .addNavigationDrawerItem("服务器信息", SVG.CHAT, RemoteContentController::showInformation)
                     .addNavigationDrawerItem(i18n("contact.chat"), SVG.CHAT, () -> {
                         Controllers.getSettingsPage().showFeedback();
                         Controllers.navigate(Controllers.getSettingsPage());
