@@ -792,8 +792,17 @@ public final class RemoteContentController {
 
     /// Constructs a Markdown view with explicit instance and source context.
     private MarkdownView view(Session owner, RemoteContent.Manifest manifest, RemoteContent.Item item, Consumer<String> error) {
-        return new MarkdownView(owner.root, manifest, item, Objects.requireNonNull(owner.store),
+        MarkdownView view = new MarkdownView(owner.root, manifest, item, Objects.requireNonNull(owner.store),
                 Objects.requireNonNull(owner.config).endpoint(), error);
+        if (item == manifest.agreement() && !item.introduction().isBlank()) {
+            Label introduction = new Label(item.introduction());
+            introduction.setId("bf656-agreement-introduction");
+            introduction.setWrapText(true);
+            introduction.setMinWidth(0);
+            introduction.setMaxWidth(Double.MAX_VALUE);
+            view.getChildren().add(0, introduction);
+        }
+        return view;
     }
 
     /// Saves confirmation preferences off the FX thread without opening dialogs over another selected instance.

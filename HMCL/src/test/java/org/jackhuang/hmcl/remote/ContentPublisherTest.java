@@ -43,12 +43,14 @@ final class ContentPublisherTest {
         Files.writeString(source.resolve(ContentFixtures.IMAGE), "image-bytes");
         Files.writeString(source.resolve("private-unused.txt"), "must not be published");
         var json = ContentFixtures.markdown("main", "unused", new byte[0]);
+        json.getAsJsonObject("agreement").addProperty("introduction", "请先阅读下方协议。\n阅读完成后勾选确认。");
         json.remove("files");
         Files.writeString(source.resolve("content.json"), json.toString());
         Path output = root.resolve("public/instances/main");
         ContentPublisher.publish(source, output);
         var manifest = RemoteContent.parse(Files.readString(output.resolve("manifest.json")), "main");
         assertEquals(2, manifest.files().size());
+        assertEquals("请先阅读下方协议。\n阅读完成后勾选确认。", manifest.agreement().introduction());
         assertTrue(manifest.announcements().get(0).resources().contains(ContentFixtures.IMAGE));
         assertEquals(RemoteContent.hash("image-bytes"), manifest.files().get(ContentFixtures.IMAGE).sha256());
         assertTrue(Files.isRegularFile(output.resolve(ContentFixtures.IMAGE)));

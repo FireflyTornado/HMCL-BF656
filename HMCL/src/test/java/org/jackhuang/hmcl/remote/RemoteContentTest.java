@@ -40,6 +40,24 @@ final class RemoteContentTest {
     @TempDir
     Path root;
 
+    /// Optional presentation text stays compatible with old manifests and does not force renewed consent on its own.
+    @Test
+    void supportsBoundedAgreementIntroductionWithoutChangingConsent() throws Exception {
+        var json = ContentFixtures.basic("main");
+        var original = RemoteContent.parse(json.toString(), "main");
+        assertEquals("", original.agreement().introduction());
+        var store = new ContentStore(root, "source");
+        store.accept(original);
+        json.getAsJsonObject("agreement").addProperty("introduction", "游玩本服务器前，请仔细阅读下方的用户协议。\n阅读完成后请勾选确认。");
+        var annotated = RemoteContent.parse(json.toString(), "main");
+        assertTrue(annotated.agreement().introduction().contains("\n"));
+        assertTrue(store.accepted(annotated));
+        json.getAsJsonObject("agreement").addProperty("revision", 2);
+        assertFalse(store.accepted(RemoteContent.parse(json.toString(), "main")));
+        json.getAsJsonObject("agreement").addProperty("introduction", "长".repeat(2001));
+        assertThrows(IOException.class, () -> RemoteContent.parse(json.toString(), "main"));
+    }
+
     /// Local file dispatch receives the original Unicode path rather than a percent-encoded URL string.
     @Test
     void localDocumentUrisRoundTripUnicodeSpacesAndPercentSigns() throws Exception {

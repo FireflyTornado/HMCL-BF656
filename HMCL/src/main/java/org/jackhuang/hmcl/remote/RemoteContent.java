@@ -69,9 +69,9 @@ public final class RemoteContent {
         }
     }
 
-    /// Published item metadata; Markdown bodies are stored separately from the manifest.
+    /// Published item metadata; the optional agreement introduction is plain presentation text above its separate body.
     @NotNullByDefault
-    public record Item(String id, int revision, String title, String content, String contentFile,
+    public record Item(String id, int revision, String title, String introduction, String content, String contentFile,
                        @Unmodifiable List<String> resources, String publishedAt,
                        @Nullable Instant startsAt, @Nullable Instant expiresAt,
                        int priority, boolean pinned, String repeat) {
@@ -121,7 +121,7 @@ public final class RemoteContent {
             return Set.copyOf(needed);
         }
 
-        /// Receipt identity changes when the body or any associated file changes, even with an unchanged revision.
+        /// Body/resource changes invalidate receipts; presentation-only introductions keep existing consent unless revision changes.
         public String key(Item item) {
             StringBuilder identity = new StringBuilder(item.id()).append('\n').append(item.revision())
                     .append('\n').append(item.title()).append('\n').append(item.content());
@@ -192,6 +192,9 @@ public final class RemoteContent {
         int revision = integer(json, "revision", 0);
         if (revision < 1)
             throw new IllegalArgumentException("revision must be a positive integer");
+        String introduction = agreement ? string(json, "introduction", "") : "";
+        if (introduction.length() > 2000)
+            throw new IllegalArgumentException("Agreement introduction exceeds 2000 characters");
         String content = string(json, "content", "");
         String file = string(json, "contentFile", "");
         if (content.isBlank() == file.isBlank() || content.length() > 200_000)
@@ -220,7 +223,7 @@ public final class RemoteContent {
         String repeat = string(json, "repeat", "once");
         if (!repeat.equals("once") && !repeat.equals("each_start"))
             throw new IllegalArgumentException("Unsupported repeat policy");
-        return new Item(required(json, "id", 200), revision, required(json, "title", 500), content, file,
+        return new Item(required(json, "id", 200), revision, required(json, "title", 500), introduction, content, file,
                 List.copyOf(resources), published, starts, expires, integer(json, "priority", 0),
                 bool(json, "pinned", false), repeat);
     }

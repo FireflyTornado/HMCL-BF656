@@ -60,6 +60,8 @@ import java.util.function.BooleanSupplier;
 /// Isolated offscreen desktop verification using real instance selection and a real loopback content server.
 @NotNullByDefault
 public final class RemoteContentSmoke {
+    /// Editable remote introduction displayed before the protocol body in the scene fixtures.
+    private static final String INTRODUCTION = "游玩本服务器前，请仔细阅读下方的用户协议。";
     /// Prevents construction of this standalone verifier.
     private RemoteContentSmoke() { }
 
@@ -176,6 +178,10 @@ public final class RemoteContentSmoke {
             require(launchedA.get() == 0, "Refusal must cancel without launching");
             RemoteContentController.beforeLaunch(gameA, launchedA::incrementAndGet);
             consent(decorator.getRoot()).setSelected(true);
+            JsonObject updatedIntroduction = a.deepCopy();
+            updatedIntroduction.getAsJsonObject("agreement").addProperty("introduction", "请阅读协议全文，再确认是否同意。");
+            updateAgreement(scene, updatedIntroduction);
+            require(consent(decorator.getRoot()).isSelected(), "Introduction-only edits must preserve the current acknowledgement");
             // Re-render the same revision while checked, as file-download progress does in production.
             refreshAgreement();
             require(consent(decorator.getRoot()).isSelected(), "Progress must preserve acknowledgement of the same protocol");
@@ -249,6 +255,7 @@ public final class RemoteContentSmoke {
         second.addProperty("title", "第二条独立公告");
         root.getAsJsonArray("announcements").add(second);
         root.getAsJsonObject("agreement").addProperty("content", "请阅读<a href='client/documents/用户协议.html'>本实例协议</a>。不同意只取消本次启动。");
+        root.getAsJsonObject("agreement").addProperty("introduction", INTRODUCTION);
         JsonObject notice = new JsonObject();
         notice.addProperty("id", "notice-" + key);
         notice.addProperty("revision", 1);
@@ -338,8 +345,24 @@ public final class RemoteContentSmoke {
         Region pane = agreementPane(scene);
         snapshot(scene, output.resolve("agreement-short.png"));
         double shortHeight = pane.getHeight();
+        require(hasLabel(pane, INTRODUCTION), "Remote introduction must appear before the protocol");
+        ScrollPane viewport = (ScrollPane) java.util.Objects.requireNonNull(pane.lookup("#bf656-agreement-body"));
+        VBox document = (VBox) ((VBox) viewport.getContent()).getChildren().get(0);
+        require("bf656-agreement-introduction".equals(document.getChildren().get(0).getId()),
+                "Introduction must precede the Markdown document");
         require(shortHeight < 300, "Short protocol must not retain the old fixed-height blank space");
         require(!hasLabel(pane, "不同意将取消本次游戏启动。"), "Removed footer text must not remain");
+        verifyAgreementBounds(scene);
+        JsonObject noIntroduction = catalog.deepCopy();
+        noIntroduction.getAsJsonObject("agreement").remove("introduction");
+        updateAgreement(scene, noIntroduction);
+        snapshot(scene, output.resolve("agreement-introduction-empty.png"));
+        require(pane.lookup("#bf656-agreement-introduction") == null && pane.getHeight() < shortHeight,
+                "Missing introduction must not leave an empty row or extra spacing");
+        JsonObject longIntroduction = catalog.deepCopy();
+        longIntroduction.getAsJsonObject("agreement").addProperty("introduction", "请仔细阅读下方协议。\n".repeat(80));
+        updateAgreement(scene, longIntroduction);
+        snapshot(scene, output.resolve("agreement-introduction-long.png"));
         verifyAgreementBounds(scene);
         JsonObject medium = catalog.deepCopy();
         medium.getAsJsonObject("agreement").addProperty("content", "协议说明\n" + "请遵守服务器规则并尊重其他玩家。\n".repeat(10));
