@@ -45,6 +45,7 @@ import javafx.scene.layout.VBox;
 import javafx.scene.text.TextFlow;
 import javafx.util.Duration;
 import org.jackhuang.hmcl.Metadata;
+import org.jackhuang.hmcl.bf656.BF656Icons;
 import org.jackhuang.hmcl.download.DownloadProvider;
 import org.jackhuang.hmcl.game.*;
 import org.jackhuang.hmcl.setting.DownloadProviders;
@@ -122,7 +123,7 @@ public final class MainPage extends StackPane implements DecoratorPage {
         titleNode.setPadding(new Insets(0, 0, 0, 2));
         titleNode.setAlignment(Pos.CENTER_LEFT);
 
-        ImageView titleIcon = new ImageView(FXUtils.newBuiltinImage("/assets/img/icon-title.png"));
+        ImageView titleIcon = new ImageView(FXUtils.newBuiltinImage(BF656Icons.TITLE_ICON));
         Label titleLabel = new Label(Metadata.FULL_TITLE);
         if (I18n.isUpsideDown()) {
             titleIcon.setRotate(180);

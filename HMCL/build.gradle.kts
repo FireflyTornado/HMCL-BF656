@@ -492,3 +492,5 @@ tasks.register<UpdateAddonProjectInfos>("updateModpackProjectInfos") {
     outputFile.set(layout.projectDirectory.file("src/main/resources/assets/addon/modpack.csv"))
     projectType.set(UpdateAddonProjectInfos.AddonProjectType.MODPACK)
 }
+
+apply(from = rootProject.file("gradle/bf656.gradle.kts"))

@@ -17,6 +17,7 @@
  */
 package org.jackhuang.hmcl;
 
+import org.jackhuang.hmcl.bf656.BF656Metadata;
 import org.jackhuang.hmcl.util.StringUtils;
 import org.jackhuang.hmcl.util.io.JarUtils;
 import org.jackhuang.hmcl.util.platform.Architecture;
@@ -34,15 +35,19 @@ public final class Metadata {
     private Metadata() {
     }
 
-    public static final String NAME = "HMCL";
-    public static final String FULL_NAME = "Hello Minecraft! Launcher";
+    /// Launcher short name supplied by the independent BF656 branding configuration.
+    public static final String NAME = BF656Metadata.NAME;
+    /// Launcher full name supplied by the independent BF656 branding configuration.
+    public static final String FULL_NAME = BF656Metadata.FULL_NAME;
     public static final String VERSION = System.getProperty("hmcl.version.override", JarUtils.getAttribute("hmcl.version", "@develop@"));
 
     /// Explicit Application User Model ID used for Windows taskbar grouping and pinning.
     public static final String WINDOWS_APP_USER_MODEL_ID = "org.jackhuang.hmcl";
 
-    public static final String TITLE = NAME + " " + VERSION;
-    public static final String FULL_TITLE = FULL_NAME + " v" + VERSION;
+    /// Short launcher title including both the custom release and HMCL branch versions.
+    public static final String TITLE = BF656Metadata.title(VERSION);
+    /// Full window title including the custom launcher release version.
+    public static final String FULL_TITLE = BF656Metadata.fullTitle();
 
     public static final int MINIMUM_REQUIRED_JAVA_VERSION = 17;
     public static final int MINIMUM_SUPPORTED_JAVA_VERSION = 17;

@@ -17,6 +17,7 @@
  */
 package org.jackhuang.hmcl;
 
+import org.jackhuang.hmcl.bf656.BF656Icons;
 import org.jackhuang.hmcl.util.FileSaver;
 import org.jackhuang.hmcl.util.SelfDependencyPatcher;
 import org.jackhuang.hmcl.util.SwingUtils;
@@ -119,10 +120,11 @@ public final class EntryPoint {
         return false;
     }
 
+    /// Sets the independent BF656 macOS taskbar image before JavaFX initialization.
     private static void initIcon() {
         try {
             if (java.awt.Taskbar.isTaskbarSupported()) {
-                var image = java.awt.Toolkit.getDefaultToolkit().getImage(EntryPoint.class.getResource("/assets/img/icon-mac.png"));
+                var image = java.awt.Toolkit.getDefaultToolkit().getImage(EntryPoint.class.getResource(BF656Icons.MAC_ICON));
                 java.awt.Taskbar.getTaskbar().setIconImage(image);
             }
         } catch (Throwable e) {

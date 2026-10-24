@@ -60,6 +60,7 @@ import javafx.stage.*;
 import javafx.util.Duration;
 import javafx.util.StringConverter;
 import org.glavo.url.WebURL;
+import org.jackhuang.hmcl.bf656.BF656Icons;
 import org.jackhuang.hmcl.download.DownloadCandidates;
 import org.jackhuang.hmcl.setting.StyleSheets;
 import org.jackhuang.hmcl.task.CacheFileTask;
@@ -878,16 +879,9 @@ public final class FXUtils {
         return new AllListener(childSelectedCount).subscriptions;
     }
 
+    /// Applies the independent BF656 application icons to a launcher window.
     public static void setIcon(Stage stage) {
-        String icon;
-        if (OperatingSystem.CURRENT_OS == OperatingSystem.WINDOWS) {
-            icon = "/assets/img/icon.png";
-        } else if (OperatingSystem.CURRENT_OS == OperatingSystem.MACOS) {
-            icon = "/assets/img/icon-mac.png";
-        } else {
-            icon = "/assets/img/icon@4x.png";
-        }
-        stage.getIcons().add(newBuiltinImage(icon));
+        BF656Icons.setWindowIcons(stage);
     }
 
     public static Image loadImage(Path path) throws Exception {
