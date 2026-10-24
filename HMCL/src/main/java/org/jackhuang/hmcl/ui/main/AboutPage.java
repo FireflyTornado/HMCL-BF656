@@ -22,6 +22,7 @@ import javafx.scene.control.ScrollPane;
 import javafx.scene.image.Image;
 import javafx.scene.layout.VBox;
 import org.jackhuang.hmcl.Metadata;
+import org.jackhuang.hmcl.bf656.BF656About;
 import org.jackhuang.hmcl.theme.Themes;
 import org.jackhuang.hmcl.ui.FXUtils;
 import org.jackhuang.hmcl.ui.SVG;
@@ -66,6 +67,7 @@ public final class AboutPage extends SpinnerPane {
 
             about.getContent().setAll(launcher, author);
         }
+        about.getContent().add(0, BF656About.createLauncherEntry());
 
         ComponentList thanks = loadIconedTwoLineList("/assets/about/thanks.json");
 
