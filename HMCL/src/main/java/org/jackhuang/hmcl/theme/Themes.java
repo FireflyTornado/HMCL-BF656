@@ -298,6 +298,18 @@ public final class Themes {
     /// The last loaded background source used to rebuild the JavaFX background without reloading images.
     private static @Nullable LoadedBackground loadedBackground;
 
+    /// Global wallpaper, loaded without reference to any game instance or the launcher's UI thread.
+    private static volatile @Nullable Image overallBackground;
+
+    /// Installs the current global wallpaper or restores the original local appearance settings.
+    public static void setOverallBackground(@Nullable Image image) {
+        if (overallBackground == image)
+            return;
+        overallBackground = image;
+        if (backgroundUpdatesStarted)
+            refreshBackground();
+    }
+
     /// Current background load generation used to ignore obsolete asynchronous updates.
     private static int backgroundLoadGeneration = 0;
 
@@ -718,6 +730,12 @@ public final class Themes {
             boolean fallbackBackground) {
         @Nullable Image image = null;
         @Nullable ThemeColor imageThemeColor = null;
+        @Nullable Image globalImage = overallBackground;
+        if (globalImage != null && !fallbackBackground) {
+            return new LoadedBackground.Image(
+                    createBackgroundWithOpacity(globalImage, resolvedBackground.opacity()),
+                    globalImage, extractWallpaperThemeColor(globalImage), false);
+        }
         switch (resolvedBackground.type()) {
             case CUSTOM:
                 @Nullable ThemePackResource imageResource = resolvedBackground.imageResource();

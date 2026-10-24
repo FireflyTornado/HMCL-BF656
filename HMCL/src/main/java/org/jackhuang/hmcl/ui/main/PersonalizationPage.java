@@ -41,6 +41,7 @@ import org.glavo.monetfx.Brightness;
 import org.glavo.monetfx.ColorStyle;
 import org.glavo.uuid.UUIDs;
 import org.jackhuang.hmcl.setting.*;
+import org.jackhuang.hmcl.remote.OverallBackgroundController;
 import org.jackhuang.hmcl.theme.*;
 import org.jackhuang.hmcl.ui.Controllers;
 import org.jackhuang.hmcl.ui.FXUtils;
@@ -427,6 +428,12 @@ public class PersonalizationPage extends StackPane {
             themeList.getContent().add(exportThemeButton);
         }
         content.getChildren().addAll(ComponentList.createComponentListTitle(i18n("settings.launcher.theme")), themeList);
+
+        LineButton overallBackgroundButton = new LineButton();
+        overallBackgroundButton.setTitle("刷新全局背景");
+        overallBackgroundButton.subtitleProperty().bind(OverallBackgroundController.statusProperty());
+        overallBackgroundButton.setOnAction(event -> OverallBackgroundController.refresh());
+        themeList.getContent().add(overallBackgroundButton);
 
         ComponentList themeAppearanceList = new ComponentList();
         ComponentList backgroundLoadingList = new ComponentList();
