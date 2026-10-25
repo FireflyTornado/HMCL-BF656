@@ -30,7 +30,7 @@ import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
-/// Exports overall/content.json and its referenced wallpaper files to public/overall/.
+/// Exports discovered wallpapers or a legacy overall/content.json to public/overall/.
 @NotNullByDefault
 public final class OverallPublisher {
     /// Prevents construction.
@@ -47,10 +47,12 @@ public final class OverallPublisher {
     public static void publish(Path sourceDirectory, Path outputDirectory) throws IOException {
         Path source = sourceDirectory.toRealPath();
         Path output = outputDirectory.toAbsolutePath().normalize();
-        if (Files.size(source.resolve("content.json")) > 2_097_152)
+        if (Files.exists(source.resolve("content.json")) && Files.size(source.resolve("content.json")) > 2_097_152)
             throw new IOException("Overall configuration exceeds 2 MiB");
         try {
-            JsonObject root = JsonParser.parseString(Files.readString(source.resolve("content.json"))).getAsJsonObject();
+            JsonObject root = Files.exists(source.resolve("content.json"))
+                    ? JsonParser.parseString(Files.readString(source.resolve("content.json"))).getAsJsonObject()
+                    : DirectoryContentSource.overall(source);
             OverallContent.Background background = OverallContent.background(root);
             JsonObject files = new JsonObject();
             Map<String, byte[]> payloads = new LinkedHashMap<>();

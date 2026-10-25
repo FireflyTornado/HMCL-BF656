@@ -25,6 +25,7 @@ import org.commonmark.node.AbstractVisitor;
 import org.commonmark.node.Image;
 import org.commonmark.node.Link;
 import org.jetbrains.annotations.NotNullByDefault;
+import org.jetbrains.annotations.Nullable;
 import org.jetbrains.annotations.Unmodifiable;
 
 import java.io.IOException;
@@ -46,20 +47,27 @@ public final class ContentPublisher {
     /// Prevents construction of the command-line utility.
     private ContentPublisher() { }
 
-    /// Reads `.launcher/server/content.json` and optionally exports its public files to a hosting directory.
+    /// Publishes directory content or a legacy content.json; an optional key supports custom source locations.
     public static void main(String @Unmodifiable [] args) throws Exception {
-        if (args.length < 1 || args.length > 2)
-            throw new IllegalArgumentException("Usage: ContentPublisher <instance .launcher/server> [public output directory]");
-        publish(Path.of(args[0]), args.length == 2 ? Path.of(args[1]) : Path.of(args[0]));
+        if (args.length < 1 || args.length > 3)
+            throw new IllegalArgumentException("Usage: ContentPublisher <source> [public output directory] [instance key]");
+        publish(Path.of(args[0]), args.length >= 2 ? Path.of(args[1]) : Path.of(args[0]), args.length == 3 ? args[2] : null);
     }
 
     /// Recomputes file digests and Markdown dependencies; the manifest is published last after all payloads exist.
     public static void publish(Path sourceDirectory, Path outputDirectory) throws IOException {
+        publish(sourceDirectory, outputDirectory, null);
+    }
+
+    /// Discovers source metadata without a central list while retaining existing public manifest compatibility.
+    public static void publish(Path sourceDirectory, Path outputDirectory, @Nullable String instanceKey) throws IOException {
         Path source = sourceDirectory.toAbsolutePath().normalize().toRealPath();
         Path output = outputDirectory.toAbsolutePath().normalize();
         JsonObject root;
         try {
-            root = JsonParser.parseString(Files.readString(source.resolve("content.json"), StandardCharsets.UTF_8)).getAsJsonObject();
+            root = Files.exists(source.resolve("content.json"))
+                    ? JsonParser.parseString(Files.readString(source.resolve("content.json"), StandardCharsets.UTF_8)).getAsJsonObject()
+                    : DirectoryContentSource.instance(source, instanceKey);
         } catch (RuntimeException e) {
             throw new IOException("Invalid content.json", e);
         }
@@ -191,7 +199,9 @@ public final class ContentPublisher {
             throw new IOException("Resource exceeds 16 MiB: " + logical);
         if (logical.toLowerCase(java.util.Locale.ROOT).endsWith(".md") && Files.size(file) > 2_097_152)
             throw new IOException("Markdown body exceeds 2 MiB: " + logical);
-        byte[] bytes = Files.readAllBytes(file);
+        byte[] bytes = logical.toLowerCase(java.util.Locale.ROOT).endsWith(".md") && !Files.exists(source.resolve("content.json"))
+                ? DirectoryContentSource.markdown(file).body().getBytes(StandardCharsets.UTF_8)
+                : Files.readAllBytes(file);
         JsonObject descriptor = new JsonObject();
         descriptor.addProperty("sha256", RemoteContent.digest(bytes));
         index.add(logical, descriptor);
