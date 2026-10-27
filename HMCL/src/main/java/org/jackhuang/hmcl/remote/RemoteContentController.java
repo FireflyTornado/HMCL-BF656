@@ -71,6 +71,8 @@ public final class RemoteContentController {
     private static @Nullable RemoteContentController instance;
     /// Sessions are identified by fixed version roots rather than configurable game run directories.
     private final Map<Path, Session> sessions = new HashMap<>();
+    /// Explicit instance-management views keep their own context independently of homepage selection.
+    private final Set<InformationPane> informationPanes = new HashSet<>();
     /// Session currently projected onto the homepage.
     private @Nullable Session current;
     /// Selection changes invalidate pending launches.
@@ -102,10 +104,21 @@ public final class RemoteContentController {
         Objects.requireNonNull(instance).launch(game, continuation);
     }
 
-    /// Opens status and documents for the selected instance.
-    public static void showInformation() {
-        if (instance != null)
-            instance.information();
+    /// Only enabled or invalid instance configurations expose the management entry; ordinary instances stay uncluttered.
+    public static boolean hasInformation(@Nullable HMCLGameInstance game) {
+        if (game == null)
+            return false;
+        try {
+            return ContentSync.Config.load(root(game)).enabled();
+        } catch (IOException | RuntimeException e) {
+            return true;
+        }
+    }
+
+    /// Opens status and documents for an explicitly captured management target without selecting it.
+    public static void showInformation(HMCLGameInstance game) {
+        initialize();
+        Objects.requireNonNull(instance).information(game);
     }
 
     /// Cancels workers, dialogs and pending continuations without deleting persistent receipts.
@@ -114,8 +127,12 @@ public final class RemoteContentController {
             return;
         instance.closed = true;
         instance.cancelLaunch();
+        for (InformationPane pane : Set.copyOf(instance.informationPanes))
+            DialogUtils.close(pane);
         GameDirectoryManager.selectedInstanceProperty().removeListener(instance.listener);
         for (Session session : instance.sessions.values()) {
+            for (DocumentPane document : Set.copyOf(session.documents))
+                DialogUtils.close(document);
             if (session.sync != null)
                 session.sync.close();
         }
@@ -149,6 +166,8 @@ public final class RemoteContentController {
         final Set<DocumentPane> documents = new HashSet<>();
         /// Homepage scroll position retained across content refreshes and instance switches.
         double announcementPosition;
+        /// Management reads/refreshes must not enqueue notices, including for the currently selected instance.
+        boolean quiet;
 
         /// Creates an idle session; selection explicitly activates synchronization.
         Session(Path root, @Nullable ContentSync.Config config, @Nullable String error) {
@@ -197,8 +216,12 @@ public final class RemoteContentController {
         @Nullable Session old = sessions.get(root);
         if (old != null && Objects.equals(old.config, config) && Objects.equals(old.error, error))
             return old;
-        if (old != null && old.sync != null)
-            old.sync.close();
+        if (old != null) {
+            if (old.sync != null)
+                old.sync.close();
+            for (DocumentPane document : Set.copyOf(old.documents))
+                DialogUtils.close(document);
+        }
         Session next = new Session(root, config, error);
         sessions.put(root, next);
         return next;
@@ -216,15 +239,13 @@ public final class RemoteContentController {
         @Nullable Session old = current;
         current = next;
         if (old != null) {
-            if (old.sync != null)
-                old.sync.pause();
+            pauseUnused(old);
             if (old.notice != null)
                 DialogUtils.close(old.notice);
-            for (DocumentPane document : Set.copyOf(old.documents))
-                DialogUtils.close(document);
         }
         render();
         if (next != null) {
+            next.quiet = false;
             if (next.sync != null)
                 next.sync.activate();
             enqueueNotice(next);
@@ -246,6 +267,7 @@ public final class RemoteContentController {
         select(game);
         cancelLaunch();
         Session owner = Objects.requireNonNull(current);
+        owner.quiet = false;
         if (owner.config != null && !owner.config.enabled()) {
             action.run();
             return;
@@ -261,25 +283,29 @@ public final class RemoteContentController {
 
     /// Stores results on their owner; inactive sessions never replace another instance's homepage.
     private void receive(Session owner, ContentSync.Result update) {
-        if (closed)
+        if (closed || sessions.get(owner.root) != owner)
             return;
         owner.result = update;
         if (update.error() != null)
             LOG.warning("Instance content sync failed at " + owner.root + ": " + update.error());
-        if (owner != current)
-            return;
         if (owner.notice != null && !present(owner, owner.notice.manifest, owner.notice.item, RemoteContent.Kind.NOTICES))
             DialogUtils.close(owner.notice);
         for (DocumentPane document : Set.copyOf(owner.documents)) {
             if (!present(owner, document.manifest, document.item, document.kind))
                 DialogUtils.close(document);
         }
+        for (InformationPane pane : Set.copyOf(informationPanes)) {
+            if (pane.owner == owner)
+                pane.update();
+        }
+        boundaries();
+        if (owner != current)
+            return;
         render();
         @Nullable LaunchRequest request = pending;
         if (request != null && request.session == owner)
             checkLaunch(request);
         enqueueNotice(owner);
-        boundaries();
     }
 
     /// Reuses consent only for the latest known protocol, after the initial online check has completed or failed.
@@ -513,7 +539,7 @@ public final class RemoteContentController {
     private void enqueueNotice(Session owner) {
         @Nullable ContentSync.Result result = owner.result;
         @Nullable ContentStore store = owner.store;
-        if (closed || current != owner || pending != null || owner.notice != null || result == null
+        if (closed || owner.quiet || current != owner || pending != null || owner.notice != null || result == null
                 || result.manifest() == null || store == null)
             return;
         RemoteContent.Manifest manifest = result.manifest();
@@ -569,7 +595,7 @@ public final class RemoteContentController {
             @Nullable ContentSync.Result latest = owner.result;
             boolean present = latest != null && latest.manifest() != null && latest.manifest().notices().stream()
                     .anyMatch(next -> latest.manifest().key(next).equals(manifest.key(item)));
-            if (current != owner || !item.active(Instant.now()) || !present || pending != null)
+            if (owner.quiet || current != owner || !item.active(Instant.now()) || !present || pending != null)
                 Platform.runLater(() -> DialogUtils.close(this));
         }
 
@@ -704,13 +730,61 @@ public final class RemoteContentController {
         }
     }
 
-    /// Presents the selected instance's source, status, protocol and all active announcements.
-    private void information() {
-        @Nullable Session owner = current;
-        VBox body = new VBox(12);
-        if (owner == null) {
-            body.getChildren().add(new Label("请先选择一个游戏实例。"));
-        } else {
+    /// Resolves management context, including edited configuration, without selecting an instance or showing its notices.
+    private Session informationSession(Path root) {
+        Session owner = session(root);
+        owner.quiet = true;
+        if (current != null && current.root.equals(root) && current != owner) {
+            epoch++;
+            cancelLaunch();
+            if (current.notice != null)
+                DialogUtils.close(current.notice);
+            current = owner;
+            render();
+        }
+        for (InformationPane pane : informationPanes) {
+            if (pane.owner.root.equals(root))
+                pane.owner = owner;
+        }
+        return owner;
+    }
+
+    /// Keeps explicit management reads alive; unused inactive instances retain only their successful cached state.
+    private void pauseUnused(Session owner) {
+        if (owner != current && owner.sync != null && owner.documents.isEmpty()
+                && informationPanes.stream().noneMatch(pane -> pane.owner == owner))
+            owner.sync.pause();
+    }
+
+    /// Opens an instance-bound view and synchronizes only that target, never changing homepage selection.
+    private void information(HMCLGameInstance game) {
+        if (closed)
+            return;
+        Session owner = informationSession(root(game));
+        InformationPane pane = new InformationPane(owner);
+        informationPanes.add(pane);
+        Controllers.dialog(pane);
+        if (owner.sync != null)
+            owner.sync.activate();
+    }
+
+    /// Status, protocol and refresh actions remain bound to the management target even when another instance is selected.
+    @NotNullByDefault
+    private final class InformationPane extends JFXDialogLayout implements DialogAware {
+        /// Target session is replaced only when this target's configuration is explicitly reloaded.
+        private Session owner;
+
+        /// Creates the existing information dialog without announcement links or additional entry points.
+        InformationPane(Session owner) {
+            this.owner = owner;
+            setId("bf656-instance-information");
+            setHeading(heading("实例服务器信息"));
+            update();
+        }
+
+        /// Rebuilds status from this owner's latest download result, leaving other instances' presentation untouched.
+        void update() {
+            VBox body = new VBox(12);
             Label path = new Label("实例配置：\n" + owner.root.resolve("client/config.json"));
             path.setWrapText(true);
             body.getChildren().add(path);
@@ -721,28 +795,42 @@ public final class RemoteContentController {
             } else {
                 body.getChildren().add(new Label("内容标识：" + Objects.requireNonNull(owner.config).instanceKey()));
                 @Nullable ContentSync.Result result = owner.result;
-                String status = result == null ? "正在同步" : result.success() ? "同步成功"
+                String status = result == null ? "尚未同步" : result.success() ? "同步成功"
                         : result.pending() ? "正在同步正文或图片" : "同步失败，" + (result.exhausted() ? "自动重试已结束" : "将有限重试");
                 body.getChildren().add(new Label(status));
                 if (result != null && result.manifest() != null) {
                     RemoteContent.Manifest manifest = result.manifest();
                     body.getChildren().add(new Label("上次检查：" + time(result.checkedAt())));
-                    body.getChildren().add(button("查看用户协议", () -> document(owner, manifest, manifest.agreement())));
-                    for (RemoteContent.Item item : manifest.announcements()) {
-                        if (item.active(Instant.now()))
-                            body.getChildren().add(button(item.title(), () -> document(owner, manifest, item)));
-                    }
+                    JFXButton protocol = button("查看用户协议", () -> document(owner, manifest, manifest.agreement()));
+                    protocol.setDisable(owner.store == null || !owner.store.ready(manifest, manifest.agreement()));
+                    body.getChildren().add(protocol);
                 }
             }
+            setBody(scroll(body, 290));
+            setActions(button("刷新当前实例", this::refresh), button("关闭", () -> fireEvent(new DialogCloseEvent())));
         }
-        JFXDialogLayout pane = pane("实例服务器信息", body);
-        pane.setActions(button("刷新当前实例", () -> {
-            pane.fireEvent(new DialogCloseEvent());
-            select(GameDirectoryManager.getSelectedInstance());
-            if (current != null && current.sync != null)
-                current.sync.refresh();
-        }), button("关闭", () -> pane.fireEvent(new DialogCloseEvent())));
-        Controllers.dialog(pane);
+
+        /// Reloads and refreshes this exact instance; no global selection lookup is involved.
+        private void refresh() {
+            owner = informationSession(owner.root);
+            update();
+            if (owner.sync != null)
+                owner.sync.refresh();
+        }
+
+        /// A queued management view is still independent of the selected instance.
+        @Override
+        public void onDialogShown() {
+            if (closed)
+                Platform.runLater(() -> DialogUtils.close(this));
+        }
+
+        /// Releases management-owned background work without acknowledging notices or changing consent.
+        @Override
+        public void onDialogClosed() {
+            informationPanes.remove(this);
+            pauseUnused(owner);
+        }
     }
 
     /// Opens a read-only full document without changing receipts or dismissals.
@@ -752,7 +840,7 @@ public final class RemoteContentController {
         Controllers.dialog(document);
     }
 
-    /// Read-only views close on withdrawal, expiry, replacement or instance deselection.
+    /// Read-only views close on withdrawal, expiry or source/revision replacement, independently of selection.
     @NotNullByDefault
     private final class DocumentPane extends JFXDialogLayout implements DialogAware {
         /// Instance owning this view.
@@ -776,10 +864,10 @@ public final class RemoteContentController {
             setActions(button("关闭", () -> fireEvent(new DialogCloseEvent())));
         }
 
-        /// Delayed views cannot display another instance's or already withdrawn content.
+        /// Read-only views stay bound to their source and revision, independently of homepage selection.
         @Override
         public void onDialogShown() {
-            if (current != owner || !present(owner, manifest, item, kind))
+            if (closed || sessions.get(owner.root) != owner || !present(owner, manifest, item, kind))
                 Platform.runLater(() -> DialogUtils.close(this));
         }
 
@@ -787,6 +875,7 @@ public final class RemoteContentController {
         @Override
         public void onDialogClosed() {
             owner.documents.remove(this);
+            pauseUnused(owner);
         }
     }
 

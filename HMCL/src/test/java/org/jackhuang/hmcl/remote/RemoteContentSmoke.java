@@ -29,6 +29,7 @@ import javafx.scene.control.ScrollPane;
 import javafx.scene.image.ImageView;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
+import javafx.event.ActionEvent;
 import org.jackhuang.hmcl.Launcher;
 import org.jackhuang.hmcl.game.GameInstanceID;
 import org.jackhuang.hmcl.game.HMCLGameInstance;
@@ -38,6 +39,8 @@ import org.jackhuang.hmcl.setting.LauncherSettings;
 import org.jackhuang.hmcl.setting.SettingsManager;
 import org.jackhuang.hmcl.setting.StyleSheets;
 import org.jackhuang.hmcl.ui.Controllers;
+import org.jackhuang.hmcl.ui.DialogUtils;
+import org.jackhuang.hmcl.ui.construct.AdvancedListItem;
 import org.jackhuang.hmcl.ui.decorator.Decorator;
 import org.jetbrains.annotations.NotNullByDefault;
 import org.jetbrains.annotations.Nullable;
@@ -194,8 +197,9 @@ public final class RemoteContentSmoke {
             require(launchedA.get() == 2, "Accepted protocol must continue immediately");
             snapshot(scene, output.resolve("instance-markdown.png"));
             a.getAsJsonObject("agreement").addProperty("revision", 2);
-            RemoteContentController.showInformation();
+            RemoteContentController.showInformation(gameA);
             findButton(decorator.getRoot(), "刷新当前实例").fire();
+            DialogUtils.close(java.util.Objects.requireNonNull(decorator.getRoot().lookup("#bf656-instance-information")));
             return true;
         });
         await(() -> currentRevision() == 2);
@@ -238,9 +242,12 @@ public final class RemoteContentSmoke {
         onFx(() -> {
             require(aChecks.get() == 2 && bChecks.get() == 1, "Local expiry must not make HTTP requests");
             snapshot(scene, output.resolve("instance-expired.png"));
-            RemoteContentController.shutdown();
+            if (hasButton(scene.getRoot(), "我已知晓"))
+                findButton(scene.getRoot(), "我已知晓").fire();
             return true;
         });
+        verifyManagementContext(scene, output, repo, gameA, gameB, b, aChecks, bChecks, base);
+        onFx(() -> { RemoteContentController.shutdown(); return true; });
         http.stop(0);
         Platform.exit();
         SettingsManager.shutdown();
@@ -446,6 +453,117 @@ public final class RemoteContentSmoke {
     private static boolean hasLabel(Node root, String text) {
         return root instanceof javafx.scene.control.Label label && text.equals(label.getText())
                 || root instanceof Parent parent && parent.getChildrenUnmodifiable().stream().anyMatch(child -> hasLabel(child, text));
+    }
+
+    /// Exercises the actual management entry, disabled/broken configurations, and refreshes while another instance stays selected.
+    private static void verifyManagementContext(Scene scene, Path output, HMCLGameRepository repo,
+                                               HMCLGameInstance gameA, HMCLGameInstance gameB, JsonObject catalog,
+                                               AtomicInteger aChecks, AtomicInteger bChecks, String base) throws Exception {
+        Path config = RemoteContentController.root(gameB).resolve("client/config.json");
+        String originalConfig = Files.readString(config);
+        var accepted = RemoteContent.parse(catalog.toString(), "b");
+        var store = new ContentStore(RemoteContentController.root(gameB), base + "instances/b/");
+        Node homepage = onFx(() -> {
+            repo.setSelectedInstance(gameA);
+            require(!hasNavigationItem(Controllers.getRootPage(), "服务器信息"), "Global sidebar must not contain instance information");
+            var page = Controllers.getGameInstancePage();
+            page.setInstance(gameB.getId(), repo);
+            Controllers.navigate(page);
+            snapshot(scene, output.resolve("server-information-entry.png"));
+            require(informationEntry(scene).isVisible(), "Configured instances must expose their management entry");
+            Files.delete(config);
+            page.setInstance(gameB.getId(), repo);
+            require(!informationEntry(scene).isVisible() && !informationEntry(scene).isManaged(), "Ordinary instances must hide the entry without taking space");
+            var disabled = com.google.gson.JsonParser.parseString(originalConfig).getAsJsonObject();
+            disabled.addProperty("enabled", false);
+            Files.writeString(config, disabled.toString());
+            page.setInstance(gameB.getId(), repo);
+            require(!informationEntry(scene).isVisible(), "Disabled remote content must hide the entry");
+            Files.writeString(config, "{broken-json");
+            page.setInstance(gameB.getId(), repo);
+            require(informationEntry(scene).isVisible(), "Invalid configurations must keep the repair entry");
+            informationEntry(scene).fireEvent(new ActionEvent());
+            snapshot(scene, output.resolve("server-information-invalid.png"));
+            require(!hasButton(informationPane(scene), "查看用户协议"), "Broken B must never expose A's cached protocol");
+            return java.util.Objects.requireNonNull(Controllers.getRootPage().getMainPage().lookup("#bf656-announcement-feed"));
+        });
+        require(aChecks.get() == 2 && bChecks.get() == 1, "Reading configuration errors must not refresh another instance");
+        onFx(() -> {
+            Files.writeString(config, originalConfig);
+            catalog.getAsJsonObject("agreement").addProperty("title", "实例 B 的独立协议");
+            catalog.getAsJsonObject("agreement").addProperty("introduction", "这是 B 的协议说明。");
+            catalog.getAsJsonArray("notices").get(0).getAsJsonObject().addProperty("revision", 2);
+            for (var item : catalog.getAsJsonArray("announcements"))
+                item.getAsJsonObject().remove("expiresAt");
+            findButton(informationPane(scene), "刷新当前实例").fire();
+            return true;
+        });
+        await(() -> bChecks.get() == 2 && hasLabel(informationPane(scene), "同步成功"));
+        onFx(() -> {
+            require(aChecks.get() == 2 && GameDirectoryManager.getSelectedInstance().getId().equals(gameA.getId()), "Repairing B must leave A selected and untouched");
+            require(Controllers.getRootPage().getMainPage().lookup("#bf656-announcement-feed") == homepage, "B results must not replace A's homepage cards");
+            require(!hasButton(scene.getRoot(), "我已知晓"), "Management downloads must not show notices");
+            require(!hasButton(informationPane(scene), "服务器公告") && !hasButton(informationPane(scene), "第二条独立公告"), "Announcement links must be removed");
+            snapshot(scene, output.resolve("server-information-B.png"));
+            findButton(informationPane(scene), "查看用户协议").fire();
+            snapshot(scene, output.resolve("server-information-B-protocol.png"));
+            Node document = java.util.Objects.requireNonNull(scene.getRoot().lookup("#bf656-document"));
+            require(hasLabel(document, "实例 B 的独立协议") && hasLabel(document, "这是 B 的协议说明。"), "Read-only protocol must belong to B while A stays selected");
+            require(!hasButton(document, "同意"), "Read-only viewing must not grant consent");
+            DialogUtils.close(document);
+            findButton(informationPane(scene), "刷新当前实例").fire();
+            return true;
+        });
+        await(() -> bChecks.get() == 3 && hasLabel(informationPane(scene), "同步成功"));
+        require(store.accepted(accepted) && !store.accepted(RemoteContent.parse(catalog.toString(), "b")), "Viewing must preserve old receipts without accepting a changed protocol");
+        onFx(() -> {
+            require(aChecks.get() == 2 && !hasButton(scene.getRoot(), "我已知晓"), "Explicit refresh must stay quiet and target B");
+            DialogUtils.close(informationPane(scene));
+            repo.setSelectedInstance(gameB);
+            return true;
+        });
+        await(() -> hasButton(scene.getRoot(), "我已知晓"));
+        onFx(() -> {
+            require(bChecks.get() == 3, "Selecting successfully inspected B must reuse synchronized data");
+            findButton(scene.getRoot(), "我已知晓").fire();
+            catalog.getAsJsonArray("notices").get(0).getAsJsonObject().addProperty("revision", 3);
+            RemoteContentController.showInformation(gameB);
+            findButton(informationPane(scene), "刷新当前实例").fire();
+            return true;
+        });
+        await(() -> bChecks.get() == 4 && hasLabel(informationPane(scene), "同步成功"));
+        onFx(() -> {
+            require(!hasButton(scene.getRoot(), "我已知晓"), "Management refresh must also suppress notices for the selected target");
+            DialogUtils.close(informationPane(scene));
+            repo.setSelectedInstance(gameA);
+            repo.setSelectedInstance(gameB);
+            return true;
+        });
+        await(() -> hasButton(scene.getRoot(), "我已知晓"));
+        onFx(() -> {
+            findButton(scene.getRoot(), "我已知晓").fire();
+            require(aChecks.get() == 2 && bChecks.get() == 4, "Management must not introduce automatic duplicate requests");
+            return true;
+        });
+    }
+
+    /// Finds the sole information entry inside the instance management page.
+    private static AdvancedListItem informationEntry(Scene scene) {
+        return (AdvancedListItem) java.util.Objects.requireNonNull(scene.getRoot().lookup("#bf656-instance-information-entry"));
+    }
+
+    /// Applies skins to asynchronously replaced status content in the offscreen scene before querying it.
+    private static Region informationPane(Scene scene) {
+        Region pane = (Region) java.util.Objects.requireNonNull(scene.getRoot().lookup("#bf656-instance-information"));
+        pane.applyCss();
+        pane.layout();
+        return pane;
+    }
+
+    /// Checks actual sidebar controls rather than plain text appearing inside dialogs.
+    private static boolean hasNavigationItem(Node root, String title) {
+        return root instanceof AdvancedListItem item && title.equals(item.getTitle())
+                || root instanceof Parent parent && parent.getChildrenUnmodifiable().stream().anyMatch(child -> hasNavigationItem(child, title));
     }
 
     /// Checks full-width cards, independent collapse, legacy receipts and resize behavior in a real scene.

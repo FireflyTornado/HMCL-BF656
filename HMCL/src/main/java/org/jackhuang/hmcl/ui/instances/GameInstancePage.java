@@ -30,6 +30,7 @@ import org.jackhuang.hmcl.game.GameInstanceID;
 import org.jackhuang.hmcl.game.HMCLGameInstance;
 import org.jackhuang.hmcl.game.HMCLGameRepository;
 import org.jackhuang.hmcl.game.HMCLGameRepositorySnapshot;
+import org.jackhuang.hmcl.remote.RemoteContentController;
 import org.jackhuang.hmcl.setting.GameSettings;
 import org.jackhuang.hmcl.task.Schedulers;
 import org.jackhuang.hmcl.task.Task;
@@ -168,6 +169,13 @@ public class GameInstancePage extends DecoratorAnimatedPage implements Decorator
 
     public void showInstanceSettings() {
         tab.select(gameSettingsTab, false);
+    }
+
+    /// Opens remote content for this page's concrete instance without changing the selected launch target.
+    private void showServerInformation() {
+        @Nullable HMCLGameInstance game = requireGameInstance();
+        if (game != null)
+            RemoteContentController.showInformation(game);
     }
 
     public void setInstance(GameInstanceID instanceId, HMCLGameRepository repository) {
@@ -403,6 +411,12 @@ public class GameInstancePage extends DecoratorAnimatedPage implements Decorator
                         .addNavigationDrawerItem(i18n("instance.update"), SVG.UPDATE, control::updateGame, upgradeItem -> {
                             upgradeItem.visibleProperty().bind(control.currentInstanceUpgradable);
                         })
+                        .addNavigationDrawerItem("服务器信息", SVG.CHAT, control::showServerInformation, item -> {
+                            item.setId("bf656-instance-information-entry");
+                            item.visibleProperty().bind(Bindings.createBooleanBinding(
+                                    () -> RemoteContentController.hasInformation(control.requireGameInstance()), control.instance));
+                            item.managedProperty().bind(item.visibleProperty());
+                        })
                         .addNavigationDrawerItem(i18n("instance.launch.test"), SVG.ROCKET_LAUNCH, control::testGame)
                         .addNavigationDrawerItem(i18n("settings.game.exploration"), SVG.FOLDER_OPEN, null, browseMenuItem -> {
                             browseMenuItem.setOnAction(e -> browsePopup.show(browseMenuItem, JFXPopup.PopupVPosition.BOTTOM, JFXPopup.PopupHPosition.LEFT, browseMenuItem.getWidth(), 0));
@@ -411,7 +425,7 @@ public class GameInstancePage extends DecoratorAnimatedPage implements Decorator
                             managementItem.setOnAction(e -> managementPopup.show(managementItem, JFXPopup.PopupVPosition.BOTTOM, JFXPopup.PopupHPosition.LEFT, managementItem.getWidth(), 0));
                         });
                 toolbar.getStyleClass().add("advanced-list-box-clear-padding");
-                FXUtils.setLimitHeight(toolbar, 40 * 4 + 12 * 2);
+                FXUtils.setLimitHeight(toolbar, 40 * 5 + 12 * 2);
 
                 setLeft(sideBar, toolbar);
             }
