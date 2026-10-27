@@ -437,6 +437,19 @@ public sealed abstract class GameSettings extends ObservableSetting {
         return jvmOptions;
     }
 
+    /// Property name for the inheritable garbage collector preference.
+    public static final String PROPERTY_GC_STRATEGY = "gcStrategy";
+
+    /// Missing or unknown strategies retain HMCL's original tuned-G1 behavior.
+    @SerializedName(PROPERTY_GC_STRATEGY)
+    private final InheritableProperty<GcStrategy> gcStrategy =
+            newInheritableProperty(PROPERTY_GC_STRATEGY, GcStrategy.TUNED_G1);
+
+    /// Returns the collector preference, independently of heap capacity and argument generation switches.
+    public InheritableProperty<GcStrategy> gcStrategyProperty() {
+        return gcStrategy;
+    }
+
     /// Property name for disabling generated JVM options.
     public static final String PROPERTY_NO_JVM_OPTIONS = "noJVMOptions";
 

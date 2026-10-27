@@ -22,6 +22,7 @@ import com.jfoenix.controls.JFXComboBox;
 import com.jfoenix.controls.JFXSlider;
 import com.jfoenix.controls.JFXTextField;
 import javafx.beans.InvalidationListener;
+import javafx.beans.binding.Bindings;
 import javafx.beans.property.ObjectProperty;
 import javafx.beans.property.Property;
 import javafx.beans.property.ReadOnlyObjectProperty;
@@ -45,6 +46,7 @@ import org.jackhuang.hmcl.game.*;
 import org.jackhuang.hmcl.java.JavaManager;
 import org.jackhuang.hmcl.java.BundledJava;
 import org.jackhuang.hmcl.java.JavaRuntime;
+import org.jackhuang.hmcl.launch.GcStrategySupport;
 import org.jackhuang.hmcl.setting.*;
 import org.jackhuang.hmcl.setting.property.InheritableProperty;
 import org.jackhuang.hmcl.setting.property.SettingProperty;
@@ -744,6 +746,19 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
                         setting -> ((GameSettings.Instance) setting).ignoreJavaCompatibilityWarningsProperty());
             }
 
+            var gcStrategyPane = createInheritableButton(
+                    GameSettings::gcStrategyProperty,
+                    strategy -> i18n("settings.advanced.gc_strategy." + strategy.name().toLowerCase(Locale.ROOT)),
+                    null,
+                    GcStrategy.values());
+            jvmSettings.getContent().add(gcStrategyPane);
+            gcStrategyPane.setTitle(i18n("settings.advanced.gc_strategy"));
+            // Keep the selected strategy readable while the longer explanatory text wraps beside it.
+            FXUtils.onChangeAndOperate(gcStrategyPane.trailingTextProperty(), text -> {
+                if (gcStrategyPane.lookup(".trailing-label") instanceof Label label)
+                    label.setMinWidth(Region.USE_PREF_SIZE);
+            });
+
             var jvmArgsPane = new LinePane();
             jvmSettings.getContent().add(jvmArgsPane);
             jvmArgsPane.setTitle(i18n("settings.advanced.jvm_args"));
@@ -753,6 +768,18 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
                 txtJVMArgs.setPrefWidth(400);
                 jvmArgsPane.setRight(txtJVMArgs);
                 bindIndependentTextField(jvmArgsPane, txtJVMArgs, GameSettings::jvmOptionsProperty);
+                gcStrategyPane.subtitleProperty().bind(Bindings.createStringBinding(() -> {
+                    @Nullable GcStrategy strategy = gcStrategyPane.getValue();
+                    String description = i18n("settings.advanced.gc_strategy."
+                            + (strategy != null ? strategy : GcStrategy.TUNED_G1).name().toLowerCase(Locale.ROOT) + ".desc");
+                    String status = noJVMArgsPane.effectiveValueProperty().get()
+                            || noOptimizingJVMArgsPane.effectiveValueProperty().get()
+                            ? i18n("settings.advanced.gc_strategy.disabled")
+                            : StringUtils.tokenize(txtJVMArgs.getText()).stream().anyMatch(GcStrategySupport::isGcArgument)
+                            ? i18n("settings.advanced.gc_strategy.custom") : "";
+                    return status + description + " " + i18n("settings.advanced.gc_strategy.hint");
+                }, gcStrategyPane.valueProperty(), noJVMArgsPane.effectiveValueProperty(),
+                        noOptimizingJVMArgsPane.effectiveValueProperty(), txtJVMArgs.textProperty()));
             }
 
             var deprecatedJvmMemorySettings = new ComponentSublist(() -> {

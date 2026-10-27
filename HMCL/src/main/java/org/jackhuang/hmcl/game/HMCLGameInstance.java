@@ -620,6 +620,7 @@ public class HMCLGameInstance extends DefaultGameInstance {
                 .setPostExitCommand(vs.getInheritable(GameSettings::postExitCommandProperty))
                 .setNoGeneratedJVMArgs(noJVMOptions)
                 .setNoGeneratedOptimizingJVMArgs(vs.getInheritable(GameSettings::noOptimizingJVMOptionsProperty))
+                .setGcStrategy(vs.getInheritable(GameSettings::gcStrategyProperty))
                 .setUseCustomNatives(vs.getInheritable(GameSettings::useCustomNativesProperty))
                 .setNativesDir(vs.getInheritable(GameSettings::nativesDirectoryProperty))
                 .setProcessPriority(vs.getInheritable(GameSettings::processPriorityProperty))

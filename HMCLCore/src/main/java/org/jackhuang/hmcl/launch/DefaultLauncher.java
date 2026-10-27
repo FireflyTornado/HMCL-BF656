@@ -205,16 +205,8 @@ public class DefaultLauncher extends Launcher {
                 res.addUnstableDefault("UnlockExperimentalVMOptions", true);
                 res.addUnstableDefault("UnlockDiagnosticVMOptions", true);
 
-                // Using G1GC with its settings by default
-                if (javaVersion >= 8
-                        && res.noneMatch(arg -> "-XX:-UseG1GC".equals(arg) || (arg.startsWith("-XX:+Use") && arg.endsWith("GC")))) {
-                    res.addUnstableDefault("UseG1GC", true);
-                    res.addUnstableDefault("G1MixedGCCountTarget", "5");
-                    res.addUnstableDefault("G1NewSizePercent", "20");
-                    res.addUnstableDefault("G1ReservePercent", "20");
-                    res.addUnstableDefault("MaxGCPauseMillis", "50");
-                    res.addUnstableDefault("G1HeapRegionSize", "32m");
-                }
+                // Probe the selected game runtime; custom GC parameters take precedence over the strategy.
+                GcStrategySupport.apply(res, options);
 
                 res.addUnstableDefault("OmitStackTraceInFastThrow", false);
 
@@ -238,7 +230,8 @@ public class DefaultLauncher extends Launcher {
                     }
                 }
 
-                if (is64bit && (javaVersion >= 25 && javaVersion <= 26)) {
+                if (is64bit && (javaVersion >= 25 && javaVersion <= 26)
+                        && res.noneMatch(arg -> arg.equals("-XX:+UseZGC") || arg.equals("-XX:+UseShenandoahGC"))) {
                     res.addUnstableDefault("UseCompactObjectHeaders", true);
                 }
 
