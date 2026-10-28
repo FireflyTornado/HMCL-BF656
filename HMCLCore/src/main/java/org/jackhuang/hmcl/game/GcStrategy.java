@@ -17,6 +17,7 @@
  */
 package org.jackhuang.hmcl.game;
 
+import com.google.gson.annotations.SerializedName;
 import org.jetbrains.annotations.NotNullByDefault;
 
 /// Persisted garbage collector preferences; recommendation ranges in the UI are not compatibility limits.
@@ -26,9 +27,9 @@ public enum GcStrategy {
     TUNED_G1,
     /// Selects G1 without additional collector tuning.
     G1,
-    /// Prefers generational ZGC, then runtime-default ZGC, then untuned G1.
-    GENERATIONAL_ZGC,
-    /// Prefers runtime-default ZGC, then untuned G1.
+    /// Prefers generational ZGC, then non-generational ZGC; unsupported runtimes stop the launch.
+    /// The former generational-only preference is read as the unified strategy when loading older settings.
+    @SerializedName(value = "ZGC", alternate = {"GENERATIONAL_ZGC"})
     ZGC,
     /// Leaves collector selection and tuning to Java or user-supplied arguments.
     DEFAULT

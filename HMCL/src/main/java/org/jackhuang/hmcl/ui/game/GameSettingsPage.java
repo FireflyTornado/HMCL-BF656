@@ -1000,6 +1000,11 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
         return node;
     }
 
+    /// Reveals advanced options without changing any persisted game or launch preferences.
+    public void showAdvancedOptions() {
+        showAdvancedSettings.setSelected(true);
+    }
+
     @SuppressWarnings("unchecked")
     private void selectPreset(GameSettings.Preset setting) {
         currentSetting.set((S) setting);

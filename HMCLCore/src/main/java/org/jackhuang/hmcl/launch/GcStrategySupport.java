@@ -22,12 +22,17 @@ import org.jackhuang.hmcl.game.LaunchOptions;
 import org.jackhuang.hmcl.util.platform.Bits;
 import org.jackhuang.hmcl.util.platform.CommandBuilder;
 import org.jetbrains.annotations.NotNullByDefault;
+import org.jetbrains.annotations.Nullable;
 import org.jetbrains.annotations.Unmodifiable;
 
 import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
 
@@ -77,7 +82,12 @@ public final class GcStrategySupport {
                     arguments -> supports(executable, arguments));
         } catch (ProbeInterruptedException e) {
             throw new IOException("Interrupted while checking garbage collector support", e.getCause());
+        } catch (ProbeFailedException e) {
+            throw new GcStrategyException(e.reason, options.getJava().getVersion(), executable, e.getCause());
         }
+        if (options.getGcStrategy() == GcStrategy.ZGC && resolution.strategy() != GcStrategy.ZGC)
+            throw new GcStrategyException(GcStrategyException.Reason.UNSUPPORTED,
+                    options.getJava().getVersion(), executable, null);
         command.addAllDefault(resolution.arguments());
         if (resolution.strategy() == GcStrategy.TUNED_G1) {
             command.addUnstableDefault("G1MixedGCCountTarget", "5");
@@ -87,7 +97,7 @@ public final class GcStrategySupport {
             command.addUnstableDefault("G1HeapRegionSize", "32m");
         }
         LOG.info("GC strategy: requested=" + options.getGcStrategy() + ", effective=" + resolution.strategy()
-                + ", Java=" + version + ", executable=" + executable);
+                + ", generational=" + resolution.generational() + ", Java=" + version + ", executable=" + executable);
         return resolution.strategy();
     }
 
@@ -95,36 +105,28 @@ public final class GcStrategySupport {
     /// The support predicate tests the target runtime, since vendor/platform availability can differ.
     static Resolution resolve(GcStrategy requested, int version, boolean is64bit,
                               Predicate<List<String>> supports) {
-        @Unmodifiable List<GcStrategy> candidates = switch (requested) {
-            case TUNED_G1 -> List.of(GcStrategy.TUNED_G1);
-            case G1 -> List.of(GcStrategy.G1);
-            case GENERATIONAL_ZGC -> List.of(GcStrategy.GENERATIONAL_ZGC, GcStrategy.ZGC, GcStrategy.G1);
-            case ZGC -> List.of(GcStrategy.ZGC, GcStrategy.G1);
-            case DEFAULT -> List.of();
-        };
-        for (GcStrategy candidate : candidates) {
-            @Unmodifiable List<String> arguments;
-            if (candidate == GcStrategy.GENERATIONAL_ZGC) {
-                if (version < 21 || !is64bit)
-                    continue;
-                // Java 23 defaults to generational ZGC; 24+ removes non-generational mode.
-                arguments = version < 23 ? List.of("-XX:+UseZGC", "-XX:+ZGenerational") : List.of("-XX:+UseZGC");
-            } else if (candidate == GcStrategy.ZGC) {
-                if (version < 15 || !is64bit)
-                    continue;
-                arguments = List.of("-XX:+UseZGC");
-            } else {
-                if (version < 8)
-                    continue;
-                arguments = List.of("-XX:+UseG1GC");
+        if (requested == GcStrategy.ZGC) {
+            if (is64bit && version >= 21) {
+                // Java 23 defaults to generational ZGC; never emit its removed selector on Java 24+.
+                @Unmodifiable List<String> generational = version < 23
+                        ? List.of("-XX:+UseZGC", "-XX:+ZGenerational") : List.of("-XX:+UseZGC");
+                if (supports.test(generational))
+                    return new Resolution(GcStrategy.ZGC, generational, true);
             }
-            if (supports.test(arguments)) {
-                GcStrategy effective = candidate == GcStrategy.ZGC && version >= 23
-                        ? GcStrategy.GENERATIONAL_ZGC : candidate;
-                return new Resolution(effective, arguments);
+            if (is64bit && version >= 15 && version < 24) {
+                // Java 23 still permits explicitly disabling generational mode; Java 24+ does not.
+                @Unmodifiable List<String> nonGenerational = version == 23
+                        ? List.of("-XX:+UseZGC", "-XX:-ZGenerational") : List.of("-XX:+UseZGC");
+                if (supports.test(nonGenerational))
+                    return new Resolution(GcStrategy.ZGC, nonGenerational, false);
             }
+        } else if (requested != GcStrategy.DEFAULT && version >= 8) {
+            @Unmodifiable List<String> arguments = List.of("-XX:+UseG1GC");
+            if (supports.test(arguments))
+                return new Resolution(requested, arguments, false);
         }
-        return new Resolution(GcStrategy.DEFAULT, List.of());
+        // apply() turns this unresolved result into an explicit error for the ZGC preference.
+        return new Resolution(GcStrategy.DEFAULT, List.of(), false);
     }
 
     /// Tests collector availability with a small, bounded JVM invocation, without starting the game.
@@ -135,18 +137,32 @@ public final class GcStrategySupport {
         command.add("-Xmx64m");
         command.addAll(arguments);
         command.add("-version");
-        ProcessBuilder builder = new ProcessBuilder(command)
-                .redirectOutput(ProcessBuilder.Redirect.DISCARD)
-                .redirectError(ProcessBuilder.Redirect.DISCARD);
+        ProcessBuilder builder = new ProcessBuilder(command).redirectErrorStream(true);
         // Test runtime capability independently of inherited JVM injection variables.
         builder.environment().remove("JAVA_TOOL_OPTIONS");
         builder.environment().remove("JDK_JAVA_OPTIONS");
         builder.environment().remove("_JAVA_OPTIONS");
+        @Nullable Path output = null;
         try {
+            // Redirect to a temporary log so a failed/noisy executable cannot block on a full output pipe.
+            output = Files.createTempFile("hmcl-gc-probe-", ".log");
+            builder.redirectOutput(output.toFile());
             Process process = builder.start();
             try {
                 process.getOutputStream().close();
-                return process.waitFor(3, TimeUnit.SECONDS) && process.exitValue() == 0;
+                if (!process.waitFor(3, TimeUnit.SECONDS))
+                    throw new ProbeFailedException(GcStrategyException.Reason.DETECTION_TIMED_OUT,
+                            new IOException("Java GC capability check timed out after 3 seconds"));
+                if (process.exitValue() == 0)
+                    return true;
+                String diagnostic;
+                try (InputStream input = Files.newInputStream(output)) {
+                    diagnostic = new String(input.readNBytes(16384), StandardCharsets.UTF_8).trim();
+                }
+                if (isUnsupportedDiagnostic(diagnostic))
+                    return false;
+                throw new ProbeFailedException(GcStrategyException.Reason.DETECTION_FAILED,
+                        new IOException("Java GC capability check exited with " + process.exitValue() + ": " + diagnostic));
             } finally {
                 if (process.isAlive())
                     process.destroyForcibly();
@@ -155,17 +171,46 @@ public final class GcStrategySupport {
             Thread.currentThread().interrupt();
             throw new ProbeInterruptedException(e);
         } catch (IOException e) {
-            LOG.warning("Could not check garbage collector support: " + executable, e);
-            return false;
+            throw new ProbeFailedException(GcStrategyException.Reason.DETECTION_FAILED, e);
+        } finally {
+            if (output != null) {
+                try {
+                    Files.deleteIfExists(output);
+                } catch (IOException e) {
+                    LOG.warning("Could not remove GC capability check log", e);
+                }
+            }
         }
+    }
+
+    /// Distinguishes rejected collector options from memory allocation, executable or other VM failures.
+    static boolean isUnsupportedDiagnostic(String diagnostic) {
+        String lower = diagnostic.toLowerCase(Locale.ROOT);
+        boolean collector = lower.contains("usezgc") || lower.contains("zgenerational")
+                || lower.contains("useg1gc") || lower.contains("zgc") || lower.contains("garbage collector");
+        return collector && (lower.contains("unrecognized") || lower.contains("unrecognised")
+                || lower.contains("not supported") || lower.contains("unsupported") || lower.contains("not available"));
     }
 
     /// Effective collector and immutable selection arguments, excluding the optional G1 tuning bundle.
     @NotNullByDefault
-    record Resolution(GcStrategy strategy, @Unmodifiable List<String> arguments) {
+    record Resolution(GcStrategy strategy, @Unmodifiable List<String> arguments, boolean generational) {
         /// Defensively copies the arguments to keep the resolution immutable.
         Resolution {
             arguments = List.copyOf(arguments);
+        }
+    }
+
+    /// Propagates inconclusive checks without silently treating them as unsupported collectors.
+    @NotNullByDefault
+    private static final class ProbeFailedException extends RuntimeException {
+        /// Failure category retained for the translated launch error.
+        private final GcStrategyException.Reason reason;
+
+        /// Creates a capability-check failure with its original diagnostic cause.
+        private ProbeFailedException(GcStrategyException.Reason reason, IOException cause) {
+            super(cause);
+            this.reason = reason;
         }
     }
 

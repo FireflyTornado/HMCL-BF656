@@ -29,6 +29,18 @@ import static org.junit.jupiter.api.Assertions.*;
 /// Verifies GC strategy persistence, forward-compatible defaults and independent preset inheritance.
 @NotNullByDefault
 public final class GcStrategySettingsTest {
+    /// Both old ZGC choices migrate to the unified option and serialize with the canonical name.
+    @ParameterizedTest
+    @ValueSource(strings = {"ZGC", "GENERATIONAL_ZGC"})
+    public void migratesBothOldZgcChoices(String legacy) {
+        var instance = LauncherSettings.SETTINGS_GSON.fromJson(
+                "{\"gcStrategy\":\"" + legacy + "\"}", GameSettings.Instance.class);
+        assertEquals(GcStrategy.ZGC, instance.gcStrategyProperty().getValue());
+        var json = JsonParser.parseString(LauncherSettings.SETTINGS_GSON.toJson(instance, GameSettings.Instance.class))
+                .getAsJsonObject();
+        assertEquals("ZGC", json.get("gcStrategy").getAsString());
+    }
+
     /// Missing, null and unknown strategy values preserve the original tuned-G1 default.
     @ParameterizedTest
     @ValueSource(strings = {"{}", "{\"gcStrategy\":null}", "{\"gcStrategy\":\"FUTURE_COLLECTOR\"}"})

@@ -171,6 +171,14 @@ public class GameInstancePage extends DecoratorAnimatedPage implements Decorator
         tab.select(gameSettingsTab, false);
     }
 
+    /// Reveals advanced instance settings when recovering from a launch configuration error.
+    public void showAdvancedInstanceSettings() {
+        showInstanceSettings();
+        @Nullable GameSettingsPage<GameSettings.Instance> page = gameSettingsTab.getNode();
+        if (page != null)
+            page.showAdvancedOptions();
+    }
+
     /// Opens remote content for this page's concrete instance without changing the selected launch target.
     private void showServerInformation() {
         @Nullable HMCLGameInstance game = requireGameInstance();

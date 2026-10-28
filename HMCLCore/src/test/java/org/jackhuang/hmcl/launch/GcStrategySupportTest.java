@@ -20,6 +20,7 @@ package org.jackhuang.hmcl.launch;
 import org.jackhuang.hmcl.game.GcStrategy;
 import org.jackhuang.hmcl.game.LaunchOptions;
 import org.jackhuang.hmcl.java.JavaRuntime;
+import org.jackhuang.hmcl.java.JavaInfo;
 import org.jackhuang.hmcl.util.platform.CommandBuilder;
 import org.jetbrains.annotations.NotNullByDefault;
 import org.junit.jupiter.api.Test;
@@ -43,41 +44,101 @@ public final class GcStrategySupportTest {
     @ParameterizedTest
     @ValueSource(ints = {21, 22, 23, 24, 25, 26, 27})
     public void selectsVersionAppropriateGenerationalArguments(int version) {
-        var result = GcStrategySupport.resolve(GcStrategy.GENERATIONAL_ZGC, version, true, ignored -> true);
-        assertEquals(GcStrategy.GENERATIONAL_ZGC, result.strategy());
+        var result = GcStrategySupport.resolve(GcStrategy.ZGC, version, true, ignored -> true);
+        assertEquals(GcStrategy.ZGC, result.strategy());
+        assertTrue(result.generational());
         assertEquals(version < 23 ? List.of("-XX:+UseZGC", "-XX:+ZGenerational") : List.of("-XX:+UseZGC"),
                 result.arguments());
     }
 
-    /// Preference falls back by runtime version/bitness rather than the recommendation text in the UI.
+    /// Unsupported Java versions/bitness remain unresolved; they must never silently select G1.
     @ParameterizedTest
-    @CsvSource({"21,true,GENERATIONAL_ZGC", "17,true,ZGC", "15,true,ZGC", "14,true,G1",
-            "8,true,G1", "7,true,DEFAULT", "21,false,G1"})
+    @CsvSource({"21,true,ZGC", "17,true,ZGC", "15,true,ZGC", "14,true,DEFAULT",
+            "8,true,DEFAULT", "7,true,DEFAULT", "21,false,DEFAULT"})
     public void fallsBackAcrossVersionsAndBitness(int version, boolean is64bit, GcStrategy expected) {
         assertEquals(expected, GcStrategySupport.resolve(
-                GcStrategy.GENERATIONAL_ZGC, version, is64bit, ignored -> true).strategy());
+                GcStrategy.ZGC, version, is64bit, ignored -> true).strategy());
     }
 
     /// A vendor runtime may support ordinary ZGC but reject the generational flag.
     @Test
     public void probesCapabilitiesInsteadOfAssumingVendorSupport() {
-        var result = GcStrategySupport.resolve(GcStrategy.GENERATIONAL_ZGC, 21, true,
+        var result = GcStrategySupport.resolve(GcStrategy.ZGC, 21, true,
                 args -> !args.contains("-XX:+ZGenerational"));
         assertEquals(GcStrategy.ZGC, result.strategy());
+        assertFalse(result.generational());
         assertEquals(List.of("-XX:+UseZGC"), result.arguments());
-        assertEquals(GcStrategy.G1, GcStrategySupport.resolve(GcStrategy.GENERATIONAL_ZGC, 21, true,
+        assertEquals(GcStrategy.DEFAULT, GcStrategySupport.resolve(GcStrategy.ZGC, 21, true,
                 args -> !args.contains("-XX:+UseZGC")).strategy());
         assertEquals(GcStrategy.DEFAULT, GcStrategySupport.resolve(
-                GcStrategy.GENERATIONAL_ZGC, 21, true, ignored -> false).strategy());
+                GcStrategy.ZGC, 21, true, ignored -> false).strategy());
     }
 
-    /// ZGC uses its runtime default; Java 23+ therefore resolves to generational mode.
+    /// The unified preference selects generational mode on Java 21+, with version-appropriate flags.
     @ParameterizedTest
-    @CsvSource({"17,ZGC", "21,ZGC", "23,GENERATIONAL_ZGC", "25,GENERATIONAL_ZGC"})
-    public void ordinaryPreferenceDoesNotForceRemovedNonGenerationalMode(int version, GcStrategy expected) {
+    @CsvSource({"17,false", "21,true", "23,true", "25,true"})
+    public void unifiedPreferenceSelectsAppropriateMode(int version, boolean generational) {
         var result = GcStrategySupport.resolve(GcStrategy.ZGC, version, true, ignored -> true);
-        assertEquals(expected, result.strategy());
-        assertEquals(List.of("-XX:+UseZGC"), result.arguments());
+        assertEquals(GcStrategy.ZGC, result.strategy());
+        assertEquals(generational, result.generational());
+        assertEquals(version >= 21 && version < 23 ? List.of("-XX:+UseZGC", "-XX:+ZGenerational")
+                : List.of("-XX:+UseZGC"), result.arguments());
+    }
+
+    /// Java 23 can still use its legacy mode if generational mode is rejected by the runtime.
+    @Test
+    public void java23CanExplicitlyFallBackToNonGenerationalZgc() {
+        var result = GcStrategySupport.resolve(GcStrategy.ZGC, 23, true,
+                args -> args.contains("-XX:-ZGenerational"));
+        assertEquals(GcStrategy.ZGC, result.strategy());
+        assertFalse(result.generational());
+        assertEquals(List.of("-XX:+UseZGC", "-XX:-ZGenerational"), result.arguments());
+    }
+
+    /// Java 24+ removed non-generational mode, so unavailable ZGC never emits its removed selector or G1.
+    @ParameterizedTest
+    @ValueSource(ints = {24, 25, 26, 27})
+    public void modernRuntimesNeverProbeRemovedOrDifferentCollectors(int version) {
+        var probes = new AtomicInteger();
+        var result = GcStrategySupport.resolve(GcStrategy.ZGC, version, true, args -> {
+            probes.incrementAndGet();
+            assertEquals(List.of("-XX:+UseZGC"), args);
+            return false;
+        });
+        assertEquals(1, probes.get());
+        assertEquals(GcStrategy.DEFAULT, result.strategy());
+        assertTrue(result.arguments().isEmpty());
+    }
+
+    /// Confirmed unsupported ZGC stops command generation and preserves heap settings without inserting G1.
+    @Test
+    public void unsupportedZgcStopsLaunchInsteadOfFallingBack() {
+        JavaRuntime current = java.util.Objects.requireNonNull(JavaRuntime.CURRENT_JAVA);
+        var oldJava = new JavaRuntime(current.getBinary(),
+                new JavaInfo(current.getPlatform(), "1.8.0_442", current.getVendor()), false, true);
+        var command = new CommandBuilder().add("-Xmx6144m");
+        var options = new LaunchOptions.Builder().setJava(oldJava).setGcStrategy(GcStrategy.ZGC).create();
+        var failure = assertThrows(GcStrategyException.class, () -> GcStrategySupport.apply(command, options));
+        assertEquals(GcStrategyException.Reason.UNSUPPORTED, failure.getReason());
+        assertEquals(oldJava.getBinary(), failure.getExecutable());
+        assertEquals(oldJava.getVersion(), failure.getJavaVersion());
+        assertEquals(List.of("-Xmx6144m"), command.asList());
+    }
+
+    /// Only collector rejection diagnostics count as unsupported, rather than generic VM failures.
+    @ParameterizedTest
+    @ValueSource(strings = {"Unrecognized VM option 'UseZGC'", "Unrecognized VM option 'ZGenerational'",
+            "Error: ZGC is not supported on this platform", "Selected garbage collector is not supported"})
+    public void recognizesUnsupportedCollectorDiagnostics(String diagnostic) {
+        assertTrue(GcStrategySupport.isUnsupportedDiagnostic(diagnostic));
+    }
+
+    /// Memory and executable failures must not be mislabeled as unsupported ZGC.
+    @ParameterizedTest
+    @ValueSource(strings = {"Could not reserve enough space for object heap", "Error: Could not create the Java Virtual Machine",
+            "Access is denied", "ZGC initialization failed: insufficient memory"})
+    public void rejectsUnrelatedFailureDiagnostics(String diagnostic) {
+        assertFalse(GcStrategySupport.isUnsupportedDiagnostic(diagnostic));
     }
 
     /// Recognized user GC selections and tuning suppress the whole generated policy before probing Java.
@@ -152,7 +213,8 @@ public final class GcStrategySupportTest {
                 .setJavaExecutable(directory.resolve("missing-java.exe"))
                 .setGcStrategy(GcStrategy.G1).create();
         var command = new CommandBuilder();
-        assertEquals(GcStrategy.DEFAULT, GcStrategySupport.apply(command, options));
+        var failure = assertThrows(GcStrategyException.class, () -> GcStrategySupport.apply(command, options));
+        assertEquals(GcStrategyException.Reason.DETECTION_FAILED, failure.getReason());
         assertTrue(command.asList().isEmpty());
     }
 }

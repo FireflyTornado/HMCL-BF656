@@ -22,16 +22,18 @@ import javafx.scene.Node;
 import javafx.scene.Parent;
 import javafx.scene.Scene;
 import javafx.scene.control.Label;
+import javafx.scene.control.ButtonBase;
 import javafx.scene.image.WritableImage;
 import javafx.scene.layout.StackPane;
 import org.jackhuang.hmcl.Launcher;
 import org.jackhuang.hmcl.game.GcStrategy;
+import org.jackhuang.hmcl.launch.GcStrategyException;
 import org.jackhuang.hmcl.setting.GameSettings;
 import org.jackhuang.hmcl.setting.GameSettingsPresetID;
 import org.jackhuang.hmcl.setting.SettingsManager;
 import org.jackhuang.hmcl.ui.construct.ComponentList;
 import org.jackhuang.hmcl.ui.construct.LineSelectButton;
-import org.jackhuang.hmcl.ui.construct.LineToggleButton;
+import org.jackhuang.hmcl.ui.construct.DialogCloseEvent;
 import org.jetbrains.annotations.NotNullByDefault;
 import org.jetbrains.annotations.Unmodifiable;
 
@@ -46,6 +48,7 @@ import java.util.Objects;
 import java.util.concurrent.Callable;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.jackhuang.hmcl.util.i18n.I18n.i18n;
 
@@ -72,9 +75,10 @@ public final class GcStrategyUiSmoke {
                 initialize.setAccessible(true);
                 initialize.invoke(null);
                 verifyAndRender(output);
+                verifyAndRenderErrors(output);
                 return true;
             });
-            System.out.println("GC strategy UI smoke passed: five strategies, descriptions, overrides, memory and layout.");
+            System.out.println("GC strategy UI smoke passed: four strategies, descriptions, overrides, memory, layout and failure actions.");
             System.exit(0);
         } catch (Throwable e) {
             e.printStackTrace();
@@ -104,11 +108,10 @@ public final class GcStrategyUiSmoke {
                 .filter(node -> node instanceof ComponentList list && list.getContent().contains(row))
                 .findFirst().orElseThrow();
         require(!owner.isManaged(), "GC strategy should start hidden with other advanced JVM settings");
-        var advancedField = GameSettingsPage.class.getDeclaredField("showAdvancedSettings");
-        advancedField.setAccessible(true);
-        ((LineToggleButton) advancedField.get(page)).setSelected(true);
+        page.showAdvancedOptions();
         require(owner.isManaged(), "GC strategy should be visible with advanced settings enabled");
-        require(row.getItems().equals(List.of(GcStrategy.values())), "All five strategies must be available in order");
+        require(row.getItems().equals(List.of(GcStrategy.TUNED_G1, GcStrategy.G1, GcStrategy.ZGC, GcStrategy.DEFAULT)),
+                "Exactly four strategies must be available, with a single unified ZGC option");
 
         for (GcStrategy strategy : GcStrategy.values()) {
             row.setValue(strategy);
@@ -116,6 +119,11 @@ public final class GcStrategyUiSmoke {
             require(row.getSubtitle().contains(i18n("settings.advanced.gc_strategy."
                     + strategy.name().toLowerCase(Locale.ROOT) + ".desc")), "Selected description must be visible");
             require(!row.getSubtitle().contains("\n"), "Descriptions must remain one paragraph");
+            if (strategy == GcStrategy.ZGC) {
+                require(!row.getSubtitle().contains("G1GC"), "ZGC help must omit the removed fallback/error sentence");
+                require(row.getSubtitle().contains("21") && row.getSubtitle().contains("15–20"),
+                        "ZGC help must explain its Java version ranges");
+            }
             require(preset.maxMemoryProperty().getValue() == 6144, "Strategy selection must preserve heap size");
         }
         preset.jvmOptionsProperty().setValue("-XX:+UseParallelGC");
@@ -154,6 +162,42 @@ public final class GcStrategyUiSmoke {
                 Label selected = (Label) row.lookup(".trailing-label");
                 require(selected.getWidth() + 0.5 >= selected.prefWidth(-1), "Selected strategy name must remain readable");
             }
+        }
+    }
+
+    /// Verifies each distinct error category, the selected runtime details and both recovery actions.
+    private static void verifyAndRenderErrors(Path output) throws Exception {
+        for (GcStrategyException.Reason reason : GcStrategyException.Reason.values()) {
+            var opened = new AtomicInteger();
+            var closed = new AtomicInteger();
+            var failure = new GcStrategyException(reason, "21.0.11",
+                    Path.of("Java", "bin", "java.exe").toAbsolutePath(), null);
+            var dialog = GcStrategyErrorDialog.create(failure, i18n("launch.failed"), opened::incrementAndGet);
+            dialog.addEventHandler(DialogCloseEvent.CLOSE, event -> closed.incrementAndGet());
+            @Unmodifiable List<ButtonBase> buttons = descendants(dialog).stream()
+                    .filter(ButtonBase.class::isInstance).map(ButtonBase.class::cast).toList();
+            require(buttons.size() == 2, "GC errors must offer settings and cancel, without automatic retry");
+            String text = descendants(dialog).stream().filter(javafx.scene.text.Text.class::isInstance)
+                    .map(javafx.scene.text.Text.class::cast).map(javafx.scene.text.Text::getText)
+                    .collect(java.util.stream.Collectors.joining());
+            require(text.contains(failure.getJavaVersion()) && text.contains(failure.getExecutable().toString()),
+                    "GC errors must identify the actual selected Java");
+            require(text.contains(i18n("launch.failed.gc." + reason.name().toLowerCase(Locale.ROOT))),
+                    "GC errors must distinguish unsupported Java, failed checks and timeouts");
+            StackPane surface = new StackPane(dialog);
+            surface.setStyle("-fx-background-color: white; -fx-padding: 16; -fx-font-size: 14px;");
+            new Scene(surface);
+            surface.resize(680, surface.prefHeight(680));
+            surface.applyCss();
+            surface.resize(680, surface.prefHeight(680));
+            surface.layout();
+            snapshot(surface.snapshot(null, null), output.resolve("error-" + reason.name().toLowerCase(Locale.ROOT) + ".png"));
+            buttons.stream().filter(button -> i18n("launch.failed.gc.open_settings").equals(button.getText()))
+                    .findFirst().orElseThrow().fire();
+            require(opened.get() == 1 && closed.get() == 1, "Settings action must navigate once and close the dialog");
+            var cancelled = GcStrategyErrorDialog.create(failure, i18n("launch.failed"), opened::incrementAndGet);
+            cancelled.getCancelButton().fire();
+            require(opened.get() == 1, "Cancel must not navigate, change policy or retry launch");
         }
     }
 
