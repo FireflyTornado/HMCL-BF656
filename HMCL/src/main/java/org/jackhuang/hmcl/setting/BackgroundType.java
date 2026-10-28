@@ -34,6 +34,9 @@ public enum BackgroundType {
     /// Uses an image loaded from a user-provided URL.
     NETWORK,
 
+    /// Synchronizes a remote image collection described by a manifest URL and selects one cached wallpaper.
+    REMOTE_GALLERY,
+
     /// Uses the configured paint value as a flat background.
     PAINT,
 

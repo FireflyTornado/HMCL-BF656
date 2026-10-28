@@ -34,6 +34,8 @@ import javafx.scene.control.Toggle;
 import javafx.scene.control.ToggleGroup;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.VBox;
+import javafx.scene.layout.HBox;
+import javafx.scene.layout.Priority;
 import javafx.stage.FileChooser;
 import org.jackhuang.hmcl.ui.FXUtils;
 import org.jackhuang.hmcl.util.StringUtils;
@@ -343,6 +345,15 @@ public final class RadioChoiceList<T extends @UnknownNullability Object> extends
         /// The text field attached to this choice.
         private final JFXTextField textField = new JFXTextField();
 
+        /// Optional action shown next to the reusable URL/text editor.
+        private @Nullable Node trailing;
+
+        /// Attaches an action without changing the behavior of ordinary text choices.
+        public TextChoice<T> setTrailing(Node action) {
+            trailing = action;
+            return this;
+        }
+
         /// Creates a text choice.
         public TextChoice(String title, T value) {
             super(title, value);
@@ -386,7 +397,13 @@ public final class RadioChoiceList<T extends @UnknownNullability Object> extends
             if (!textField.getValidators().isEmpty()) {
                 FXUtils.setValidateWhileTextChanged(textField, true);
             }
-            return textField;
+            if (trailing == null)
+                return textField;
+            HBox row = new HBox(8, textField);
+            row.setAlignment(Pos.CENTER_LEFT);
+            HBox.setHgrow(textField, Priority.ALWAYS);
+            row.getChildren().add(trailing);
+            return row;
         }
     }
 

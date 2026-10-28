@@ -41,7 +41,7 @@ import org.glavo.monetfx.Brightness;
 import org.glavo.monetfx.ColorStyle;
 import org.glavo.uuid.UUIDs;
 import org.jackhuang.hmcl.setting.*;
-import org.jackhuang.hmcl.remote.OverallBackgroundController;
+import org.jackhuang.hmcl.remote.RemoteGalleryBackgrounds;
 import org.jackhuang.hmcl.theme.*;
 import org.jackhuang.hmcl.ui.Controllers;
 import org.jackhuang.hmcl.ui.FXUtils;
@@ -429,12 +429,6 @@ public class PersonalizationPage extends StackPane {
         }
         content.getChildren().addAll(ComponentList.createComponentListTitle(i18n("settings.launcher.theme")), themeList);
 
-        LineButton overallBackgroundButton = new LineButton();
-        overallBackgroundButton.setTitle("刷新全局背景");
-        overallBackgroundButton.subtitleProperty().bind(OverallBackgroundController.statusProperty());
-        overallBackgroundButton.setOnAction(event -> OverallBackgroundController.refresh());
-        themeList.getContent().add(overallBackgroundButton);
-
         ComponentList themeAppearanceList = new ComponentList();
         ComponentList backgroundLoadingList = new ComponentList();
 
@@ -660,6 +654,7 @@ public class PersonalizationPage extends StackPane {
 
         {
             RadioChoiceList<BackgroundType> backgroundItem = new RadioChoiceList<>();
+            backgroundItem.setId("launcher-background-options");
             backgroundItem.setFallbackValue(BackgroundType.DEFAULT);
             ComponentSublist backgroundSublist = new ComponentSublist();
             backgroundSublist.setTitle(i18n("launcher.background"));
@@ -685,6 +680,18 @@ public class PersonalizationPage extends StackPane {
             RadioChoiceList.TextChoice<BackgroundType> networkBackgroundOption =
                     new RadioChoiceList.TextChoice<>(i18n("launcher.background.network"), BackgroundType.NETWORK)
                             .setValidators(new URLValidator(true));
+            RadioChoiceList.TextChoice<BackgroundType> galleryBackgroundOption =
+                    new RadioChoiceList.TextChoice<>(i18n("launcher.background.gallery"), BackgroundType.REMOTE_GALLERY)
+                            .setValidators(new URLValidator(true));
+            galleryBackgroundOption.setTooltip(i18n("launcher.background.gallery.tooltip"));
+            JFXButton galleryRefresh = FXUtils.newBorderButton(i18n("launcher.background.gallery.refresh"));
+            galleryRefresh.setId("remote-gallery-refresh");
+            galleryRefresh.setOnAction(event -> RemoteGalleryBackgrounds.refresh());
+            galleryBackgroundOption.setTrailing(galleryRefresh);
+            galleryBackgroundOption.getTextField().setPrefWidth(320);
+            galleryBackgroundOption.getTextField().setMinWidth(120);
+
+            javafx.animation.PauseTransition galleryCommit = new javafx.animation.PauseTransition(javafx.util.Duration.millis(600));
             PaintChoice paintBackgroundOption =
                     new PaintChoice(i18n("launcher.background.paint"), BackgroundType.PAINT);
 
@@ -695,6 +702,7 @@ public class PersonalizationPage extends StackPane {
                     new RadioChoiceList.Choice<>(i18n("launcher.background.theme_color"), BackgroundType.THEME_COLOR),
                     customBackgroundOption,
                     networkBackgroundOption,
+                    galleryBackgroundOption,
                     paintBackgroundOption
             ));
             JFXButton backgroundOverrideButton = createThemeAppearanceOverrideButton();
@@ -715,6 +723,8 @@ public class PersonalizationPage extends StackPane {
                     networkBackgroundOption.setText(Objects.toString(
                             settings().networkBackgroundImageUrlProperty().get(),
                             ""));
+                    galleryCommit.stop();
+                    galleryBackgroundOption.setText(Objects.toString(settings().remoteGalleryManifestUrlProperty().get(), ""));
                     paintBackgroundOption.setPaint(settings().customBackgroundPaintProperty().get());
 
                     boolean overridden = settings().getThemeAppearanceOverrides().contains(
@@ -755,6 +765,7 @@ public class PersonalizationPage extends StackPane {
                         case NETWORK -> networkBackgroundOption.setText(Objects.toString(
                                 background.networkImageUrl(),
                                 ""));
+                        case REMOTE_GALLERY -> galleryBackgroundOption.setText(Objects.toString(background.networkImageUrl(), ""));
                         case PAINT -> paintBackgroundOption.setPaint(background.paint());
                         case DEFAULT, THEME_COLOR -> {
                         }
@@ -770,6 +781,7 @@ public class PersonalizationPage extends StackPane {
                 }
                 updatingBackground.value = true;
                 try {
+                    galleryCommit.stop();
                     BackgroundType type = Objects.requireNonNullElse(newValue, BackgroundType.DEFAULT);
                     settings().backgroundTypeProperty().set(type);
                     switch (type) {
@@ -778,6 +790,7 @@ public class PersonalizationPage extends StackPane {
                                 BuiltinBackground.FALLBACK.id()));
                         case CUSTOM -> settings().customBackgroundImagePathProperty().set(customBackgroundOption.getPath());
                         case NETWORK -> settings().networkBackgroundImageUrlProperty().set(networkBackgroundOption.getText());
+                        case REMOTE_GALLERY -> settings().remoteGalleryManifestUrlProperty().set(galleryBackgroundOption.getText());
                         case PAINT -> settings().customBackgroundPaintProperty().set(paintBackgroundOption.getPaint());
                         case DEFAULT, THEME_COLOR -> {
                         }
@@ -835,6 +848,26 @@ public class PersonalizationPage extends StackPane {
                     updatingBackground.value = false;
                 }
             });
+            galleryBackgroundOption.textProperty().addListener((javafx.beans.value.ObservableValue<? extends String> observable,
+                                                                 @Nullable String oldValue, @Nullable String newValue) -> {
+                if (updatingBackground.value)
+                    return;
+                galleryCommit.stop();
+                String address = Objects.toString(newValue, "");
+                galleryCommit.setOnFinished(event -> {
+                    updatingBackground.value = true;
+                    try {
+                        settings().remoteGalleryManifestUrlProperty().set(address);
+                        settings().backgroundTypeProperty().set(BackgroundType.REMOTE_GALLERY);
+                        backgroundItem.selectedValueProperty().set(BackgroundType.REMOTE_GALLERY);
+                        settings().getThemeAppearanceOverrides().add(LauncherSettings.THEME_APPEARANCE_BACKGROUND);
+                        updateThemeAppearanceOverrideButton(backgroundOverrideButton, false);
+                    } finally {
+                        updatingBackground.value = false;
+                    }
+                });
+                galleryCommit.playFromStart();
+            });
             paintBackgroundOption.colorProperty().addListener((observable, oldValue, newValue) -> {
                 if (updatingBackground.value) {
                     return;
@@ -854,6 +887,7 @@ public class PersonalizationPage extends StackPane {
             settings().builtinBackgroundIdProperty().addListener(refreshBackground);
             settings().customBackgroundImagePathProperty().addListener(refreshBackground);
             settings().networkBackgroundImageUrlProperty().addListener(refreshBackground);
+            settings().remoteGalleryManifestUrlProperty().addListener(refreshBackground);
             settings().customBackgroundPaintProperty().addListener(refreshBackground);
             backgroundOverrideButton.addEventFilter(MouseEvent.MOUSE_CLICKED, event -> {
                 updatingBackground.value = true;
@@ -941,6 +975,7 @@ public class PersonalizationPage extends StackPane {
                                 }
                                 case CUSTOM -> settings().customBackgroundImagePathProperty().get();
                                 case NETWORK -> settings().networkBackgroundImageUrlProperty().get();
+                                case REMOTE_GALLERY -> settings().remoteGalleryManifestUrlProperty().get();
                                 case PAINT -> {
                                     @Nullable Paint customBackgroundPaint = settings().customBackgroundPaintProperty().get();
                                     yield customBackgroundPaint != null ? customBackgroundPaint.toString() : i18n("launcher.background.paint");
@@ -966,6 +1001,7 @@ public class PersonalizationPage extends StackPane {
                                 }
                                 case NETWORK ->
                                         Objects.toString(background.networkImageUrl(), i18n("launcher.background.network"));
+                                case REMOTE_GALLERY -> Objects.toString(background.networkImageUrl(), i18n("launcher.background.gallery"));
                                 case PAINT -> background.paint() != null
                                         ? background.paint().toString()
                                         : i18n("launcher.background.paint");
@@ -982,6 +1018,7 @@ public class PersonalizationPage extends StackPane {
                     settings().builtinBackgroundIdProperty(),
                     settings().customBackgroundImagePathProperty(),
                     settings().networkBackgroundImageUrlProperty(),
+                    settings().remoteGalleryManifestUrlProperty(),
                     settings().customBackgroundPaintProperty()));
 
             LinePane opacityPane = new LinePane();

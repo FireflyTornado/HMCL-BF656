@@ -109,15 +109,4 @@ final class OverallContentTest {
         assertFalse(Files.exists(output.resolve("backgrounds/cdn.jpg")));
     }
 
-    /// Local connection configuration is optional and separate from all version-root configuration files.
-    @Test
-    void validatesGlobalClientConfiguration() throws Exception {
-        assertFalse(OverallSync.Config.load(root).enabled());
-        Files.createDirectories(root.resolve("client"));
-        Files.writeString(root.resolve("client/config.json"), "{\"enabled\":true,\"serverBaseUrl\":\"https://example.com/launcher/\"}");
-        var config = OverallSync.Config.load(root);
-        assertEquals("https://example.com/launcher/overall/", config.endpoint().toString());
-        Files.writeString(root.resolve("client/config.json"), "{\"enabled\":true,\"serverBaseUrl\":\"https://example.com/launcher\"}");
-        assertThrows(IOException.class, () -> OverallSync.Config.load(root));
-    }
 }

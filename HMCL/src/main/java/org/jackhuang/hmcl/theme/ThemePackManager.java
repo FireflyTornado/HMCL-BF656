@@ -239,7 +239,7 @@ public final class ThemePackManager {
     /// @param builtinBackgroundId     the selected built-in wallpaper ID, or `null` when not using a built-in wallpaper
     /// @param imagePath               the resolved local image file or directory, or `null` when not using a local image
     /// @param imageResource           the resolved theme-pack image resource, or `null` when not using a theme-pack image
-    /// @param networkImageUrl         the remote image URL, or `null` when not using a network image
+    /// @param networkImageUrl         the remote image or gallery-manifest URL, or `null` for local sources
     /// @param networkImageCachePolicy whether the remote image cache policy is explicitly overridden, or `null` for default behavior
     /// @param paint                   the resolved background paint, or `null` when not using a paint background
     /// @param opacity                 the background opacity clamped to `[0, 1]`
@@ -256,7 +256,7 @@ public final class ThemePackManager {
         ///
         /// @param type                    the launcher background source type
         /// @param imagePath               the resolved local image file or directory, or `null` when not using a local image
-        /// @param networkImageUrl         the remote image URL, or `null` when not using a network image
+        /// @param networkImageUrl         the remote image or gallery-manifest URL, or `null` for local sources
         /// @param networkImageCachePolicy whether the remote image cache policy is explicitly overridden, or `null` for default behavior
         /// @param paint                   the resolved background paint, or `null` when not using a paint background
         /// @param opacity                 the background opacity clamped to `[0, 1]`
@@ -289,7 +289,7 @@ public final class ThemePackManager {
         /// @param type                    the launcher background source type
         /// @param builtinBackgroundId     the selected built-in wallpaper ID, or `null` when not using a built-in wallpaper
         /// @param imagePath               the resolved local image file or directory, or `null` when not using a local image
-        /// @param networkImageUrl         the remote image URL, or `null` when not using a network image
+        /// @param networkImageUrl         the remote image or gallery-manifest URL, or `null` for local sources
         /// @param networkImageCachePolicy whether the remote image cache policy is explicitly overridden, or `null` for default behavior
         /// @param paint                   the resolved background paint, or `null` when not using a paint background
         /// @param opacity                 the background opacity clamped to `[0, 1]`
@@ -310,7 +310,7 @@ public final class ThemePackManager {
         /// @param builtinBackgroundId     the selected built-in wallpaper ID, or `null` when not using a built-in wallpaper
         /// @param imagePath               the resolved local image file or directory, or `null` when not using a local image
         /// @param imageResource           the resolved theme-pack image resource, or `null` when not using a theme-pack image
-        /// @param networkImageUrl         the remote image URL, or `null` when not using a network image
+        /// @param networkImageUrl         the remote image or gallery-manifest URL, or `null` for local sources
         /// @param networkImageCachePolicy whether the remote image cache policy is explicitly overridden, or `null` for default behavior
         /// @param paint                   the resolved background paint, or `null` when not using a paint background
         /// @param opacity                 the background opacity clamped to `[0, 1]`
@@ -949,7 +949,7 @@ public final class ThemePackManager {
                     null,
                     Themes.getColorScheme().getColor(ColorRole.SURFACE_CONTAINER),
                     opacity);
-            case CUSTOM, NETWORK, DEFAULT -> new ResolvedBackground(
+            case CUSTOM, NETWORK, REMOTE_GALLERY, DEFAULT -> new ResolvedBackground(
                     BackgroundType.BUILTIN,
                     BuiltinBackground.FALLBACK.id(),
                     null,
@@ -1016,6 +1016,13 @@ public final class ThemePackManager {
                         null,
                         opacity);
             }
+            case REMOTE_GALLERY -> new ResolvedBackground(
+                    BackgroundType.REMOTE_GALLERY,
+                    null,
+                    settings().remoteGalleryManifestUrlProperty().get(),
+                    null,
+                    null,
+                    opacity);
             case PAINT -> new ResolvedBackground(
                     BackgroundType.PAINT,
                     null,
@@ -1150,6 +1157,9 @@ public final class ThemePackManager {
                     null,
                     null,
                     opacity);
+        }
+        if (source instanceof ThemeBackground.Gallery gallery) {
+            return new ResolvedBackground(BackgroundType.REMOTE_GALLERY, null, gallery.url(), null, null, opacity);
         }
         if (source instanceof ThemeBackground.Image image) {
             ThemePackResource resource = resolveInstalledAsset(
@@ -1455,6 +1465,9 @@ public final class ThemePackManager {
             case NETWORK -> new ThemeBackgroundSettings(
                     createCurrentNetworkBackgroundSource(assets, temporaryFiles, background),
                     opacity);
+            case REMOTE_GALLERY -> new ThemeBackgroundSettings(
+                    StringUtils.isBlank(background.networkImageUrl()) ? new ThemeBackground.Default()
+                            : new ThemeBackground.Gallery(background.networkImageUrl()), opacity);
             case PAINT -> new ThemeBackgroundSettings(
                     new ThemeBackground.Paint(Objects.requireNonNullElse(background.paint(), Color.WHITE).toString()),
                     opacity);

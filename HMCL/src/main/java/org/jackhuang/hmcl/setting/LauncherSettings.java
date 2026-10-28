@@ -387,6 +387,15 @@ public final class LauncherSettings extends ObservableSetting implements JsonSch
         return networkBackgroundImageUrl;
     }
 
+    /// Remote-gallery manifest address, saved independently from the single-image/API address.
+    @SerializedName("remoteGalleryManifestUrl")
+    private final StringProperty remoteGalleryManifestUrl = new SimpleStringProperty();
+
+    /// Returns the manifest URL selected by the remote-gallery background option.
+    public StringProperty remoteGalleryManifestUrlProperty() {
+        return remoteGalleryManifestUrl;
+    }
+
     /// The custom launcher background paint.
     @SerializedName("customBackgroundPaint")
     private final ObjectProperty<@Nullable Paint> customBackgroundPaint = new SimpleObjectProperty<>();

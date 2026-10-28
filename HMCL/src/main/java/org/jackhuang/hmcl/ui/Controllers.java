@@ -34,7 +34,7 @@ import javafx.util.Duration;
 import org.jackhuang.hmcl.Launcher;
 import org.jackhuang.hmcl.Metadata;
 import org.jackhuang.hmcl.remote.RemoteContentController;
-import org.jackhuang.hmcl.remote.OverallBackgroundController;
+import org.jackhuang.hmcl.remote.RemoteGalleryBackgrounds;
 import org.jackhuang.hmcl.game.GameInstanceID;
 import org.jackhuang.hmcl.game.HMCLGameRepository;
 import org.jackhuang.hmcl.game.LauncherHelper;
@@ -206,7 +206,7 @@ public final class Controllers {
 
     /// Releases stage-specific listeners and retained window ownership before application shutdown.
     public static void onApplicationStop() {
-        OverallBackgroundController.shutdown();
+        RemoteGalleryBackgrounds.shutdown();
         RemoteContentController.shutdown();
         if (decorator != null) {
             decorator.detachStage();
@@ -390,7 +390,6 @@ public final class Controllers {
                     }, updateShowTips);
         }
 
-        OverallBackgroundController.initialize();
         RemoteContentController.initialize();
         tryInstallBundledModpack(GameDirectoryManager.getSelectedRepository());
     }

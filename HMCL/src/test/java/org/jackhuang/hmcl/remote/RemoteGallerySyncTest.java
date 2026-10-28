@@ -21,6 +21,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.sun.net.httpserver.HttpServer;
 import org.jetbrains.annotations.NotNullByDefault;
+import org.jackhuang.hmcl.util.CacheRepository;
 import org.jetbrains.annotations.Nullable;
 import org.jetbrains.annotations.Unmodifiable;
 import org.junit.jupiter.api.AfterEach;
@@ -47,7 +48,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /// Real loopback HTTP verifies request counts, digest reuse, offline behavior, revocation and dynamic API freshness.
 @NotNullByDefault
-final class OverallSyncTest {
+final class RemoteGallerySyncTest {
     /// Isolated launcher-global storage.
     @TempDir
     Path root;
@@ -66,7 +67,30 @@ final class OverallSyncTest {
     /// Process-lifetime API outcomes shared by refreshes and replacement synchronizers.
     private final Map<String, Optional<String>> apiImages = new ConcurrentHashMap<>();
     /// Delivered final snapshots.
-    private final LinkedBlockingQueue<OverallSync.Result<String>> results = new LinkedBlockingQueue<>();
+    private final LinkedBlockingQueue<RemoteGallerySync.Result<String>> results = new LinkedBlockingQueue<>();
+
+    /// Different manifests share identical SHA-256 image bytes; withdrawal only removes that manifest's references.
+    @Test
+    void sharesImagesAcrossFullManifestUrlsWithoutDeletingOtherReferences() throws Exception {
+        body.set(pool("backgrounds/shared.png").toString());
+        var manifest = OverallContent.parse(body.get());
+        GalleryCache cache = new GalleryCache(repository());
+        try (var first = sync(apiImages)) {
+            first.refresh();
+            assertNotNull(await().background());
+            URI secondAddress = URI.create(manifestUrl() + "?channel=second");
+            try (var second = new RemoteGallerySync<>(repository(), secondAddress, RemoteGallerySyncTest::decode, results::add, apiImages)) {
+                second.refresh();
+                assertNotNull(await().background());
+                assertEquals(1, calls("/overall/backgrounds/shared.png"));
+                assertNotEquals(cache.state(manifestUrl()), cache.state(secondAddress));
+                body.set("{\"schemaVersion\":1,\"background\":{\"enabled\":false}}");
+                first.refresh();
+                assertNull(await().background());
+                assertNotNull(cache.file(manifest.files().get("backgrounds/shared.png")));
+            }
+        }
+    }
 
     /// Starts a local listener; no internet or game repository is required.
     @BeforeEach
@@ -124,7 +148,7 @@ final class OverallSyncTest {
         JsonObject json = pool("backgrounds/a.png", "backgrounds/b.jpg");
         body.set(json.toString());
         var manifest = OverallContent.parse(body.get());
-        ContentStore store = new ContentStore(root, config().endpoint().toString());
+        GalleryCache store = new GalleryCache(repository());
         try (var sync = sync(apiImages)) {
             sync.refresh();
             assertNotNull(await().background());
@@ -156,7 +180,7 @@ final class OverallSyncTest {
         JsonObject json = pool("backgrounds/a.png", "backgrounds/b.jpg");
         body.set(json.toString());
         var original = OverallContent.parse(body.get());
-        ContentStore store = new ContentStore(root, config().endpoint().toString());
+        GalleryCache store = new GalleryCache(repository());
         try (var sync = sync(apiImages)) {
             sync.refresh();
             await();
@@ -169,8 +193,8 @@ final class OverallSyncTest {
             await();
             assertEquals(1, calls("/overall/backgrounds/a.png"));
             assertEquals(2, calls("/overall/backgrounds/b.jpg"));
-            assertFalse(Files.exists(store.file(original.files().get("backgrounds/b.jpg"))));
-            assertTrue(store.verified(original.files().get("backgrounds/a.png")));
+            assertNotNull(store.file(original.files().get("backgrounds/b.jpg")));
+            assertNotNull(store.file(original.files().get("backgrounds/a.png")));
         }
     }
 
@@ -278,27 +302,24 @@ final class OverallSyncTest {
             await();
         }
         manifestStatus.set(503);
-        var different = new OverallSync.Config(true, config().serverBaseUrl().resolve("different/"));
-        try (var sync = new OverallSync<>(root, different, OverallSyncTest::decode, results::add, apiImages)) {
+        URI different = manifestUrl().resolve("/different/manifest.json");
+        try (var sync = new RemoteGallerySync<>(repository(), different, RemoteGallerySyncTest::decode, results::add, apiImages)) {
             sync.refresh();
             assertNull(await().background());
         }
     }
 
-    /// A disabled local connection issues no network request.
+    /// Gallery URLs are explicit HTTPS manifest addresses rather than independent local connection files.
     @Test
-    void disabledConfigurationDoesNotContactServer() throws Exception {
-        var disabled = new OverallSync.Config(false, config().serverBaseUrl());
-        try (var sync = new OverallSync<>(root, disabled, OverallSyncTest::decode, results::add, apiImages)) {
-            sync.refresh();
-            assertNull(await().background());
-            assertTrue(requests.isEmpty());
-        }
+    void rejectsInvalidGalleryAddressWithoutContactingServer() {
+        assertThrows(IllegalArgumentException.class, () -> new RemoteGallerySync<>(repository(),
+                URI.create("http://example.com/manifest.json"), RemoteGallerySyncTest::decode, results::add, apiImages));
+        assertTrue(requests.isEmpty());
     }
 
     /// Creates a process session with an injectable API-attempt history.
-    private OverallSync<String> sync(Map<String, Optional<String>> apis) {
-        return new OverallSync<>(root, config(), OverallSyncTest::decode, results::add, apis);
+    private RemoteGallerySync<String> sync(Map<String, Optional<String>> apis) {
+        return new RemoteGallerySync<>(repository(), manifestUrl(), RemoteGallerySyncTest::decode, results::add, apis);
     }
 
     /// Rejects fake HTML/JSON bytes while keeping the HTTP tests independent of JavaFX initialization.
@@ -309,13 +330,20 @@ final class OverallSyncTest {
         return text;
     }
 
-    /// Returns the endpoint of this test's local server.
-    private OverallSync.Config config() {
-        return new OverallSync.Config(true, URI.create("http://127.0.0.1:" + Objects.requireNonNull(server).getAddress().getPort() + "/"));
+    /// Full manifest address entered in the background option.
+    private URI manifestUrl() {
+        return URI.create("http://127.0.0.1:" + Objects.requireNonNull(server).getAddress().getPort() + "/overall/manifest.json");
+    }
+
+    /// Uses the same common cache repository root for every simulated process in this test.
+    private CacheRepository repository() {
+        CacheRepository repository = new CacheRepository();
+        repository.changeDirectory(root);
+        return repository;
     }
 
     /// Waits for a final worker result, failing finitely if synchronization stalls.
-    private OverallSync.Result<String> await() throws InterruptedException {
+    private RemoteGallerySync.Result<String> await() throws InterruptedException {
         return Objects.requireNonNull(results.poll(15, TimeUnit.SECONDS), "No overall sync result");
     }
 
@@ -351,7 +379,7 @@ final class OverallSyncTest {
         json.addProperty("schemaVersion", 1);
         JsonObject background = new JsonObject();
         JsonArray urls = new JsonArray();
-        urls.add(config().serverBaseUrl().resolve(path).toString());
+        urls.add(manifestUrl().resolve(path).toString());
         background.add("urls", urls);
         json.add("background", background);
         return json.toString();

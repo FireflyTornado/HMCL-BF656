@@ -333,7 +333,8 @@
             "builtin",
             "image",
             "paint",
-            "theme_color"
+            "theme_color",
+            "gallery"
           ]
         }
       },
@@ -365,6 +366,24 @@
                   "required": [
                     "path",
                     "paint"
+                  ]
+                },
+                {
+                  "required": [
+                    "id",
+                    "url"
+                  ]
+                },
+                {
+                  "required": [
+                    "path",
+                    "url"
+                  ]
+                },
+                {
+                  "required": [
+                    "paint",
+                    "url"
                   ]
                 }
               ]
@@ -404,6 +423,23 @@
               "paint"
             ]
           }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "gallery"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "required": [
+              "url"
+            ]
+          }
         }
       ],
       "properties": {
@@ -420,6 +456,9 @@
           "type": "number",
           "minimum": 0,
           "maximum": 1
+        },
+        "url": {
+          "$ref": "#/$defs/nonEmptyString"
         }
       }
     },

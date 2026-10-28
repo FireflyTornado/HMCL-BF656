@@ -34,7 +34,7 @@ import java.util.Objects;
 @NotNullByDefault
 public sealed interface ThemeBackground
         permits ThemeBackground.Default, ThemeBackground.Builtin, ThemeBackground.Image,
-        ThemeBackground.Paint, ThemeBackground.ThemeColor {
+        ThemeBackground.Paint, ThemeBackground.ThemeColor, ThemeBackground.Gallery {
     /// JSON member name for the background type.
     String FIELD_TYPE = "type";
 
@@ -43,6 +43,9 @@ public sealed interface ThemeBackground
 
     /// JSON member name for the local theme-pack image path.
     String FIELD_PATH = "path";
+
+    /// JSON member name for a remote-gallery manifest address.
+    String FIELD_URL = "url";
 
     /// JSON member name for a serialized paint value.
     String FIELD_PAINT = "paint";
@@ -73,6 +76,7 @@ public sealed interface ThemeBackground
         @Nullable String id = readString(object, FIELD_ID);
         @Nullable String path = readString(object, FIELD_PATH);
         @Nullable String paint = readString(object, FIELD_PAINT);
+        @Nullable String url = readString(object, FIELD_URL);
 
         if (type == null) {
             int sourceFields = 0;
@@ -83,6 +87,9 @@ public sealed interface ThemeBackground
                 sourceFields++;
             }
             if (paint != null) {
+                sourceFields++;
+            }
+            if (url != null) {
                 sourceFields++;
             }
             if (sourceFields > 1) {
@@ -97,6 +104,9 @@ public sealed interface ThemeBackground
             if (paint != null) {
                 return new Paint(paint);
             }
+            if (url != null) {
+                return new Gallery(url);
+            }
             return null;
         }
 
@@ -104,6 +114,7 @@ public sealed interface ThemeBackground
             case "DEFAULT" -> new Default();
             case "BUILTIN" -> new Builtin(id);
             case "IMAGE" -> new Image(path);
+            case "GALLERY" -> new Gallery(requireNonBlank(url, FIELD_URL));
             case "PAINT" -> new Paint(paint);
             case "THEME_COLOR" -> new ThemeColor();
             default -> throw new JsonParseException("Unsupported theme background type: " + type);
@@ -194,6 +205,26 @@ public sealed interface ThemeBackground
             object.addProperty(FIELD_PATH, path);
         }
 
+    }
+
+    /// A remote gallery retained as a URL when exporting or applying a theme.
+    @NotNullByDefault
+    record Gallery(String url) implements ThemeBackground {
+        /// Validates the full manifest URL without downloading during theme parsing.
+        public Gallery {
+            url = requireNonBlank(url, FIELD_URL).trim();
+            java.net.URI uri = java.net.URI.create(url);
+            org.jackhuang.hmcl.remote.RemoteContent.validateHttp(uri);
+            if (uri.getFragment() != null || url.length() > 4096)
+                throw new IllegalArgumentException("Invalid remote-gallery URL");
+        }
+
+        /// Serializes the gallery source instead of embedding a stale randomly chosen image.
+        @Override
+        public void addToJsonObject(JsonObject object) {
+            object.addProperty(FIELD_TYPE, "gallery");
+            object.addProperty(FIELD_URL, url);
+        }
     }
 
     /// A source that uses a JavaFX paint string.

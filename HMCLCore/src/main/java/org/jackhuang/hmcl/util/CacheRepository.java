@@ -106,7 +106,7 @@ public class CacheRepository {
     }
 
     protected boolean fileExists(String algorithm, String hash) {
-        if (!DigestUtils.isSha1Digest(hash)) return false;
+        if (!validHash(algorithm, hash)) return false;
         Path file = getFile(algorithm, hash);
         if (Files.exists(file)) {
             try {
@@ -119,14 +119,20 @@ public class CacheRepository {
         }
     }
 
-    private void checkHash(String hash) throws IOException {
-        if (!DigestUtils.isSha1Digest(hash)) {
-            throw new IOException("Not SHA-1 checksum: " + hash);
+    /// Accepts SHA-256 gallery objects while retaining the existing SHA-1 cache contract.
+    private static boolean validHash(String algorithm, @Nullable String hash) {
+        return SHA256.equals(algorithm) ? hash != null && hash.matches("[a-fA-F0-9]{64}") : DigestUtils.isSha1Digest(hash);
+    }
+
+    /// Rejects malformed content-addressed cache keys before constructing a filesystem path.
+    private void checkHash(String algorithm, String hash) throws IOException {
+        if (!validHash(algorithm, hash)) {
+            throw new IOException("Invalid " + algorithm + " checksum: " + hash);
         }
     }
 
     public void tryCacheFile(Path path, String algorithm, String hash) throws IOException {
-        checkHash(hash);
+        checkHash(algorithm, hash);
 
         Path cache = getFile(algorithm, hash);
         if (Files.isRegularFile(cache)) return;
@@ -134,7 +140,7 @@ public class CacheRepository {
     }
 
     public Path cacheFile(Path path, String algorithm, String hash) throws IOException {
-        checkHash(hash);
+        checkHash(algorithm, hash);
 
         Path cache = getFile(algorithm, hash);
         FileUtils.copyFile(path, cache);
@@ -454,6 +460,9 @@ public class CacheRepository {
     }
 
     public static final String SHA1 = "SHA-1";
+
+    /// Content-addressed namespace used by SHA-256 verified remote gallery images.
+    public static final String SHA256 = "SHA-256";
 
     public static class CacheExpiredException extends IOException {
         private final long expires;

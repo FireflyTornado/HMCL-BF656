@@ -90,6 +90,7 @@
         "BUILTIN",
         "CUSTOM",
         "NETWORK",
+        "REMOTE_GALLERY",
         "PAINT",
         "THEME_COLOR"
       ]
@@ -202,6 +203,9 @@
     },
     "selectedAccount": {
       "$ref": "#/$defs/accountID"
+    },
+    "remoteGalleryManifestUrl": {
+      "type": "string"
     }
   },
   "$defs": {

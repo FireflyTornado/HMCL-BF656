@@ -52,6 +52,8 @@ import org.glavo.monetfx.beans.property.ReadOnlyColorSchemeProperty;
 import org.glavo.monetfx.beans.property.SimpleColorSchemeProperty;
 import org.glavo.url.WebURL;
 import org.jackhuang.hmcl.Metadata;
+import org.jackhuang.hmcl.remote.RemoteGalleryBackgrounds;
+import org.jackhuang.hmcl.game.HMCLCacheRepository;
 import org.jackhuang.hmcl.setting.BackgroundType;
 import org.jackhuang.hmcl.setting.LauncherSettings;
 import org.jackhuang.hmcl.setting.ThemeColorType;
@@ -243,7 +245,7 @@ public final class Themes {
                 case BUILTIN -> BuiltinBackground.fromIdOrFallback(background.builtinBackgroundId()).themeColor();
                 case PAINT -> background.paint() instanceof Color color ? ThemeColor.of(color) : fallback;
                 case THEME_COLOR -> ThemeColor.DEFAULT;
-                case DEFAULT, NETWORK -> fallback;
+                case DEFAULT, NETWORK, REMOTE_GALLERY -> fallback;
             };
         } catch (IOException | RuntimeException e) {
             return fallback;
@@ -297,18 +299,6 @@ public final class Themes {
 
     /// The last loaded background source used to rebuild the JavaFX background without reloading images.
     private static @Nullable LoadedBackground loadedBackground;
-
-    /// Global wallpaper, loaded without reference to any game instance or the launcher's UI thread.
-    private static volatile @Nullable Image overallBackground;
-
-    /// Installs the current global wallpaper or restores the original local appearance settings.
-    public static void setOverallBackground(@Nullable Image image) {
-        if (overallBackground == image)
-            return;
-        overallBackground = image;
-        if (backgroundUpdatesStarted)
-            refreshBackground();
-    }
 
     /// Current background load generation used to ignore obsolete asynchronous updates.
     private static int backgroundLoadGeneration = 0;
@@ -456,6 +446,8 @@ public final class Themes {
         settings().builtinBackgroundIdProperty().addListener(backgroundListener);
         settings().customBackgroundImagePathProperty().addListener(backgroundListener);
         settings().networkBackgroundImageUrlProperty().addListener(backgroundListener);
+        settings().remoteGalleryManifestUrlProperty().addListener(backgroundListener);
+        HMCLCacheRepository.REPOSITORY.directoryProperty().addListener(backgroundListener);
         settings().networkBackgroundImageCachePolicyProperty().addListener(backgroundListener);
         settings().customBackgroundPaintProperty().addListener(backgroundListener);
         settings().backgroundOpacityProperty().addListener(ignored -> refreshBackgroundOpacity());
@@ -624,6 +616,7 @@ public final class Themes {
                     suppressBackgroundRefresh = true;
                     try {
                         ThemePackManager.apply(themePack, theme);
+                        selectRemoteGallery();
                         applyLoadedBackground(loadedBackground, ++backgroundLoadGeneration);
                     } finally {
                         suppressBackgroundRefresh = false;
@@ -643,6 +636,16 @@ public final class Themes {
         }
     }
 
+    /// Starts gallery work only for the effective source, canceling it when another background is selected.
+    private static void selectRemoteGallery() {
+        try {
+            var resolved = ThemePackManager.resolveCurrentBackground(ThemePackManager.currentResolveContext());
+            RemoteGalleryBackgrounds.select(resolved.type() == BackgroundType.REMOTE_GALLERY ? resolved.networkImageUrl() : null);
+        } catch (IOException | RuntimeException e) {
+            RemoteGalleryBackgrounds.select(null);
+        }
+    }
+
     /// Returns the configured launcher background loading policy.
     private static BackgroundLoadPolicy getBackgroundLoadPolicy() {
         try {
@@ -654,12 +657,14 @@ public final class Themes {
 
     /// Loads the initial JavaFX launcher background synchronously before the UI uses it.
     private static void loadInitialBackground() {
+        selectRemoteGallery();
         final int currentGeneration = ++backgroundLoadGeneration;
         applyLoadedBackground(loadBackground(), currentGeneration);
     }
 
     /// Refreshes the current JavaFX launcher background asynchronously.
     public static void refreshBackground() {
+        selectRemoteGallery();
         final int currentGeneration = ++backgroundLoadGeneration;
         if (getBackgroundLoadPolicy() == BackgroundLoadPolicy.SHOW_FALLBACK_WHILE_LOADING) {
             applyLoadedBackground(loadFallbackBackground(), currentGeneration);
@@ -730,12 +735,6 @@ public final class Themes {
             boolean fallbackBackground) {
         @Nullable Image image = null;
         @Nullable ThemeColor imageThemeColor = null;
-        @Nullable Image globalImage = overallBackground;
-        if (globalImage != null && !fallbackBackground) {
-            return new LoadedBackground.Image(
-                    createBackgroundWithOpacity(globalImage, resolvedBackground.opacity()),
-                    globalImage, extractWallpaperThemeColor(globalImage), false);
-        }
         switch (resolvedBackground.type()) {
             case CUSTOM:
                 @Nullable ThemePackResource imageResource = resolvedBackground.imageResource();
@@ -753,6 +752,16 @@ public final class Themes {
                                 : tryLoadImage(imagePath);
                     } catch (Exception e) {
                         LOG.warning("Couldn't load background image", e);
+                    }
+                }
+                break;
+            case REMOTE_GALLERY:
+                image = RemoteGalleryBackgrounds.image(resolvedBackground.networkImageUrl());
+                if (image == null) {
+                    image = loadLocalDefaultBackgroundImage();
+                    if (image == null) {
+                        image = loadBuiltinBackgroundImage(BuiltinBackground.FALLBACK.id());
+                        imageThemeColor = BuiltinBackground.FALLBACK.themeColor();
                     }
                 }
                 break;
@@ -852,7 +861,7 @@ public final class Themes {
                     null,
                     themeColorPaint,
                     opacity);
-            case DEFAULT, BUILTIN, CUSTOM, NETWORK -> new ThemePackManager.ResolvedBackground(
+            case DEFAULT, BUILTIN, CUSTOM, NETWORK, REMOTE_GALLERY -> new ThemePackManager.ResolvedBackground(
                     BackgroundType.BUILTIN,
                     BuiltinBackground.FALLBACK.id(),
                     null,
