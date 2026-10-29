@@ -17,6 +17,7 @@
  */
 package org.jackhuang.hmcl.launch;
 
+import org.jackhuang.hmcl.game.GcStrategy;
 import org.jetbrains.annotations.NotNullByDefault;
 import org.jetbrains.annotations.Nullable;
 
@@ -29,7 +30,7 @@ public final class GcStrategyException extends IOException {
     /// User-facing failure categories; only confirmed collector rejection is reported as unsupported.
     @NotNullByDefault
     public enum Reason {
-        /// Neither supported ZGC mode is available for the selected Java.
+        /// No supported mode of the explicitly selected collector is available for the selected Java.
         UNSUPPORTED,
         /// The executable could not be run, or Java failed for a reason unrelated to collector availability.
         DETECTION_FAILED,
@@ -39,15 +40,24 @@ public final class GcStrategyException extends IOException {
 
     /// The reason the launch was stopped.
     private final Reason reason;
+    /// The requested collector preference, retained even when detection fails.
+    private final GcStrategy gcStrategy;
     /// Full version of the Java runtime selected for the game.
     private final String javaVersion;
     /// Actual Java executable selected for the game, without substitution.
     private final Path executable;
 
-    /// Creates a typed failure while retaining technical diagnostics in the cause for logs.
+    /// Preserves the constructor used by older ZGC-specific callers.
     public GcStrategyException(Reason reason, String javaVersion, Path executable, @Nullable Throwable cause) {
-        super("GC strategy check failed: " + reason + ", Java=" + javaVersion + ", executable=" + executable, cause);
+        this(reason, GcStrategy.ZGC, javaVersion, executable, cause);
+    }
+
+    /// Creates a collector-specific failure while retaining technical diagnostics in the cause for logs.
+    public GcStrategyException(Reason reason, GcStrategy gcStrategy, String javaVersion, Path executable, @Nullable Throwable cause) {
+        super("GC strategy check failed: " + reason + ", strategy=" + gcStrategy
+                + ", Java=" + javaVersion + ", executable=" + executable, cause);
         this.reason = reason;
+        this.gcStrategy = gcStrategy;
         this.javaVersion = javaVersion;
         this.executable = executable;
     }
@@ -55,6 +65,11 @@ public final class GcStrategyException extends IOException {
     /// Returns the user-facing failure category.
     public Reason getReason() {
         return reason;
+    }
+
+    /// Returns the requested collector so the error dialog identifies the correct strategy.
+    public GcStrategy getGcStrategy() {
+        return gcStrategy;
     }
 
     /// Returns the full version of the selected game Java.

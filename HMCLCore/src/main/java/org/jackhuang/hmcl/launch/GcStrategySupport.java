@@ -83,10 +83,11 @@ public final class GcStrategySupport {
         } catch (ProbeInterruptedException e) {
             throw new IOException("Interrupted while checking garbage collector support", e.getCause());
         } catch (ProbeFailedException e) {
-            throw new GcStrategyException(e.reason, options.getJava().getVersion(), executable, e.getCause());
+            throw new GcStrategyException(e.reason, options.getGcStrategy(), options.getJava().getVersion(), executable, e.getCause());
         }
-        if (options.getGcStrategy() == GcStrategy.ZGC && resolution.strategy() != GcStrategy.ZGC)
-            throw new GcStrategyException(GcStrategyException.Reason.UNSUPPORTED,
+        if ((options.getGcStrategy() == GcStrategy.ZGC || options.getGcStrategy() == GcStrategy.SHENANDOAH)
+                && resolution.strategy() != options.getGcStrategy())
+            throw new GcStrategyException(GcStrategyException.Reason.UNSUPPORTED, options.getGcStrategy(),
                     options.getJava().getVersion(), executable, null);
         command.addAllDefault(resolution.arguments());
         if (resolution.strategy() == GcStrategy.TUNED_G1) {
@@ -120,12 +121,24 @@ public final class GcStrategySupport {
                 if (supports.test(nonGenerational))
                     return new Resolution(GcStrategy.ZGC, nonGenerational, false);
             }
-        } else if (requested != GcStrategy.DEFAULT && version >= 8) {
+        } else if (requested == GcStrategy.SHENANDOAH) {
+            if (is64bit && version >= 25) {
+                // Generational Shenandoah became a production feature in Java 25; do not opt into Java 24's experiment.
+                @Unmodifiable List<String> generational = List.of("-XX:+UseShenandoahGC", "-XX:ShenandoahGCMode=generational");
+                if (supports.test(generational))
+                    return new Resolution(GcStrategy.SHENANDOAH, generational, true);
+            }
+            if (is64bit && version >= 15) {
+                @Unmodifiable List<String> regular = List.of("-XX:+UseShenandoahGC");
+                if (supports.test(regular))
+                    return new Resolution(GcStrategy.SHENANDOAH, regular, false);
+            }
+        } else if ((requested == GcStrategy.G1 || requested == GcStrategy.TUNED_G1) && version >= 8) {
             @Unmodifiable List<String> arguments = List.of("-XX:+UseG1GC");
             if (supports.test(arguments))
                 return new Resolution(requested, arguments, false);
         }
-        // apply() turns this unresolved result into an explicit error for the ZGC preference.
+        // apply() stops the launch when a specifically selected low-pause collector is unavailable.
         return new Resolution(GcStrategy.DEFAULT, List.of(), false);
     }
 
@@ -187,9 +200,11 @@ public final class GcStrategySupport {
     static boolean isUnsupportedDiagnostic(String diagnostic) {
         String lower = diagnostic.toLowerCase(Locale.ROOT);
         boolean collector = lower.contains("usezgc") || lower.contains("zgenerational")
-                || lower.contains("useg1gc") || lower.contains("zgc") || lower.contains("garbage collector");
+                || lower.contains("useg1gc") || lower.contains("zgc") || lower.contains("shenandoah")
+                || lower.contains("garbage collector");
         return collector && (lower.contains("unrecognized") || lower.contains("unrecognised")
-                || lower.contains("not supported") || lower.contains("unsupported") || lower.contains("not available"));
+                || lower.contains("not supported") || lower.contains("unsupported") || lower.contains("not available")
+                || (lower.contains("shenandoahgcmode") && lower.contains("unknown")));
     }
 
     /// Effective collector and immutable selection arguments, excluding the optional G1 tuning bundle.

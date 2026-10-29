@@ -128,7 +128,9 @@ public final class GcStrategySupportTest {
     /// Only collector rejection diagnostics count as unsupported, rather than generic VM failures.
     @ParameterizedTest
     @ValueSource(strings = {"Unrecognized VM option 'UseZGC'", "Unrecognized VM option 'ZGenerational'",
-            "Error: ZGC is not supported on this platform", "Selected garbage collector is not supported"})
+            "Error: ZGC is not supported on this platform", "Selected garbage collector is not supported",
+            "Option -XX:+UseShenandoahGC not supported", "Unknown -XX:ShenandoahGCMode option",
+            "Unrecognized VM option 'ShenandoahGCMode=generational'"})
     public void recognizesUnsupportedCollectorDiagnostics(String diagnostic) {
         assertTrue(GcStrategySupport.isUnsupportedDiagnostic(diagnostic));
     }
@@ -136,7 +138,8 @@ public final class GcStrategySupportTest {
     /// Memory and executable failures must not be mislabeled as unsupported ZGC.
     @ParameterizedTest
     @ValueSource(strings = {"Could not reserve enough space for object heap", "Error: Could not create the Java Virtual Machine",
-            "Access is denied", "ZGC initialization failed: insufficient memory"})
+            "Access is denied", "ZGC initialization failed: insufficient memory",
+            "Shenandoah initialization failed: insufficient memory"})
     public void rejectsUnrelatedFailureDiagnostics(String diagnostic) {
         assertFalse(GcStrategySupport.isUnsupportedDiagnostic(diagnostic));
     }

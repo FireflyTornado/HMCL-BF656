@@ -31,6 +31,8 @@ public enum GcStrategy {
     /// The former generational-only preference is read as the unified strategy when loading older settings.
     @SerializedName(value = "ZGC", alternate = {"GENERATIONAL_ZGC"})
     ZGC,
+    /// Prefers production generational Shenandoah, then regular Shenandoah; no other collector is substituted.
+    SHENANDOAH,
     /// Leaves collector selection and tuning to Java or user-supplied arguments.
     DEFAULT
 }

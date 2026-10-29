@@ -34,7 +34,8 @@ public final class GcStrategyErrorDialog {
 
     /// Creates a failure dialog for game launch or script export, with the actual runtime version and path.
     public static MessageDialogPane create(GcStrategyException failure, String title, Runnable openSettings) {
-        String message = i18n("launch.failed.gc." + failure.getReason().name().toLowerCase(Locale.ROOT))
+        String strategy = i18n("settings.advanced.gc_strategy." + failure.getGcStrategy().name().toLowerCase(Locale.ROOT));
+        String message = i18n("launch.failed.gc." + failure.getReason().name().toLowerCase(Locale.ROOT), strategy)
                 + "\n\n" + i18n("launch.failed.gc.java", failure.getJavaVersion(), failure.getExecutable());
         return new MessageDialogPane.Builder(message, title, MessageDialogPane.MessageType.ERROR)
                 .addAction(i18n("launch.failed.gc.open_settings"), openSettings)
