@@ -31,6 +31,7 @@ import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.VBox;
 import org.jackhuang.hmcl.Metadata;
+import org.jackhuang.hmcl.bf656.BF656Metadata;
 import org.jackhuang.hmcl.task.Schedulers;
 import org.jackhuang.hmcl.ui.Controllers;
 import org.jackhuang.hmcl.ui.FXUtils;
@@ -45,6 +46,7 @@ import org.jackhuang.hmcl.util.i18n.SupportedLocale;
 import org.jackhuang.hmcl.util.io.FileUtils;
 import org.jackhuang.hmcl.util.io.IOUtils;
 import org.tukaani.xz.XZInputStream;
+import org.jetbrains.annotations.Nullable;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -101,33 +103,38 @@ public final class SettingsPage extends ScrollPane {
                         }
                     };
                     updateChannel = updatePane.valueProperty();
-                    updatePane.setTitle(i18n("update"));
+                    updatePane.setTitle(i18n("update") + " (" + BF656Metadata.VERSION + ")");
                     updatePane.setValue(UpdateChannel.getChannel());
+                    updatePane.setDisable(!UpdateChecker.isEnabled());
 
                     updatePane.setNullSafeConverter(channel -> i18n("update.channel." + channel.channelName));
-                    updatePane.setItems(List.of(UpdateChannel.STABLE, UpdateChannel.DEVELOPMENT));
-                    updatePane.setDescriptionConverter(channel -> i18n("update.note." + channel.channelName));
+                    updatePane.setItems(List.of(UpdateChannel.STABLE, UpdateChannel.DEVELOPMENT, UpdateChannel.NIGHTLY));
+                    updatePane.setDescriptionConverter(channel -> i18n(channel == UpdateChannel.NIGHTLY
+                            ? "bf656.update.note.nightly" : "update.note." + channel.channelName));
 
                     final StringProperty lblUpdateSubProperty = updatePane.subtitleProperty();
 
                     {
                         updateListener = any -> {
-                            boolean outdated = UpdateChecker.isOutdated();
+                            @Nullable RemoteVersion latest = UpdateChecker.getLatestVersion();
+                            @Nullable Throwable failure = UpdateChecker.errorProperty().get();
+                            boolean outdated = UpdateChecker.isOutdated() && latest != null;
 
                             updateButton.setVisible(outdated);
                             updateButton.setManaged(outdated);
                             updatePane.pseudoClassStateChanged(PseudoClass.getPseudoClass("active"), outdated);
 
-                            if (outdated) {
-                                lblUpdateSubProperty.set(i18n("update.newest_version", UpdateChecker.getLatestVersion().version()));
+                            if (!UpdateChecker.isEnabled()) {
+                                lblUpdateSubProperty.set(i18n("bf656.update.disabled"));
+                            } else if (outdated && latest != null) {
+                                lblUpdateSubProperty.set(i18n("update.newest_version", latest.version()));
                             } else if (UpdateChecker.isCheckingUpdate()) {
                                 lblUpdateSubProperty.set(i18n("update.checking"));
-                            } else if (UpdateChecker.errorProperty().get() != null) {
-                                Throwable t = UpdateChecker.errorProperty().get();
-                                if (t instanceof SelfVerificationException) {
+                            } else if (failure != null) {
+                                if (failure instanceof SelfVerificationException) {
                                     lblUpdateSubProperty.set(i18n("update.unverified"));
                                 } else {
-                                    String msg = t.getClass().getSimpleName() + ": " + t.getLocalizedMessage();
+                                    String msg = failure.getClass().getSimpleName() + ": " + failure.getLocalizedMessage();
                                     lblUpdateSubProperty.set(i18n("update.check_failed", msg));
                                 }
                             } else {
@@ -146,8 +153,9 @@ public final class SettingsPage extends ScrollPane {
 
                 {
                     LineToggleButton previewPane = new LineToggleButton();
-                    previewPane.setTitle(i18n("update.preview"));
-                    previewPane.setSubtitle(i18n("update.preview.subtitle"));
+                    previewPane.setDisable(!UpdateChecker.isEnabled());
+                    previewPane.setTitle(i18n("bf656.update.preview"));
+                    previewPane.setSubtitle(i18n("bf656.update.preview.subtitle"));
                     previewPane.selectedProperty().bindBidirectional(settings().acceptPreviewUpdateProperty());
 
                     InvalidationListener checkUpdateListener = e -> {
@@ -161,8 +169,9 @@ public final class SettingsPage extends ScrollPane {
 
                 {
                     LineToggleButton disableAutoShowUpdateDialogPane = new LineToggleButton();
+                    disableAutoShowUpdateDialogPane.setDisable(!UpdateChecker.isEnabled());
                     disableAutoShowUpdateDialogPane.setTitle(i18n("update.disable_auto_show_update_dialog"));
-                    disableAutoShowUpdateDialogPane.setSubtitle(i18n("update.disable_auto_show_update_dialog.subtitle"));
+                    disableAutoShowUpdateDialogPane.setSubtitle(i18n("bf656.update.disable_auto_show_update_dialog.subtitle"));
                     disableAutoShowUpdateDialogPane.selectedProperty().bindBidirectional(settings().disableAutoShowUpdateDialogProperty());
                     updatePaneList.getContent().add(disableAutoShowUpdateDialogPane);
                 }
@@ -262,7 +271,7 @@ public final class SettingsPage extends ScrollPane {
     }
 
     private void onUpdate() {
-        RemoteVersion target = UpdateChecker.getLatestVersion();
+        @Nullable RemoteVersion target = UpdateChecker.getLatestVersion();
         if (target == null) {
             return;
         }

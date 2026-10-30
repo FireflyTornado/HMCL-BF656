@@ -2,6 +2,7 @@ import org.gradle.language.jvm.tasks.ProcessResources
 import org.gradle.api.artifacts.VersionCatalogsExtension
 import org.gradle.api.tasks.bundling.Jar
 import java.util.zip.ZipFile
+import java.net.URI
 import java.util.Properties
 import javax.imageio.ImageIO
 
@@ -12,6 +13,23 @@ bf656ConfigFile.reader(Charsets.UTF_8).use { bf656Config.load(it) }
 listOf("name", "fullName", "version").forEach { key ->
     require(!bf656Config.getProperty(key).isNullOrBlank()) {
         "Missing or blank '$key' in config/bf656.properties"
+    }
+}
+
+// Catch release configuration mistakes before they can prevent a packaged launcher from starting.
+require(bf656Config.getProperty("update.channel", "stable").trim() in listOf("stable", "dev", "nightly")) {
+    "update.channel must be stable, dev, or nightly in config/bf656.properties"
+}
+listOf("update.url", "update.downloadUrl", "update.changelogUrl").forEach { key ->
+    val url = bf656Config.getProperty(key, "").trim()
+    if (url.isNotEmpty()) {
+        val uri = URI(url)
+        val loopback = uri.host?.lowercase() in listOf("localhost", "127.0.0.1", "[::1]")
+        require(uri.host != null && uri.userInfo == null && uri.fragment == null
+                && (uri.scheme.equals("https", ignoreCase = true)
+                || (loopback && uri.scheme.equals("http", ignoreCase = true)))) {
+            "$key must be HTTPS (or loopback HTTP) in config/bf656.properties"
+        }
     }
 }
 

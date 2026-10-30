@@ -77,3 +77,7 @@ language-subtag-registry
 !/.gemini/config.yaml
 .codex
 /.gradle-*/
+
+# BF656 update private keys and local encrypted recovery copies.
+*.pk8
+*.pk8.dpapi

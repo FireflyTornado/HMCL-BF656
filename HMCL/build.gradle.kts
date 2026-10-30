@@ -94,7 +94,7 @@ fun createChecksum(file: File) {
 }
 
 fun attachSignature(jar: File) {
-    val keyLocation = System.getenv("HMCL_SIGNATURE_KEY")
+    val keyLocation = System.getenv("HMCL_SIGNATURE_KEY")?.trim()?.takeIf { it.isNotEmpty() }
     if (keyLocation == null) {
         logger.warn("Missing signature key")
         return
@@ -108,7 +108,7 @@ fun attachSignature(jar: File) {
             .sorted(Comparator.comparing { it.name })
             .filter { it.name != "META-INF/hmcl_signature" }
             .forEach {
-                signer.update(digest("SHA-512", it.name.toByteArray()))
+                signer.update(digest("SHA-512", it.name.toByteArray(Charsets.UTF_8)))
                 signer.update(digest("SHA-512", zip.getInputStream(it).readBytes()))
             }
     }
@@ -494,3 +494,4 @@ tasks.register<UpdateAddonProjectInfos>("updateModpackProjectInfos") {
 }
 
 apply(from = rootProject.file("gradle/bf656.gradle.kts"))
+apply(from = rootProject.file("gradle/bf656-signing.gradle.kts"))
