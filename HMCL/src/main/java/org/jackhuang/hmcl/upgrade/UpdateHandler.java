@@ -23,6 +23,7 @@ import javafx.application.Platform;
 import org.jackhuang.hmcl.EntryPoint;
 import org.jackhuang.hmcl.Main;
 import org.jackhuang.hmcl.Metadata;
+import org.jackhuang.hmcl.bf656.BF656Metadata;
 import org.jackhuang.hmcl.java.JavaRuntime;
 import org.jackhuang.hmcl.setting.SettingsManager;
 import org.jackhuang.hmcl.task.Task;
@@ -70,14 +71,14 @@ public final class UpdateHandler {
                 performMigration();
             } catch (IOException e) {
                 LOG.warning("Failed to perform migration", e);
-                SwingUtils.showErrorDialog(i18n("fatal.apply_update_failure", Metadata.MANUAL_UPDATE_URL) + "\n" + StringUtils.getStackTrace(e));
+                SwingUtils.showErrorDialog(manualUpdateMessage(false) + "\n" + StringUtils.getStackTrace(e));
             }
             return true;
         }
 
         if (args.length == 2 && args[0].equals("--apply-to")) {
             if (OperatingSystem.CURRENT_OS == OperatingSystem.WINDOWS && !OperatingSystem.isWindows7OrLater()) {
-                SwingUtils.showErrorDialog(i18n("fatal.apply_update_need_win7", Metadata.PUBLISH_URL));
+                SwingUtils.showErrorDialog(manualUpdateMessage(true));
                 return true;
             }
 
@@ -85,7 +86,7 @@ public final class UpdateHandler {
                 applyUpdate(Paths.get(args[1]));
             } catch (IOException e) {
                 LOG.warning("Failed to apply update", e);
-                SwingUtils.showErrorDialog(i18n("fatal.apply_update_failure", Metadata.MANUAL_UPDATE_URL) + "\n" + StringUtils.getStackTrace(e));
+                SwingUtils.showErrorDialog(manualUpdateMessage(false) + "\n" + StringUtils.getStackTrace(e));
             }
             return true;
         }
@@ -102,7 +103,7 @@ public final class UpdateHandler {
         checkFxUserThread();
 
         if (OperatingSystem.CURRENT_OS == OperatingSystem.WINDOWS && !OperatingSystem.isWindows7OrLater()) {
-            Controllers.dialog(i18n("fatal.apply_update_need_win7", Metadata.PUBLISH_URL), i18n("message.error"), MessageType.ERROR);
+            Controllers.dialog(manualUpdateMessage(true), i18n("message.error"), MessageType.ERROR);
             return;
         }
 
@@ -176,7 +177,7 @@ public final class UpdateHandler {
         }
         ExecutableHeaderHelper.copyWithHeader(self, target);
 
-        Optional<Path> newFilename = tryRename(target, Metadata.VERSION);
+        Optional<Path> newFilename = tryRename(target, BF656Metadata.VERSION);
         if (newFilename.isPresent()) {
             LOG.info("Move " + target + " to " + newFilename.get());
             try {
@@ -248,9 +249,20 @@ public final class UpdateHandler {
         }).collect(Collectors.joining(" "));
     }
 
-    private static Optional<Path> tryRename(Path path, String newVersion) {
+    /// Explains how to recover without directing BF656 users to upstream HMCL downloads.
+    private static String manualUpdateMessage(boolean unsupportedWindows) {
+        String message = i18n(unsupportedWindows ? "bf656.update.unsupported_windows" : "bf656.update.manual_required");
+        if (!Metadata.MANUAL_UPDATE_URL.isEmpty()) {
+            message += "\n" + i18n("bf656.update.manual_download", Metadata.MANUAL_UPDATE_URL);
+        }
+        return message;
+    }
+
+    /// Renames versioned BF656 or legacy HMCL files, leaving fixed or user-chosen names intact.
+    static Optional<Path> tryRename(Path path, String newVersion) {
         String filename = path.getFileName().toString();
-        Matcher matcher = Pattern.compile("^(?<prefix>[hH][mM][cC][lL][.-])(?<version>\\d+(?:\\.\\d+)*)(?<suffix>\\.[^.]+)$").matcher(filename);
+        Matcher matcher = Pattern.compile("^(?<prefix>(?:" + Pattern.quote(BF656Metadata.NAME)
+                + "|HMCL)[.-])(?<version>\\d+(?:\\.\\d+)*)(?<suffix>\\.[^.]+)$", Pattern.CASE_INSENSITIVE).matcher(filename);
         if (matcher.find()) {
             String newFilename = matcher.group("prefix") + newVersion + matcher.group("suffix");
             if (!newFilename.equals(filename)) {

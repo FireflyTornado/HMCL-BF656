@@ -56,6 +56,11 @@ public final class BF656Metadata {
         return FULL_NAME + " v" + VERSION;
     }
 
+    /// Reads an optional bundled setting, trimming whitespace and retaining its default when absent.
+    static String optionalProperty(String key, String fallback) {
+        return PROPERTIES.getProperty(key, fallback).trim();
+    }
+
     /// Loads the configuration copied into the application by `gradle/bf656.gradle.kts`.
     private static Properties loadProperties() {
         @Nullable InputStream input = BF656Metadata.class.getResourceAsStream("/assets/bf656.properties");
