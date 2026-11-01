@@ -23,6 +23,8 @@ import com.jfoenix.controls.JFXSpinner;
 import javafx.geometry.Insets;
 import javafx.scene.control.Label;
 import javafx.scene.control.ScrollPane;
+import javafx.scene.layout.Region;
+import javafx.scene.layout.VBox;
 import javafx.scene.text.TextFlow;
 
 import org.glavo.url.WebURL;
@@ -36,7 +38,6 @@ import org.jackhuang.hmcl.util.StringUtils;
 import org.jackhuang.hmcl.util.versioning.VersionNumber;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
-import org.jsoup.nodes.Element;
 import org.jsoup.nodes.Node;
 import org.jetbrains.annotations.NotNullByDefault;
 import org.jetbrains.annotations.Nullable;
@@ -55,23 +56,31 @@ public final class UpgradeDialog extends JFXDialogLayout {
     /// Builds a confirmation dialog without requesting or linking to unconfigured release notes.
     public UpgradeDialog(RemoteVersion remoteVersion, Runnable updateRunnable) {
         maxWidthProperty().bind(Controllers.getDecorator().contentWidthProperty().multiply(0.7));
-        maxHeightProperty().bind(Controllers.getDecorator().contentHeightProperty().multiply(0.7));
 
-        Label heading = new Label(i18n("update.changelog"));
+        Label heading = new Label(i18n("bf656.update.confirm.title", remoteVersion.version()));
         heading.setPadding(new Insets(0, 0, 8, 0));
         setHeading(heading);
+        Label summary = new Label(i18n("bf656.update.confirm.summary"));
+        summary.setWrapText(true);
+        VBox notes = new VBox(8);
+        notes.setId("bf656-update-notes");
+        notes.setManaged(false);
+        notes.setVisible(false);
+        setBody(new VBox(12, summary, notes));
         String url = CHANGELOG_URL;
-        if (url.isEmpty()) {
-            setBody(new Label(i18n("update.changelog.empty")));
-        } else {
-            loadChangelog(remoteVersion, url);
-        }
+        // A distribution without release notes uses a compact confirmation, with no empty log placeholder.
+        setMaxHeight(Region.USE_PREF_SIZE);
+        if (!url.isEmpty())
+            loadChangelog(remoteVersion, url, notes);
 
-        JFXButton updateButton = new JFXButton(i18n("update.accept"));
+        JFXButton updateButton = new JFXButton(i18n("bf656.update.confirm.accept"));
         updateButton.getStyleClass().add("dialog-accept");
-        updateButton.setOnAction(e -> updateRunnable.run());
+        updateButton.setOnAction(e -> {
+            fireEvent(new DialogCloseEvent());
+            updateRunnable.run();
+        });
 
-        JFXButton cancelButton = new JFXButton(i18n("button.cancel"));
+        JFXButton cancelButton = new JFXButton(i18n("bf656.update.confirm.later"));
         cancelButton.getStyleClass().add("dialog-cancel");
         cancelButton.setOnAction(e -> fireEvent(new DialogCloseEvent()));
 
@@ -85,21 +94,26 @@ public final class UpgradeDialog extends JFXDialogLayout {
         onEscPressed(this, cancelButton::fire);
     }
 
-    /// Loads configured notes asynchronously and keeps failures inside the confirmation dialog.
-    private void loadChangelog(RemoteVersion remoteVersion, String url) {
-        setBody(new JFXSpinner());
+    /// Loads optional notes without replacing the restart explanation or exposing network failures in the dialog.
+    private void loadChangelog(RemoteVersion remoteVersion, String url, VBox notes) {
+        notes.getChildren().setAll(new JFXSpinner());
+        notes.setManaged(true);
+        notes.setVisible(true);
         Task<@Nullable TextFlow> task = Task.supplyAsync(Schedulers.io(), () -> renderChangelog(remoteVersion, url));
         task.whenComplete(Schedulers.javafx(), (@Nullable TextFlow result, @Nullable Exception exception) -> {
-            if (exception != null) {
+            notes.getChildren().clear();
+            if (exception != null)
                 LOG.warning("Failed to load BF656 update log", exception);
-                setBody(new Label(i18n("update.changelog.empty")));
-            } else if (result != null) {
+            if (result == null || exception != null) {
+                notes.setManaged(false);
+                notes.setVisible(false);
+            } else {
                 ScrollPane scrollPane = new ScrollPane(result);
                 scrollPane.setFitToWidth(true);
+                scrollPane.setPrefViewportHeight(180);
+                scrollPane.maxHeightProperty().bind(Controllers.getDecorator().contentHeightProperty().multiply(0.35));
                 FXUtils.smoothScrolling(scrollPane);
-                setBody(scrollPane);
-            } else {
-                setBody();
+                notes.getChildren().setAll(new Label(i18n("update.changelog")), scrollPane);
             }
         }).start();
     }
@@ -122,9 +136,7 @@ public final class UpgradeDialog extends JFXDialogLayout {
 
         if (node == null || !"h1".equals(node.nodeName())) {
             LOG.warning("Changelog not found");
-            Element list = new Element("ul");
-            list.appendElement("li").text(i18n("update.changelog.empty"));
-            return renderer.appendNode(list).mergeLineBreaks().render();
+            return null;
         }
 
         do {

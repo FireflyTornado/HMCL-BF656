@@ -32,7 +32,6 @@ import org.jackhuang.hmcl.ui.Controllers;
 import org.jackhuang.hmcl.ui.UpgradeDialog;
 import org.jackhuang.hmcl.ui.construct.MessageDialogPane.MessageType;
 import org.jackhuang.hmcl.util.FileSaver;
-import org.jackhuang.hmcl.util.StringUtils;
 import org.jackhuang.hmcl.util.SwingUtils;
 import org.jackhuang.hmcl.util.TaskCancellationAction;
 import org.jackhuang.hmcl.util.io.JarUtils;
@@ -71,7 +70,7 @@ public final class UpdateHandler {
                 performMigration();
             } catch (IOException e) {
                 LOG.warning("Failed to perform migration", e);
-                SwingUtils.showErrorDialog(manualUpdateMessage(false) + "\n" + StringUtils.getStackTrace(e));
+                SwingUtils.showErrorDialog(manualUpdateMessage(false));
             }
             return true;
         }
@@ -86,7 +85,7 @@ public final class UpdateHandler {
                 applyUpdate(Paths.get(args[1]));
             } catch (IOException e) {
                 LOG.warning("Failed to apply update", e);
-                SwingUtils.showErrorDialog(manualUpdateMessage(false) + "\n" + StringUtils.getStackTrace(e));
+                SwingUtils.showErrorDialog(manualUpdateMessage(false));
             }
             return true;
         }
@@ -154,14 +153,14 @@ public final class UpdateHandler {
                         EntryPoint.exit(0);
                     } catch (IOException e) {
                         LOG.warning("Failed to update to " + version, e);
-                        Platform.runLater(() -> Controllers.dialog(StringUtils.getStackTrace(e), i18n("update.failed"), MessageType.ERROR));
+                        Platform.runLater(() -> Controllers.dialog(i18n("bf656.update.failed"), i18n("update.failed"), MessageType.ERROR));
                     }
 
                 } else {
                     Exception e = executor.getException();
                     LOG.warning("Failed to update to " + version, e);
                     if (!(e instanceof CancellationException)) {
-                        Platform.runLater(() -> Controllers.dialog(e.toString(), i18n("update.failed"), MessageType.ERROR));
+                        Platform.runLater(() -> Controllers.dialog(i18n("bf656.update.failed"), i18n("update.failed"), MessageType.ERROR));
                     }
                 }
             });

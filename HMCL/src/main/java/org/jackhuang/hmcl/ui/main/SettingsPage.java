@@ -18,11 +18,6 @@
 package org.jackhuang.hmcl.ui.main;
 
 import com.jfoenix.controls.JFXButton;
-import javafx.beans.InvalidationListener;
-import javafx.beans.WeakInvalidationListener;
-import javafx.beans.property.ObjectProperty;
-import javafx.beans.property.StringProperty;
-import javafx.css.PseudoClass;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.control.Label;
@@ -31,14 +26,11 @@ import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.VBox;
 import org.jackhuang.hmcl.Metadata;
-import org.jackhuang.hmcl.bf656.BF656Metadata;
 import org.jackhuang.hmcl.task.Schedulers;
 import org.jackhuang.hmcl.ui.Controllers;
 import org.jackhuang.hmcl.ui.FXUtils;
-import org.jackhuang.hmcl.ui.SVG;
 import org.jackhuang.hmcl.ui.construct.*;
 import org.jackhuang.hmcl.ui.construct.MessageDialogPane.MessageType;
-import org.jackhuang.hmcl.upgrade.*;
 import org.jackhuang.hmcl.util.Lang;
 import org.jackhuang.hmcl.util.StringUtils;
 import org.jackhuang.hmcl.util.i18n.I18n;
@@ -46,7 +38,6 @@ import org.jackhuang.hmcl.util.i18n.SupportedLocale;
 import org.jackhuang.hmcl.util.io.FileUtils;
 import org.jackhuang.hmcl.util.io.IOUtils;
 import org.tukaani.xz.XZInputStream;
-import org.jetbrains.annotations.Nullable;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -67,10 +58,10 @@ import static org.jackhuang.hmcl.setting.SettingsManager.settings;
 import static org.jackhuang.hmcl.util.i18n.I18n.i18n;
 import static org.jackhuang.hmcl.util.logging.Logger.LOG;
 
+/// General player preferences, including the BF656 version/status card and update reminder.
 public final class SettingsPage extends ScrollPane {
-    @SuppressWarnings("FieldCanBeLocal")
-    private final InvalidationListener updateListener;
 
+    /// Builds launcher preferences without exposing maintainer release channels to players.
     public SettingsPage() {
         this.setFitToWidth(true);
 
@@ -80,104 +71,7 @@ public final class SettingsPage extends ScrollPane {
         FXUtils.smoothScrolling(this);
 
         {
-            ComponentList updatePaneList = new ComponentList();
-            {
-                ObjectProperty<UpdateChannel> updateChannel;
-                {
-
-                    JFXButton updateButton = FXUtils.newToggleButton4(SVG.UPDATE, 20);
-                    updateButton.setOnAction(e -> onUpdate());
-                    updateButton.setPadding(Insets.EMPTY);
-                    FXUtils.installFastTooltip(updateButton, i18n("update.tooltip"));
-
-                    var updatePane = new LineSelectButton<UpdateChannel>() {
-
-                        {
-                            getStyleClass().add("update-pane");
-                            setNode(IDX_TRAILING, updateButton);
-                        }
-
-                        @Override
-                        protected int getTrailingTextIndex() {
-                            return LineComponent.IDX_TRAILING + 1;
-                        }
-                    };
-                    updateChannel = updatePane.valueProperty();
-                    updatePane.setTitle(i18n("update") + " (" + BF656Metadata.VERSION + ")");
-                    updatePane.setValue(UpdateChannel.getChannel());
-                    updatePane.setDisable(!UpdateChecker.isEnabled());
-
-                    updatePane.setNullSafeConverter(channel -> i18n("update.channel." + channel.channelName));
-                    updatePane.setItems(List.of(UpdateChannel.STABLE, UpdateChannel.DEVELOPMENT, UpdateChannel.NIGHTLY));
-                    updatePane.setDescriptionConverter(channel -> i18n(channel == UpdateChannel.NIGHTLY
-                            ? "bf656.update.note.nightly" : "update.note." + channel.channelName));
-
-                    final StringProperty lblUpdateSubProperty = updatePane.subtitleProperty();
-
-                    {
-                        updateListener = any -> {
-                            @Nullable RemoteVersion latest = UpdateChecker.getLatestVersion();
-                            @Nullable Throwable failure = UpdateChecker.errorProperty().get();
-                            boolean outdated = UpdateChecker.isOutdated() && latest != null;
-
-                            updateButton.setVisible(outdated);
-                            updateButton.setManaged(outdated);
-                            updatePane.pseudoClassStateChanged(PseudoClass.getPseudoClass("active"), outdated);
-
-                            if (!UpdateChecker.isEnabled()) {
-                                lblUpdateSubProperty.set(i18n("bf656.update.disabled"));
-                            } else if (outdated && latest != null) {
-                                lblUpdateSubProperty.set(i18n("update.newest_version", latest.version()));
-                            } else if (UpdateChecker.isCheckingUpdate()) {
-                                lblUpdateSubProperty.set(i18n("update.checking"));
-                            } else if (failure != null) {
-                                if (failure instanceof SelfVerificationException) {
-                                    lblUpdateSubProperty.set(i18n("update.unverified"));
-                                } else {
-                                    String msg = failure.getClass().getSimpleName() + ": " + failure.getLocalizedMessage();
-                                    lblUpdateSubProperty.set(i18n("update.check_failed", msg));
-                                }
-                            } else {
-                                lblUpdateSubProperty.set(i18n("update.latest"));
-                            }
-                        };
-                        UpdateChecker.latestVersionProperty().addListener(new WeakInvalidationListener(updateListener));
-                        UpdateChecker.outdatedProperty().addListener(new WeakInvalidationListener(updateListener));
-                        UpdateChecker.checkingUpdateProperty().addListener(new WeakInvalidationListener(updateListener));
-                        UpdateChecker.errorProperty().addListener(new WeakInvalidationListener(updateListener));
-                        updateListener.invalidated(null);
-                    }
-
-                    updatePaneList.getContent().add(updatePane);
-                }
-
-                {
-                    LineToggleButton previewPane = new LineToggleButton();
-                    previewPane.setDisable(!UpdateChecker.isEnabled());
-                    previewPane.setTitle(i18n("bf656.update.preview"));
-                    previewPane.setSubtitle(i18n("bf656.update.preview.subtitle"));
-                    previewPane.selectedProperty().bindBidirectional(settings().acceptPreviewUpdateProperty());
-
-                    InvalidationListener checkUpdateListener = e -> {
-                        UpdateChecker.requestCheckUpdate(updateChannel.get(), previewPane.isSelected());
-                    };
-                    updateChannel.addListener(checkUpdateListener);
-                    previewPane.selectedProperty().addListener(checkUpdateListener);
-
-                    updatePaneList.getContent().add(previewPane);
-                }
-
-                {
-                    LineToggleButton disableAutoShowUpdateDialogPane = new LineToggleButton();
-                    disableAutoShowUpdateDialogPane.setDisable(!UpdateChecker.isEnabled());
-                    disableAutoShowUpdateDialogPane.setTitle(i18n("update.disable_auto_show_update_dialog"));
-                    disableAutoShowUpdateDialogPane.setSubtitle(i18n("bf656.update.disable_auto_show_update_dialog.subtitle"));
-                    disableAutoShowUpdateDialogPane.selectedProperty().bindBidirectional(settings().disableAutoShowUpdateDialogProperty());
-                    updatePaneList.getContent().add(disableAutoShowUpdateDialogPane);
-                }
-
-                rootPane.getChildren().addAll(ComponentList.createComponentListTitle(i18n("update")), updatePaneList);
-            }
+            rootPane.getChildren().addAll(ComponentList.createComponentListTitle(i18n("update")), new LauncherUpdatePane());
 
             {
                 ComponentList languagePaneList = new ComponentList();
@@ -268,14 +162,6 @@ public final class SettingsPage extends ScrollPane {
 
     private void openLogFolder() {
         FXUtils.openFolder(LOG.getLogFile().getParent());
-    }
-
-    private void onUpdate() {
-        @Nullable RemoteVersion target = UpdateChecker.getLatestVersion();
-        if (target == null) {
-            return;
-        }
-        UpdateHandler.updateFrom(target);
     }
 
     private static String getEntryName(Set<String> entryNames, String name) {
