@@ -739,15 +739,12 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
             var gcStrategyPane = createInheritableButton(
                     GameSettings::gcStrategyProperty,
                     strategy -> i18n("settings.advanced.gc_strategy." + strategy.name().toLowerCase(Locale.ROOT)),
-                    null,
+                    strategy -> i18n("settings.advanced.gc_strategy." + strategy.name().toLowerCase(Locale.ROOT) + ".desc")
+                            + "\n\n" + i18n("settings.advanced.gc_strategy.hint"),
                     GcStrategy.values());
             jvmSettings.getContent().add(gcStrategyPane);
             gcStrategyPane.setTitle(i18n("settings.advanced.gc_strategy"));
-            // Keep the selected strategy readable while the longer explanatory text wraps beside it.
-            FXUtils.onChangeAndOperate(gcStrategyPane.trailingTextProperty(), text -> {
-                if (gcStrategyPane.lookup(".trailing-label") instanceof Label label)
-                    label.setMinWidth(Region.USE_PREF_SIZE);
-            });
+            gcStrategyPane.setDescriptionAsTooltip(true);
 
             var jvmArgsPane = new LinePane();
             jvmSettings.getContent().add(jvmArgsPane);
@@ -758,17 +755,14 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
                 txtJVMArgs.setPrefWidth(400);
                 jvmArgsPane.setRight(txtJVMArgs);
                 bindIndependentTextField(jvmArgsPane, txtJVMArgs, GameSettings::jvmOptionsProperty);
+                // Keep effective-state warnings visible while detailed collector help stays in tooltips.
                 gcStrategyPane.subtitleProperty().bind(Bindings.createStringBinding(() -> {
-                    @Nullable GcStrategy strategy = gcStrategyPane.getValue();
-                    String description = i18n("settings.advanced.gc_strategy."
-                            + (strategy != null ? strategy : GcStrategy.TUNED_G1).name().toLowerCase(Locale.ROOT) + ".desc");
-                    String status = noJVMArgsPane.effectiveValueProperty().get()
+                    return noJVMArgsPane.effectiveValueProperty().get()
                             || noOptimizingJVMArgsPane.effectiveValueProperty().get()
-                            ? i18n("settings.advanced.gc_strategy.disabled")
+                            ? i18n("settings.advanced.gc_strategy.disabled").stripTrailing()
                             : StringUtils.tokenize(txtJVMArgs.getText()).stream().anyMatch(GcStrategySupport::isGcArgument)
-                            ? i18n("settings.advanced.gc_strategy.custom") : "";
-                    return status + description + " " + i18n("settings.advanced.gc_strategy.hint");
-                }, gcStrategyPane.valueProperty(), noJVMArgsPane.effectiveValueProperty(),
+                            ? i18n("settings.advanced.gc_strategy.custom").stripTrailing() : "";
+                }, noJVMArgsPane.effectiveValueProperty(),
                         noOptimizingJVMArgsPane.effectiveValueProperty(), txtJVMArgs.textProperty()));
             }
 
