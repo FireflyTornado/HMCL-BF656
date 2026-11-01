@@ -18,6 +18,7 @@
 package org.jackhuang.hmcl;
 
 import org.jackhuang.hmcl.bf656.BF656Metadata;
+import org.jackhuang.hmcl.bf656.BF656UpdateConfig;
 import org.jackhuang.hmcl.util.StringUtils;
 import org.jackhuang.hmcl.util.io.JarUtils;
 import org.jackhuang.hmcl.util.platform.Architecture;
@@ -55,12 +56,15 @@ public final class Metadata {
 
     public static final String PUBLISH_URL = "https://hmcl.huangyuhui.net";
     public static final String DOWNLOAD_URL = PUBLISH_URL + "/download";
-    public static final String HMCL_UPDATE_URL = System.getProperty("hmcl.update_source.override", PUBLISH_URL + "/api/update_link");
-    public static final String MANUAL_UPDATE_URL = "https://github.com/HMCL-dev/HMCL/releases";
+    /// Explicit BF656 manifest URL; empty means self-update checks are disabled.
+    public static final String HMCL_UPDATE_URL = BF656UpdateConfig.CURRENT.updateUrl();
+    /// Optional BF656 download page used when automatic installation fails.
+    public static final String MANUAL_UPDATE_URL = BF656UpdateConfig.CURRENT.downloadUrl();
 
     public static final String DOCS_URL = "https://docs.hmcl.net";
     public static final String CONTACT_URL = DOCS_URL + "/help.html";
-    public static final String CHANGELOG_URL = DOCS_URL + "/changelog/";
+    /// Optional complete BF656 changelog URL, without an implicit channel suffix.
+    public static final String CHANGELOG_URL = BF656UpdateConfig.CURRENT.changelogUrl();
     public static final String EULA_URL = DOCS_URL + "/eula/hmcl.html";
     public static final String GROUPS_URL = "https://www.bilibili.com/opus/905435541874409529";
 

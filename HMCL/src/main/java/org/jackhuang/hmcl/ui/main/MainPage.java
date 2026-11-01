@@ -46,6 +46,7 @@ import javafx.scene.text.TextFlow;
 import javafx.util.Duration;
 import org.jackhuang.hmcl.Metadata;
 import org.jackhuang.hmcl.bf656.BF656Icons;
+import org.jackhuang.hmcl.bf656.BF656Metadata;
 import org.jackhuang.hmcl.download.DownloadProvider;
 import org.jackhuang.hmcl.game.*;
 import org.jackhuang.hmcl.setting.DownloadProviders;
@@ -66,6 +67,7 @@ import org.jackhuang.hmcl.ui.instances.GameListPopupMenu;
 import org.jackhuang.hmcl.ui.instances.Instances;
 import org.jackhuang.hmcl.upgrade.RemoteVersion;
 import org.jackhuang.hmcl.upgrade.UpdateChecker;
+import org.jackhuang.hmcl.upgrade.UpdateChannel;
 import org.jackhuang.hmcl.upgrade.UpdateHandler;
 import org.jackhuang.hmcl.util.*;
 import org.jackhuang.hmcl.util.i18n.I18n;
@@ -137,15 +139,17 @@ public final class MainPage extends StackPane implements DecoratorPage {
 
         setPadding(new Insets(20));
 
-        if (Metadata.isNightly() || (Metadata.isDev() && !Objects.equals(Metadata.VERSION, state().getShownTips().get(ANNOUNCEMENT)))) {
+        UpdateChannel releaseChannel = UpdateChannel.getChannel();
+        if (releaseChannel == UpdateChannel.NIGHTLY || (releaseChannel == UpdateChannel.DEVELOPMENT
+                && !Objects.equals(BF656Metadata.VERSION, state().getShownTips().get(ANNOUNCEMENT)))) {
             String title;
             String content;
-            if (Metadata.isNightly()) {
+            if (releaseChannel == UpdateChannel.NIGHTLY) {
                 title = i18n("update.channel.nightly.title");
-                content = i18n("update.channel.nightly.hint");
+                content = i18n("bf656.update.channel.nightly.hint", BF656Metadata.NAME);
             } else {
                 title = i18n("update.channel.dev.title");
-                content = i18n("update.channel.dev.hint");
+                content = i18n("bf656.update.channel.dev.hint", BF656Metadata.NAME);
             }
 
             VBox announcementCard = new VBox();
@@ -157,8 +161,8 @@ public final class MainPage extends StackPane implements DecoratorPage {
             JFXButton btnHide = new JFXButton();
             btnHide.setOnAction(e -> {
                 announcementPane.setContent(new StackPane(), ContainerAnimations.FADE);
-                if (Metadata.isDev()) {
-                    state().getShownTips().put(ANNOUNCEMENT, Metadata.VERSION);
+                if (releaseChannel == UpdateChannel.DEVELOPMENT) {
+                    state().getShownTips().put(ANNOUNCEMENT, BF656Metadata.VERSION);
                 }
             });
             btnHide.getStyleClass().add("announcement-close-button");

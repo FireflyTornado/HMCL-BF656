@@ -94,7 +94,7 @@ fun createChecksum(file: File) {
 }
 
 fun attachSignature(jar: File) {
-    val keyLocation = System.getenv("HMCL_SIGNATURE_KEY")
+    val keyLocation = System.getenv("HMCL_SIGNATURE_KEY")?.trim()?.takeIf { it.isNotEmpty() }
     if (keyLocation == null) {
         logger.warn("Missing signature key")
         return
@@ -108,7 +108,7 @@ fun attachSignature(jar: File) {
             .sorted(Comparator.comparing { it.name })
             .filter { it.name != "META-INF/hmcl_signature" }
             .forEach {
-                signer.update(digest("SHA-512", it.name.toByteArray()))
+                signer.update(digest("SHA-512", it.name.toByteArray(Charsets.UTF_8)))
                 signer.update(digest("SHA-512", zip.getInputStream(it).readBytes()))
             }
     }
@@ -183,6 +183,9 @@ val createPropertiesFile = tasks.register("createPropertiesFile") {
         }
     }
 }
+
+// Configure BF656 artifact names before resolving paths for signatures and executables.
+apply(from = rootProject.file("gradle/bf656.gradle.kts"))
 
 tasks.jar {
     enabled = false
@@ -493,4 +496,4 @@ tasks.register<UpdateAddonProjectInfos>("updateModpackProjectInfos") {
     projectType.set(UpdateAddonProjectInfos.AddonProjectType.MODPACK)
 }
 
-apply(from = rootProject.file("gradle/bf656.gradle.kts"))
+apply(from = rootProject.file("gradle/bf656-signing.gradle.kts"))

@@ -17,26 +17,29 @@
  */
 package org.jackhuang.hmcl.upgrade;
 
-import org.jackhuang.hmcl.Metadata;
+import org.jackhuang.hmcl.bf656.BF656UpdateConfig;
+import org.jetbrains.annotations.NotNullByDefault;
 
+/// Release channels for BF656 self-updates, independent of the upstream HMCL build type.
+@NotNullByDefault
 public enum UpdateChannel {
+    /// Tested releases offered by default.
     STABLE("stable"),
+    /// Development releases selected explicitly.
     DEVELOPMENT("dev"),
+    /// Nightly releases selected explicitly.
     NIGHTLY("nightly");
 
+    /// Protocol name sent to the configured update source.
     public final String channelName;
 
+    /// Associates a release channel with its wire name.
     UpdateChannel(String channelName) {
         this.channelName = channelName;
     }
 
+    /// Returns the channel bundled in the BF656 distribution.
     public static UpdateChannel getChannel() {
-        if (Metadata.isDev()) {
-            return DEVELOPMENT;
-        } else if (Metadata.isNightly()) {
-            return NIGHTLY;
-        } else {
-            return STABLE;
-        }
+        return BF656UpdateConfig.CURRENT.channel();
     }
 }
