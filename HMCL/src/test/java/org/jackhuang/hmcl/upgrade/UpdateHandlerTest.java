@@ -22,6 +22,7 @@ import org.jetbrains.annotations.NotNullByDefault;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -29,6 +30,18 @@ import static org.junit.jupiter.api.Assertions.*;
 /// Ensures update installation uses BF656 filenames while retaining fixed names and legacy compatibility.
 @NotNullByDefault
 public final class UpdateHandlerTest {
+    /// Display-name artifacts retain their path and extension while advancing to the target version.
+    @Test
+    public void renamesVersionedDisplayNameLauncher() {
+        for (String extension : List.of("exe", "jar", "sh")) {
+            Path current = Path.of("launcher folder", BF656Metadata.FULL_NAME + " 0.3.12." + extension);
+            assertEquals(Optional.of(current.resolveSibling(BF656Metadata.FULL_NAME + " 0.3.13." + extension)),
+                    UpdateHandler.tryRename(current, "0.3.13"));
+        }
+        assertTrue(UpdateHandler.tryRename(Path.of(BF656Metadata.FULL_NAME + " 0.3.12.exe"), "0.3.12").isEmpty());
+        assertTrue(UpdateHandler.tryRename(Path.of(BF656Metadata.FULL_NAME + ".exe"), "0.3.12").isEmpty());
+    }
+
     /// A versioned BF656 EXE is renamed to the BF656 target release.
     @Test
     public void renamesVersionedBf656Launcher() {

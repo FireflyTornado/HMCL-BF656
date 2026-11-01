@@ -184,6 +184,9 @@ val createPropertiesFile = tasks.register("createPropertiesFile") {
     }
 }
 
+// Configure BF656 artifact names before resolving paths for signatures and executables.
+apply(from = rootProject.file("gradle/bf656.gradle.kts"))
+
 tasks.jar {
     enabled = false
     dependsOn(tasks["shadowJar"])
@@ -493,5 +496,4 @@ tasks.register<UpdateAddonProjectInfos>("updateModpackProjectInfos") {
     projectType.set(UpdateAddonProjectInfos.AddonProjectType.MODPACK)
 }
 
-apply(from = rootProject.file("gradle/bf656.gradle.kts"))
 apply(from = rootProject.file("gradle/bf656-signing.gradle.kts"))

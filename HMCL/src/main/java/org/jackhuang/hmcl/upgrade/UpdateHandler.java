@@ -260,7 +260,8 @@ public final class UpdateHandler {
     /// Renames versioned BF656 or legacy HMCL files, leaving fixed or user-chosen names intact.
     static Optional<Path> tryRename(Path path, String newVersion) {
         String filename = path.getFileName().toString();
-        Matcher matcher = Pattern.compile("^(?<prefix>(?:" + Pattern.quote(BF656Metadata.NAME)
+        Matcher matcher = Pattern.compile("^(?<prefix>" + Pattern.quote(BF656Metadata.FULL_NAME) + " |(?:"
+                + Pattern.quote(BF656Metadata.NAME)
                 + "|HMCL)[.-])(?<version>\\d+(?:\\.\\d+)*)(?<suffix>\\.[^.]+)$", Pattern.CASE_INSENSITIVE).matcher(filename);
         if (matcher.find()) {
             String newFilename = matcher.group("prefix") + newVersion + matcher.group("suffix");

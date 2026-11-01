@@ -16,6 +16,15 @@ listOf("name", "fullName", "version").forEach { key ->
     }
 }
 
+// Use the independently maintained BF656 display name and version for every launcher artifact.
+listOf("jar", "shadowJar").forEach { taskName ->
+    tasks.named<Jar>(taskName) {
+        archiveBaseName.set(bf656Config.getProperty("fullName").trim())
+        archiveVersion.set(bf656Config.getProperty("version").trim())
+        archiveFileName.set("${archiveBaseName.get()} ${archiveVersion.get()}.${archiveExtension.get()}")
+    }
+}
+
 // Catch release configuration mistakes before they can prevent a packaged launcher from starting.
 require(bf656Config.getProperty("update.channel", "stable").trim() in listOf("stable", "dev", "nightly")) {
     "update.channel must be stable, dev, or nightly in config/bf656.properties"
