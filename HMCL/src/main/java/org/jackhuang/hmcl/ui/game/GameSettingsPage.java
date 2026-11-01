@@ -501,16 +501,18 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
             var memoryCleanupPane = new LineSelectButton<MemoryCleaner.@Nullable Profile>();
             gameSettings.getContent().add(memoryCleanupPane);
             memoryCleanupPane.setTitle(i18n("settings.memory.cleanup"));
-            memoryCleanupPane.setDisable(!MemoryCleaner.isSupported());
+            boolean memoryCleanupSupported = MemoryCleaner.isSupported();
+            memoryCleanupPane.setDisable(!memoryCleanupSupported);
+            memoryCleanupPane.setSubtitle(i18n(memoryCleanupSupported
+                    ? "settings.memory.cleanup.subtitle" : "settings.memory.cleanup.unsupported"));
             memoryCleanupPane.setItems(null, MemoryCleaner.Profile.SAFE, MemoryCleaner.Profile.DEFAULT, MemoryCleaner.Profile.FULL);
             memoryCleanupPane.setConverter((@Nullable var profile) -> profile == null
                     ? i18n("settings.memory.cleanup.off")
                     : i18n("settings.memory.cleanup.profile." + profile.argument()));
-            // Menu entries use names only; detailed guidance belongs to the selected row.
-            FXUtils.onChangeAndOperate(memoryCleanupPane.valueProperty(), (@Nullable var profile) ->
-                    memoryCleanupPane.setSubtitle(profile == null ? i18n("settings.memory.cleanup.off.desc")
-                            : i18n("settings.memory.cleanup.profile." + profile.argument() + ".desc") + "\n"
-                                    + i18n("settings.memory.cleanup.profile.hint")));
+            memoryCleanupPane.setDescriptionConverter((@Nullable var profile) -> profile == null ? ""
+                    : i18n("settings.memory.cleanup.profile." + profile.argument() + ".desc") + " "
+                            + i18n("settings.memory.cleanup.profile.hint"));
+            memoryCleanupPane.setDescriptionAsTooltip(true);
             bindMemoryCleanupSelection(memoryCleanupPane);
 
             // Launcher Visibility Setting
