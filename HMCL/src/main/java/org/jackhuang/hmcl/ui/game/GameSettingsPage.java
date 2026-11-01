@@ -112,9 +112,6 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
     private final VBox rootPane;
     private final HintPane readOnlySettingsHint;
 
-    /// Page-local visibility switch; it never changes or persists game launch settings.
-    private final LineToggleButton showAdvancedSettings = new LineToggleButton();
-
     private final @UnknownNullability ImagePickerItem iconPickerItem;
 
     private final ComponentSublist javaSublist;
@@ -178,19 +175,16 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
         var basicSettings = new ComponentList();
         var gameSettings = new ComponentList();
         var launcherSettings = new ComponentList();
-        basicSettings.getContent().add(showAdvancedSettings);
-        showAdvancedSettings.setTitle(i18n("settings.game.show_advanced"));
-        showAdvancedSettings.setSubtitle(i18n("settings.game.show_advanced.subtitle"));
         {
             if (isPresetSetting) {
                 var presetSettings = new ComponentList();
                 rootPane.getChildren().addAll(ComponentList.createComponentListTitle(i18n("settings.game.section.basic")),
                         basicSettings,
-                        advancedOnly(ComponentList.createComponentListTitle(
+                        ComponentList.createComponentListTitle(
                                 i18n("settings.type.global.preset"),
                                 i18n("settings.type.global.preset.help")
-                        )),
-                        advancedOnly(presetSettings),
+                        ),
+                        presetSettings,
                         ComponentList.createComponentListTitle(i18n("settings.game.section.game")),
                         gameSettings,
                         ComponentList.createComponentListTitle(i18n("settings.launcher")),
@@ -217,7 +211,7 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
                 iconPickerItem.setOnDeleteButtonClicked(e -> onDeleteIcon());
 
                 var parentGameSettingsPane = new LineSelectButton<GameSettings.@Nullable Preset>();
-                basicSettings.getContent().add(advancedOnly(parentGameSettingsPane));
+                basicSettings.getContent().add(parentGameSettingsPane);
                 parentGameSettingsPane.setTitle(i18n("settings.type.global.preset"));
                 parentGameSettingsPane.setSubtitle(i18n("settings.type.global.preset.subtitle"));
                 parentGameSettingsPane.setConverter(setting -> setting != null
@@ -228,7 +222,7 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
 
             // Java Setting
             javaSublist = new ComponentSublist();
-            gameSettings.getContent().add(advancedOnly(javaSublist));
+            gameSettings.getContent().add(javaSublist);
             javaSublist.setTitle(i18n("settings.game.java_directory"));
             javaSublist.setHasSubtitle(true);
             {
@@ -404,7 +398,7 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
             // Isolation Setting
             if (isPresetSetting) {
                 var defaultIsolationTypePane = new LineSelectButton<DefaultIsolationType>();
-                basicSettings.getContent().add(advancedOnly(defaultIsolationTypePane));
+                basicSettings.getContent().add(defaultIsolationTypePane);
                 defaultIsolationTypePane.setTitle(i18n("settings.game.default_isolation"));
                 defaultIsolationTypePane.setSubtitle(i18n("settings.game.default_isolation.subtitle"));
                 defaultIsolationTypePane.setItems(DefaultIsolationType.values());
@@ -421,7 +415,7 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
                 bindPresetBidirectional(defaultIsolationTypePane.valueProperty(), GameSettings.Preset::defaultIsolationTypeProperty);
             } else {
                 var isolationButton = new LineToggleButton();
-                basicSettings.getContent().add(advancedOnly(isolationButton));
+                basicSettings.getContent().add(isolationButton);
                 isolationButton.setTitle(i18n("settings.game.isolation"));
                 isolationButton.setSubtitle(i18n("settings.game.isolation.subtitle"));
                 bindInstanceIsolationButton(isolationButton);
@@ -530,12 +524,12 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
             launcherVisibilityPane.setTitle(i18n("settings.advanced.launcher_visible"));
 
             var allowAutoAgentPane = createInheritableBooleanButton(GameSettings::allowAutoAgentProperty);
-            launcherSettings.getContent().add(advancedOnly(allowAutoAgentPane));
+            launcherSettings.getContent().add(allowAutoAgentPane);
             allowAutoAgentPane.setTitle(i18n("settings.launcher.allow_auto_agent"));
             allowAutoAgentPane.setSubtitle(i18n("settings.launcher.allow_auto_agent.subtitle"));
 
             var disableAutoGameOptionsPane = createInheritableBooleanButton(GameSettings::disableAutoGameOptionsProperty);
-            launcherSettings.getContent().add(advancedOnly(disableAutoGameOptionsPane));
+            launcherSettings.getContent().add(disableAutoGameOptionsPane);
             disableAutoGameOptionsPane.setTitle(i18n("settings.launcher.disable_auto_game_options"));
 
             // Game Window Setting
@@ -584,11 +578,11 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
 
             // Enable Debug Log Output Setting
             var enableDebugLogOutputPane = createInheritableBooleanButton(GameSettings::enableDebugLogOutputProperty);
-            launcherSettings.getContent().add(advancedOnly(enableDebugLogOutputPane));
+            launcherSettings.getContent().add(enableDebugLogOutputPane);
             enableDebugLogOutputPane.setTitle(i18n("settings.enable_debug_log_output"));
 
             var noGameCheckPane = createInheritableBooleanButton(GameSettings::notCheckGameProperty);
-            launcherSettings.getContent().add(advancedOnly(noGameCheckPane));
+            launcherSettings.getContent().add(noGameCheckPane);
             noGameCheckPane.setTitle(i18n("settings.advanced.dont_check_game_completeness"));
 
             // Quick Play
@@ -653,7 +647,7 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
                 bindInheritableStringValue(realmsTextField.textProperty(), GameSettings::quickPlayRealmsProperty, realmsInheritanceButton);
                 quickSublist.getContent().setAll(quickPlayItem);
             }
-            gameSettings.getContent().add(advancedOnly(quickSublist));
+            gameSettings.getContent().add(quickSublist);
             quickSublist.setTitle(i18n("settings.game.quick_play"));
             quickSublist.setSubtitle(i18n("settings.game.quick_play.subtitle"));
             quickSublist.setHasSubtitle(true);
@@ -703,7 +697,7 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
 
                 return List.of(runningDirPane, gameArgsPane, environmentVariablesPane, processPriorityPane);
             });
-            gameSettings.getContent().add(advancedOnly(advancedLaunchSublist));
+            gameSettings.getContent().add(advancedLaunchSublist);
             advancedLaunchSublist.setTitle(i18n("settings.advanced.launch_options"));
             advancedLaunchSublist.setSubtitle(i18n("settings.advanced.launch_options.subtitle"));
             advancedLaunchSublist.setHasSubtitle(true);
@@ -711,8 +705,8 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
 
         var jvmSettings = new ComponentList();
         rootPane.getChildren().addAll(
-                advancedOnly(ComponentList.createComponentListTitle(i18n("settings.advanced.jvm"))),
-                advancedOnly(jvmSettings)
+                ComponentList.createComponentListTitle(i18n("settings.advanced.jvm")),
+                jvmSettings
         );
         {
             var notUseJavawPane = createInheritableBooleanButton(GameSettings::notUseJavawProperty);
@@ -823,8 +817,8 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
 
         var customCommandSettings = new ComponentList();
         rootPane.getChildren().addAll(
-                advancedOnly(ComponentList.createComponentListTitle(i18n("settings.advanced.custom_commands"))),
-                advancedOnly(customCommandSettings)
+                ComponentList.createComponentListTitle(i18n("settings.advanced.custom_commands")),
+                customCommandSettings
         );
         {
             var preLaunchCommandPane = new LinePane();
@@ -863,8 +857,8 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
 
         var graphicsSettings = new ComponentList();
         rootPane.getChildren().addAll(
-                advancedOnly(ComponentList.createComponentListTitle(i18n("settings.advanced.graphics"))),
-                advancedOnly(graphicsSettings)
+                ComponentList.createComponentListTitle(i18n("settings.advanced.graphics")),
+                graphicsSettings
         );
         {
             var graphicsBackendPane = createInheritableButton(
@@ -928,8 +922,8 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
 
         var nativeLibrarySettings = new ComponentList();
         rootPane.getChildren().addAll(
-                advancedOnly(ComponentList.createComponentListTitle(i18n("settings.advanced.natives_settings"))),
-                advancedOnly(nativeLibrarySettings)
+                ComponentList.createComponentListTitle(i18n("settings.advanced.natives_settings")),
+                nativeLibrarySettings
         );
         {
             var useCustomNativesDirPane = createIndependentBooleanButton(GameSettings::useCustomNativesProperty);
@@ -986,19 +980,6 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
                 Controllers.dialog(i18n("settings.game.java_directory.bundled.invalid"));
             }
         }
-    }
-
-    /// Reveals a row or section in its original position when advanced settings are enabled.
-    /// Hidden content takes no layout space and retains its existing value and bindings.
-    private <T extends Node> T advancedOnly(T node) {
-        node.visibleProperty().bind(showAdvancedSettings.selectedProperty());
-        node.managedProperty().bind(showAdvancedSettings.selectedProperty());
-        return node;
-    }
-
-    /// Reveals advanced options without changing any persisted game or launch preferences.
-    public void showAdvancedOptions() {
-        showAdvancedSettings.setSelected(true);
     }
 
     @SuppressWarnings("unchecked")

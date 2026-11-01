@@ -107,9 +107,8 @@ public final class GcStrategyUiSmoke {
         ComponentList owner = (ComponentList) descendants(page).stream()
                 .filter(node -> node instanceof ComponentList list && list.getContent().contains(row))
                 .findFirst().orElseThrow();
-        require(!owner.isManaged(), "GC strategy should start hidden with other advanced JVM settings");
-        page.showAdvancedOptions();
-        require(owner.isManaged(), "GC strategy should be visible with advanced settings enabled");
+        require(owner.isVisible() && owner.isManaged(), "JVM settings must be visible on entry");
+        require(row.isVisible() && row.isManaged(), "GC strategy must be visible on entry");
         require(row.getItems().equals(List.of(GcStrategy.TUNED_G1, GcStrategy.G1, GcStrategy.ZGC,
                         GcStrategy.SHENANDOAH, GcStrategy.DEFAULT)),
                 "Exactly five strategies must be available, including Shenandoah and a single ZGC option");
