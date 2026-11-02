@@ -17,14 +17,20 @@
  */
 package org.jackhuang.hmcl.ui.game;
 
+import com.jfoenix.controls.JFXPopup;
 import javafx.application.Platform;
 import javafx.scene.Node;
 import javafx.scene.Parent;
 import javafx.scene.Scene;
 import javafx.scene.control.Label;
 import javafx.scene.control.ButtonBase;
+import javafx.scene.control.Tooltip;
+import javafx.scene.control.skin.TooltipSkin;
 import javafx.scene.image.WritableImage;
+import javafx.scene.input.KeyCode;
+import javafx.scene.input.KeyEvent;
 import javafx.scene.layout.StackPane;
+import javafx.stage.Stage;
 import org.jackhuang.hmcl.Launcher;
 import org.jackhuang.hmcl.game.GcStrategy;
 import org.jackhuang.hmcl.launch.GcStrategyException;
@@ -52,7 +58,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.jackhuang.hmcl.util.i18n.I18n.i18n;
 
-/// Isolated JavaFX smoke check of the actual settings row, its bindings and wrapped descriptions.
+/// Isolated JavaFX smoke check of GC settings, compact menus, tooltip help and effective-state warnings.
 @NotNullByDefault
 public final class GcStrategyUiSmoke {
     /// Utility entry point.
@@ -78,7 +84,7 @@ public final class GcStrategyUiSmoke {
                 verifyAndRenderErrors(output);
                 return true;
             });
-            System.out.println("GC strategy UI smoke passed: five strategies, descriptions, overrides, memory, layout and collector-specific failure actions.");
+            System.out.println("GC strategy UI smoke passed: five strategies, tooltip help, compact menus, keyboard selection, overrides, memory, layout and collector-specific failure actions.");
             System.exit(0);
         } catch (Throwable e) {
             e.printStackTrace();
@@ -107,9 +113,12 @@ public final class GcStrategyUiSmoke {
         ComponentList owner = (ComponentList) descendants(page).stream()
                 .filter(node -> node instanceof ComponentList list && list.getContent().contains(row))
                 .findFirst().orElseThrow();
-        require(!owner.isManaged(), "GC strategy should start hidden with other advanced JVM settings");
-        page.showAdvancedOptions();
-        require(owner.isManaged(), "GC strategy should be visible with advanced settings enabled");
+        require(owner.isVisible() && owner.isManaged(), "JVM settings must be visible on entry");
+        require(row.isVisible() && row.isManaged(), "GC strategy must be visible on entry");
+        require(row.isDescriptionAsTooltip(), "GC help must use tooltips");
+        var tooltipField = LineSelectButton.class.getDeclaredField("descriptionTooltip");
+        tooltipField.setAccessible(true);
+        Tooltip help = (Tooltip) tooltipField.get(row);
         require(row.getItems().equals(List.of(GcStrategy.TUNED_G1, GcStrategy.G1, GcStrategy.ZGC,
                         GcStrategy.SHENANDOAH, GcStrategy.DEFAULT)),
                 "Exactly five strategies must be available, including Shenandoah and a single ZGC option");
@@ -117,33 +126,39 @@ public final class GcStrategyUiSmoke {
         for (GcStrategy strategy : GcStrategy.values()) {
             row.setValue(strategy);
             require(preset.gcStrategyProperty().getValue() == strategy, "Selection must update the preset");
-            require(row.getSubtitle().contains(i18n("settings.advanced.gc_strategy."
-                    + strategy.name().toLowerCase(Locale.ROOT) + ".desc")), "Selected description must be visible");
-            require(!row.getSubtitle().contains("\n"), "Descriptions must remain one paragraph");
+            String description = i18n("settings.advanced.gc_strategy."
+                    + strategy.name().toLowerCase(Locale.ROOT) + ".desc");
+            require(help.getText().equals(description + "\n\n" + i18n("settings.advanced.gc_strategy.hint")),
+                    "Hover help must follow the selected strategy and retain the common guidance");
+            require("".equals(row.getSubtitle()), "Detailed help must not occupy the settings row");
+            require(help.isWrapText() && help.getMaxWidth() <= 480, "Hover help must wrap within a bounded width");
+            if (strategy != GcStrategy.DEFAULT)
+                require(description.lines().count() == 4, "Collector help must contain four structured lines");
             if (strategy == GcStrategy.ZGC) {
-                require(!row.getSubtitle().contains("G1GC"), "ZGC help must omit the removed fallback/error sentence");
-                require(row.getSubtitle().contains("21") && row.getSubtitle().contains("15–20"),
+                require(!description.contains("G1GC"), "ZGC help must omit the removed fallback/error sentence");
+                require(description.contains("21") && description.contains("24"),
                         "ZGC help must explain its Java version ranges");
             }
             if (strategy == GcStrategy.SHENANDOAH) {
-                require(row.getSubtitle().contains("25") && row.getSubtitle().contains("15–24"),
+                require(description.contains("25") && description.contains("15"),
                         "Shenandoah help must explain its Java version and mode ranges");
-                require(row.getSubtitle().contains("发行版"), "Shenandoah help must explain distribution availability");
+                require(description.contains("发行版"), "Shenandoah help must explain distribution availability");
             }
             require(preset.maxMemoryProperty().getValue() == 6144, "Strategy selection must preserve heap size");
         }
         preset.jvmOptionsProperty().setValue("-XX:+UseParallelGC");
-        require(row.getSubtitle().startsWith(i18n("settings.advanced.gc_strategy.custom")),
+        require(row.getSubtitle().equals(i18n("settings.advanced.gc_strategy.custom").stripTrailing()),
                 "Custom GC arguments must display their priority");
         preset.jvmOptionsProperty().setValue("");
         preset.noOptimizingJVMOptionsProperty().setValue(true);
-        require(row.getSubtitle().startsWith(i18n("settings.advanced.gc_strategy.disabled")),
+        require(row.getSubtitle().equals(i18n("settings.advanced.gc_strategy.disabled").stripTrailing()),
                 "Disabling automatic optimizations must display inactive status");
         preset.noOptimizingJVMOptionsProperty().setValue(false);
         preset.noJVMOptionsProperty().setValue(true);
-        require(row.getSubtitle().startsWith(i18n("settings.advanced.gc_strategy.disabled")),
+        require(row.getSubtitle().equals(i18n("settings.advanced.gc_strategy.disabled").stripTrailing()),
                 "Disabling all automatic arguments must display inactive status");
         preset.noJVMOptionsProperty().setValue(false);
+        require("".equals(row.getSubtitle()), "Inactive warnings must clear when automatic arguments are restored");
 
         owner.getContent().remove(row);
         StackPane surface = new StackPane(row);
@@ -168,6 +183,59 @@ public final class GcStrategyUiSmoke {
                 Label selected = (Label) row.lookup(".trailing-label");
                 require(selected.getWidth() + 0.5 >= selected.prefWidth(-1), "Selected strategy name must remain readable");
             }
+            help.setSkin(new TooltipSkin(help));
+            var tooltipSurface = new StackPane(help.getSkin().getNode());
+            Scene tooltipScene = new Scene(tooltipSurface);
+            tooltipScene.getStylesheets().setAll(scene.getStylesheets());
+            tooltipSurface.applyCss();
+            tooltipSurface.resize(480, tooltipSurface.prefHeight(480));
+            tooltipSurface.layout();
+            snapshot(tooltipSurface.snapshot(null, null),
+                    output.resolve(strategy.name().toLowerCase(Locale.ROOT) + "-tooltip.png"));
+        }
+        verifyMenu(row, scene, preset, output);
+    }
+
+    /// Exercises the actual popup in a transparent off-screen window and checks shared selectors retain inline help.
+    private static void verifyMenu(LineSelectButton<GcStrategy> row, Scene scene,
+                                   GameSettings.Preset preset, Path output) throws Exception {
+        Stage stage = new Stage();
+        stage.setOpacity(0);
+        stage.setX(-10000);
+        stage.setY(-10000);
+        stage.setScene(scene);
+        try {
+            stage.show();
+            row.setValue(GcStrategy.TUNED_G1);
+            row.fire();
+            var popupField = LineSelectButton.class.getDeclaredField("popup");
+            popupField.setAccessible(true);
+            JFXPopup popup = (JFXPopup) popupField.get(row);
+            popup.setOpacity(0);
+            try {
+                require(popup.isShowing(), "Strategy menu must open");
+                var menu = popup.getPopupContent();
+                menu.applyCss();
+                menu.autosize();
+                menu.layout();
+                require(menu.lookupAll(".title-label").size() == 5, "Menu must list all five strategies");
+                require(menu.lookupAll(".subtitle-label").isEmpty(), "Descriptions must stay out of the compact menu");
+                snapshot(menu.snapshot(null, null), output.resolve("gc-menu.png"));
+                menu.fireEvent(new KeyEvent(KeyEvent.KEY_PRESSED, "", "", KeyCode.DOWN, false, false, false, false));
+                require(row.getValue() == GcStrategy.G1 && preset.gcStrategyProperty().getValue() == GcStrategy.G1,
+                        "Keyboard selection must update the setting");
+                menu.fireEvent(new KeyEvent(KeyEvent.KEY_PRESSED, "", "", KeyCode.ESCAPE, false, false, false, false));
+                require(!popup.isShowing(), "Escape must close the menu");
+                row.setDescriptionAsTooltip(false);
+                require(menu.lookupAll(".subtitle-label").size() == 5, "Inline mode must retain descriptions");
+                row.setDescriptionAsTooltip(true);
+                require(menu.lookupAll(".subtitle-label").isEmpty(), "Tooltip mode must restore the compact menu");
+                require(!new LineSelectButton<>().isDescriptionAsTooltip(), "Other selectors must keep inline help by default");
+            } finally {
+                popup.hide();
+            }
+        } finally {
+            stage.close();
         }
     }
 

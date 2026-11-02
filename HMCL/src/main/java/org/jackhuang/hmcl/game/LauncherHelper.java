@@ -381,7 +381,7 @@ public final class LauncherHelper {
                                             scriptFile == null ? i18n("launch.failed") : i18n("instance.launch_script.failed"),
                                             () -> {
                                                 Instances.modifyGameSettings(gameInstance);
-                                                Controllers.getGameInstancePage().showAdvancedInstanceSettings();
+                                                Controllers.getGameInstancePage().showInstanceSettings();
                                             }));
                                     launchingStepsPane.setExecutor(null);
                                     return;
