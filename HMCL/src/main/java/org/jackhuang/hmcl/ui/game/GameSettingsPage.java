@@ -22,7 +22,6 @@ import com.jfoenix.controls.JFXComboBox;
 import com.jfoenix.controls.JFXSlider;
 import com.jfoenix.controls.JFXTextField;
 import javafx.beans.InvalidationListener;
-import javafx.beans.binding.Bindings;
 import javafx.beans.property.ObjectProperty;
 import javafx.beans.property.Property;
 import javafx.beans.property.ReadOnlyObjectProperty;
@@ -42,11 +41,13 @@ import javafx.scene.input.MouseEvent;
 import javafx.scene.layout.*;
 import javafx.stage.FileChooser;
 import javafx.stage.Screen;
+import org.jackhuang.hmcl.bf656.settings.GcSettingsSection;
+import org.jackhuang.hmcl.bf656.settings.MemoryCleanupSection;
+import org.jackhuang.hmcl.bf656.settings.SettingsSectionContext;
 import org.jackhuang.hmcl.game.*;
 import org.jackhuang.hmcl.java.JavaManager;
 import org.jackhuang.hmcl.java.BundledJava;
 import org.jackhuang.hmcl.java.JavaRuntime;
-import org.jackhuang.hmcl.launch.GcStrategySupport;
 import org.jackhuang.hmcl.setting.*;
 import org.jackhuang.hmcl.setting.property.InheritableProperty;
 import org.jackhuang.hmcl.setting.property.SettingProperty;
@@ -171,6 +172,10 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
         readOnlySettingsHint.setVisible(false);
         readOnlySettingsHint.setManaged(false);
         rootPane.getChildren().add(readOnlySettingsHint);
+
+        var sectionContext = new SettingsSectionContext(currentSetting, activeParentSetting, isPresetSetting,
+                readOnlySettingsHint.visibleProperty(), this::resolveEffectiveSetting,
+                this::bindInheritableLineSelectButton, this::createInheritanceButton, GameSettingsPage::updateInheritanceButton);
 
         var basicSettings = new ComponentList();
         var gameSettings = new ComponentList();
@@ -498,22 +503,7 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
             memorySublist.setDescription(getMemoryAllocationDisplayName(memorySelectedValue.get()));
             bindMemorySelectedValue(memorySelectedValue);
 
-            var memoryCleanupPane = new LineSelectButton<MemoryCleaner.@Nullable Profile>();
-            gameSettings.getContent().add(memoryCleanupPane);
-            memoryCleanupPane.setTitle(i18n("settings.memory.cleanup"));
-            boolean memoryCleanupSupported = MemoryCleaner.isSupported();
-            memoryCleanupPane.setDisable(!memoryCleanupSupported);
-            memoryCleanupPane.setSubtitle(i18n(memoryCleanupSupported
-                    ? "settings.memory.cleanup.subtitle" : "settings.memory.cleanup.unsupported"));
-            memoryCleanupPane.setItems(null, MemoryCleaner.Profile.SAFE, MemoryCleaner.Profile.DEFAULT, MemoryCleaner.Profile.FULL);
-            memoryCleanupPane.setConverter((@Nullable var profile) -> profile == null
-                    ? i18n("settings.memory.cleanup.off")
-                    : i18n("settings.memory.cleanup.profile." + profile.argument()));
-            memoryCleanupPane.setDescriptionConverter((@Nullable var profile) -> profile == null ? ""
-                    : i18n("settings.memory.cleanup.profile." + profile.argument() + ".desc") + " "
-                            + i18n("settings.memory.cleanup.profile.hint"));
-            memoryCleanupPane.setDescriptionAsTooltip(true);
-            bindMemoryCleanupSelection(memoryCleanupPane);
+            gameSettings.getContent().add(new MemoryCleanupSection(sectionContext));
 
             // Launcher Visibility Setting
             var launcherVisibilityPane = createInheritableButton(
@@ -738,15 +728,8 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
                         setting -> ((GameSettings.Instance) setting).ignoreJavaCompatibilityWarningsProperty());
             }
 
-            var gcStrategyPane = createInheritableButton(
-                    GameSettings::gcStrategyProperty,
-                    strategy -> i18n("settings.advanced.gc_strategy." + strategy.name().toLowerCase(Locale.ROOT)),
-                    strategy -> i18n("settings.advanced.gc_strategy." + strategy.name().toLowerCase(Locale.ROOT) + ".desc")
-                            + "\n\n" + i18n("settings.advanced.gc_strategy.hint"),
-                    GcStrategy.values());
+            var gcStrategyPane = new GcSettingsSection(sectionContext);
             jvmSettings.getContent().add(gcStrategyPane);
-            gcStrategyPane.setTitle(i18n("settings.advanced.gc_strategy"));
-            gcStrategyPane.setDescriptionAsTooltip(true);
 
             var jvmArgsPane = new LinePane();
             jvmSettings.getContent().add(jvmArgsPane);
@@ -757,15 +740,8 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
                 txtJVMArgs.setPrefWidth(400);
                 jvmArgsPane.setRight(txtJVMArgs);
                 bindIndependentTextField(jvmArgsPane, txtJVMArgs, GameSettings::jvmOptionsProperty);
-                // Keep effective-state warnings visible while detailed collector help stays in tooltips.
-                gcStrategyPane.subtitleProperty().bind(Bindings.createStringBinding(() -> {
-                    return noJVMArgsPane.effectiveValueProperty().get()
-                            || noOptimizingJVMArgsPane.effectiveValueProperty().get()
-                            ? i18n("settings.advanced.gc_strategy.disabled").stripTrailing()
-                            : StringUtils.tokenize(txtJVMArgs.getText()).stream().anyMatch(GcStrategySupport::isGcArgument)
-                            ? i18n("settings.advanced.gc_strategy.custom").stripTrailing() : "";
-                }, noJVMArgsPane.effectiveValueProperty(),
-                        noOptimizingJVMArgsPane.effectiveValueProperty(), txtJVMArgs.textProperty()));
+                gcStrategyPane.bindEffectiveState(noJVMArgsPane.effectiveValueProperty(),
+                        noOptimizingJVMArgsPane.effectiveValueProperty(), txtJVMArgs.textProperty());
             }
 
             var deprecatedJvmMemorySettings = new ComponentSublist(() -> {
@@ -2473,97 +2449,6 @@ public final class GameSettingsPage<S extends GameSettings> extends StackPane
 
         bindEffectiveInheritableToggleButton(button, propertyGetter);
         return button;
-    }
-
-    /// Combines the existing enable/profile properties into Off or a selected cleanup profile.
-    /// Loading preserves legacy independent overrides; user choices and the inheritance button edit the pair together.
-    private void bindMemoryCleanupSelection(LineSelectButton<MemoryCleaner.@Nullable Profile> button) {
-        ObjectProperty<@Nullable InheritableProperty<Boolean>> parentEnabled = new SimpleObjectProperty<>();
-        ObjectProperty<@Nullable InheritableProperty<MemoryCleaner.Profile>> parentProfile = new SimpleObjectProperty<>();
-        final Holder<Boolean> updating = new Holder<>(false);
-        final Holder<InvalidationListener> refreshHolder = new Holder<>();
-        @Nullable JFXButton inheritButton = !isPresetSetting ? createInheritanceButton() : null;
-        if (inheritButton != null) {
-            button.setTitleTrailing(inheritButton);
-        }
-        InvalidationListener refresh = observable -> {
-            @Nullable S setting = currentSetting.get();
-            updateParentInheritablePropertyListener(setting, parentEnabled, GameSettings::memoryCleanupProperty, refreshHolder.value);
-            updateParentInheritablePropertyListener(setting, parentProfile, GameSettings::memoryCleanupProfileProperty, refreshHolder.value);
-            if (setting == null || updating.value) {
-                return;
-            }
-            updating.value = true;
-            try {
-                button.setValue(getEffectiveValue(setting, GameSettings::memoryCleanupProperty)
-                        ? getEffectiveValue(setting, GameSettings::memoryCleanupProfileProperty) : null);
-                if (inheritButton != null) {
-                    updateInheritanceButton(inheritButton, !isPropertyOverridden(setting, setting.memoryCleanupProperty())
-                            && !isPropertyOverridden(setting, setting.memoryCleanupProfileProperty()));
-                }
-            } finally {
-                updating.value = false;
-            }
-        };
-        InvalidationListener weakRefresh = holder.weak(refresh);
-        refreshHolder.value = weakRefresh;
-        activeParentSetting.addListener(weakRefresh);
-        button.valueProperty().addListener((observable, oldValue, newValue) -> {
-            @Nullable S setting = currentSetting.get();
-            if (setting == null || updating.value) {
-                return;
-            }
-            updating.value = true;
-            try {
-                MemoryCleaner.Profile retained = getEffectiveValue(setting, GameSettings::memoryCleanupProfileProperty);
-                setPropertyOverridden(setting, setting.memoryCleanupProperty(), true);
-                setPropertyOverridden(setting, setting.memoryCleanupProfileProperty(), true);
-                setting.memoryCleanupProfileProperty().setValue(newValue != null ? newValue : retained);
-                setting.memoryCleanupProperty().setValue(newValue != null);
-            } finally {
-                updating.value = false;
-            }
-            refresh.invalidated(setting);
-        });
-        if (inheritButton != null) {
-            inheritButton.addEventFilter(MouseEvent.MOUSE_CLICKED, event -> {
-                @Nullable S setting = currentSetting.get();
-                if (setting == null) {
-                    return;
-                }
-                updating.value = true;
-                try {
-                    boolean overridden = isPropertyOverridden(setting, setting.memoryCleanupProperty())
-                            || isPropertyOverridden(setting, setting.memoryCleanupProfileProperty());
-                    if (!overridden) {
-                        boolean enabled = getEffectiveValue(setting, GameSettings::memoryCleanupProperty);
-                        MemoryCleaner.Profile profile = getEffectiveValue(setting, GameSettings::memoryCleanupProfileProperty);
-                        setting.memoryCleanupProperty().setValue(enabled);
-                        setting.memoryCleanupProfileProperty().setValue(profile);
-                    }
-                    setPropertyOverridden(setting, setting.memoryCleanupProperty(), !overridden);
-                    setPropertyOverridden(setting, setting.memoryCleanupProfileProperty(), !overridden);
-                } finally {
-                    updating.value = false;
-                }
-                refresh.invalidated(setting);
-                event.consume();
-            });
-        }
-        currentSetting.addListener((observable, oldValue, newValue) -> {
-            if (oldValue != null) {
-                oldValue.removeListener(weakRefresh);
-            }
-            if (newValue != null) {
-                newValue.addListener(weakRefresh);
-            }
-            refresh.invalidated(newValue);
-        });
-        @Nullable S setting = currentSetting.get();
-        if (setting != null) {
-            setting.addListener(weakRefresh);
-        }
-        refresh.invalidated(setting);
     }
 
     /// Binds an inheritable select editor to an inheritable setting.

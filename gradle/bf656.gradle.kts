@@ -1,4 +1,5 @@
 import org.gradle.language.jvm.tasks.ProcessResources
+import org.gradle.api.tasks.SourceSetContainer
 import org.gradle.api.artifacts.VersionCatalogsExtension
 import org.gradle.api.tasks.bundling.Jar
 import java.util.zip.ZipFile
@@ -7,6 +8,12 @@ import java.util.Properties
 import javax.imageio.ImageIO
 
 // Keep BF656 resource packaging separate from HMCL's version generation.
+extensions.configure<SourceSetContainer> {
+    named("main") {
+        java.srcDir("src/bf656/java")
+    }
+}
+
 val bf656ConfigFile = rootProject.file("config/bf656.properties")
 val bf656Config = Properties()
 bf656ConfigFile.reader(Charsets.UTF_8).use { bf656Config.load(it) }

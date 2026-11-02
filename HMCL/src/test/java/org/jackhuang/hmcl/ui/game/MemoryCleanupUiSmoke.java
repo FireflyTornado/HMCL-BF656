@@ -35,6 +35,7 @@ import javafx.scene.input.MouseEvent;
 import javafx.scene.layout.StackPane;
 import javafx.stage.Stage;
 import org.jackhuang.hmcl.Launcher;
+import org.jackhuang.hmcl.bf656.settings.SettingsSectionContextTest;
 import org.jackhuang.hmcl.game.MemoryCleaner;
 import org.jackhuang.hmcl.setting.GameSettings;
 import org.jackhuang.hmcl.setting.LauncherSettings;
@@ -86,8 +87,9 @@ public final class MemoryCleanupUiSmoke {
                 verifyAndRender(output);
                 return true;
             });
+            SettingsSectionContextTest.verifyCleanupUi();
             Files.writeString(output.resolve("ui-smoke-passed.txt"),
-                    "Off/three profiles, legacy fields, partial inheritance, reset, compact menu, tooltip help and platform status passed.\n");
+                    "Off/three profiles, legacy fields, partial inheritance, reset, compact menu, tooltip help, platform status, model switching, read-only writes and disposal passed.\n");
             System.out.println("Memory cleanup UI smoke passed; no cleanup executed.");
             System.exit(0);
         } catch (Throwable e) {
