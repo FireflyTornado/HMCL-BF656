@@ -61,7 +61,7 @@ public final class BF656GreetingTest {
             assertNull(greeting.nickname());
             var text = greeting.text(CHINESE);
             assertEquals("欢迎游玩Battlefield 656！", text.singleLine());
-            assertEquals(text.singleLine(), text.twoLines());
+            assertEquals("欢迎游玩\nBattlefield 656！", text.twoLines());
             assertEquals("", text.nickname());
         }
     }
@@ -204,7 +204,7 @@ public final class BF656GreetingTest {
                 var text = greeting.text(bundle);
                 assertFalse(text.singleLine().contains("\n"));
                 assertFalse(text.singleLine().contains("%s"));
-                assertEquals(kind == WELCOME ? 0 : 1, text.twoLines().chars().filter(c -> c == '\n').count());
+                assertEquals(1, text.twoLines().chars().filter(c -> c == '\n').count());
                 if (kind != WELCOME)
                     assertEquals("Steve", text.nickname());
             }

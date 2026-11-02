@@ -137,7 +137,7 @@ public final class BF656Greeting {
         }
 
         /// Renders using the supplied launcher language bundle, preserving nickname boundaries.
-        /// Templates use one literal %s marker and one optional newline after punctuation.
+        /// Personalized templates use one literal %s marker and one optional newline after punctuation.
         /// The nickname is inserted as plain text, never interpreted as a format string or a template.
         public Text text(ResourceBundle messages) {
             String template = messages.getString(kind.key);
@@ -164,7 +164,7 @@ public final class BF656Greeting {
             return beforeNickname.replace("\n", "") + nickname + afterNickname.replace("\n", "");
         }
 
-        /// Returns the punctuation-based two-line candidate, or the unchanged welcome without a break.
+        /// Returns the localized two-line candidate, using punctuation or the welcome's phrase/brand boundary.
         /// This is an optional layout hint; the UI decides whether wrapping or nickname truncation is needed.
         public String twoLines() {
             return beforeNickname + nickname + afterNickname;

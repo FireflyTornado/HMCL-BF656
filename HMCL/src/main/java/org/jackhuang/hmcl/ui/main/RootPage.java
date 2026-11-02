@@ -18,8 +18,12 @@
 package org.jackhuang.hmcl.ui.main;
 
 import com.jfoenix.controls.JFXPopup;
+import javafx.beans.binding.Bindings;
 import javafx.beans.property.ReadOnlyObjectProperty;
+import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
+import javafx.scene.layout.VBox;
+import org.jackhuang.hmcl.auth.Account;
 import org.jackhuang.hmcl.game.GameInstanceID;
 import org.jackhuang.hmcl.game.HMCLGameInstance;
 import org.jackhuang.hmcl.game.ModpackHelper;
@@ -47,6 +51,7 @@ import org.jackhuang.hmcl.upgrade.UpdateChecker;
 import org.jackhuang.hmcl.util.Lang;
 import org.jackhuang.hmcl.util.StringUtils;
 import org.jackhuang.hmcl.util.io.FileUtils;
+import org.jackhuang.hmcl.util.javafx.BindingMapping;
 import org.jackhuang.hmcl.util.platform.*;
 import org.jetbrains.annotations.Nullable;
 
@@ -107,8 +112,14 @@ public class RootPage extends DecoratorAnimatedPage implements DecoratorPage {
 
     private static class Skin extends DecoratorAnimatedPageSkin<RootPage> {
 
+        /// Builds the home sidebar, including a fixed greeting above the scrollable account and game menus.
         protected Skin(RootPage control) {
             super(control);
+
+            BF656GreetingPane greeting = new BF656GreetingPane();
+            greeting.nicknameProperty().bind(BindingMapping.of(Accounts.selectedAccountProperty())
+                    .flatMap((@Nullable Account account) -> account == null ? null
+                            : Bindings.createStringBinding(account::getProfileName, account), () -> null));
 
             // first item in left sidebar
             AccountAdvancedListItem accountListItem = new AccountAdvancedListItem();
@@ -204,7 +215,8 @@ public class RootPage extends DecoratorAnimatedPage implements DecoratorPage {
                     });
 
             // the root page, with the sidebar in left, navigator in center.
-            setLeft(sideBar);
+            VBox.setVgrow(sideBar, Priority.ALWAYS);
+            setLeft(greeting, sideBar);
             setCenter(getSkinnable().getMainPage());
         }
 
