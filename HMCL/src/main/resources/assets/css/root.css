@@ -259,9 +259,10 @@
 }
 
 .bf656-greeting > .label {
-    -fx-font-size: 14px;
-    -fx-font-weight: bold;
-    -fx-line-spacing: 2px;
+    -fx-font-family: "Microsoft YaHei UI";
+    -fx-font-size: 16px;
+    -fx-font-weight: normal;
+    -fx-line-spacing: 4px;
 }
 
 .no-padding .advanced-list-box-content {
