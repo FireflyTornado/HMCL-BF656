@@ -49,6 +49,8 @@ public final class BF656GreetingPane extends StackPane {
     private final ResourceBundle messages;
     /// Current message identity, retained while nicknames and available widths change.
     private BF656Greeting.Greeting greeting = new BF656Greeting.Greeting(BF656Greeting.Kind.WELCOME, null);
+    /// Optional page-lifecycle coordinator; standalone panes may select immediately for detached rendering.
+    private @Nullable Runnable selectionRequest;
 
     /// Creates the production pane using the device clock, standard probabilities and current launcher language.
     public BF656GreetingPane() {
@@ -83,11 +85,16 @@ public final class BF656GreetingPane extends StackPane {
         return nickname;
     }
 
-    /// Selects a new greeting on explicit request; window/navigation refresh events are connected in a later step.
+    /// Selects once using the latest nickname and time when the page lifecycle delivers an eligible refresh.
     public void refreshGreeting() {
         greeting = selector.apply(nickname.get());
         setAccessibleText(greeting.text(messages).singleLine());
         requestLayout();
+    }
+
+    /// Defers the first personalized selection to the owner's visibility coordinator before binding an account.
+    void setSelectionRequest(Runnable selectionRequest) {
+        this.selectionRequest = selectionRequest;
     }
 
     /// Updates only the name for an existing personalized greeting, and handles transitions to/from the welcome.
@@ -96,7 +103,10 @@ public final class BF656GreetingPane extends StackPane {
         if (name == null || name.isBlank()) {
             greeting = new BF656Greeting.Greeting(BF656Greeting.Kind.WELCOME, null);
         } else if (greeting.kind() == BF656Greeting.Kind.WELCOME) {
-            greeting = selector.apply(name);
+            if (selectionRequest != null)
+                selectionRequest.run();
+            else
+                greeting = selector.apply(name);
         } else {
             greeting = new BF656Greeting.Greeting(greeting.kind(), name);
         }

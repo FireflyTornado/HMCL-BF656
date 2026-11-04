@@ -153,6 +153,8 @@ public final class BF656GreetingUiSmoke {
 
         var steve = Accounts.FACTORY_OFFLINE.create("Steve", UUID.randomUUID());
         Accounts.selectedAccountProperty().set(steve);
+        // This detached snapshot has no showing window; request its first selection explicitly.
+        pane.refreshGreeting();
         snapshot(surface, 920, 640, output.resolve("home-short-nickname.png"));
         require("Steve".equals(pane.nicknameProperty().get()), "Selected profile name must reach the greeting");
         require(label(pane).getText().contains("Steve"), "Sidebar must display the selected profile name");

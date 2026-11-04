@@ -180,6 +180,10 @@ public final class Decorator {
 
     /// The stage currently controlled by this decorator, or `null` while detached.
     private @Nullable Stage stage;
+    /// Page currently exposed in the logical main window, independent of focus and iconification.
+    private @Nullable Node visiblePage;
+    /// Suppresses transient hide/show notifications while the main window changes its decoration style.
+    private boolean replacingStage;
 
     /// Tracks the attached stage's content geometry, or `null` while detached.
     private @Nullable WindowBounds windowBounds;
@@ -227,6 +231,8 @@ public final class Decorator {
 
     /// Plays the opening animation immediately before the attached stage becomes visible.
     private final EventHandler<WindowEvent> windowShowingHandler = event -> playOpenAnimation();
+    /// Updates logical page visibility only for the attached main stage's actual show/hide lifecycle.
+    private final EventHandler<WindowEvent> windowVisibilityHandler = event -> updateVisiblePage();
 
     /// Updates the custom window decoration when the attached stage changes maximized or full-screen state.
     private final InvalidationListener stageDecorationListener = observable -> {
@@ -758,13 +764,23 @@ public final class Decorator {
             return;
         }
 
+        replaceStage(new Stage());
+    }
+
+    /// Atomically replaces the main stage while retaining logical page visibility, scene and window state.
+    /// Called by appearance changes; the initializer also configures each replacement's application lifecycle.
+    void replaceStage(Stage replacement) {
+        FXUtils.checkFxUserThread();
+        @Nullable Stage previousStage = stage;
+        if (previousStage == null)
+            return;
+
         boolean showing = previousStage.isShowing();
         boolean maximized = WindowState.isMaximized(previousStage);
         boolean fullScreen = previousStage.isFullScreen();
         boolean iconified = previousStage.isIconified();
         @Nullable Node focusOwner = previousStage.getScene().getFocusOwner();
 
-        Stage replacement = new Stage();
         stageInitializer.accept(replacement);
         replacement.setTitle(previousStage.getTitle());
         replacement.getIcons().setAll(previousStage.getIcons());
@@ -774,17 +790,21 @@ public final class Decorator {
         replacement.setFullScreenExitHint(previousStage.getFullScreenExitHint());
         replacement.setFullScreenExitKeyCombination(previousStage.getFullScreenExitKeyCombination());
 
-        detachStage();
-        previousStage.hide();
-        attachStage(replacement);
-        replacement.setMaximized(maximized && WindowState.supportsMaximization(replacement));
-        replacement.setFullScreen(fullScreen);
-        replacement.setIconified(iconified);
-        if (showing) {
-            replacement.show();
-        }
-        if (focusOwner != null) {
-            focusOwner.requestFocus();
+        replacingStage = true;
+        try {
+            detachStage();
+            previousStage.hide();
+            attachStage(replacement);
+            replacement.setMaximized(maximized && WindowState.supportsMaximization(replacement));
+            replacement.setFullScreen(fullScreen);
+            replacement.setIconified(iconified);
+            if (showing)
+                replacement.show();
+            if (focusOwner != null)
+                focusOwner.requestFocus();
+        } finally {
+            replacingStage = false;
+            updateVisiblePage();
         }
     }
 
@@ -871,6 +891,8 @@ public final class Decorator {
             updateWindowDecoration(false);
             stage = newStage;
             newStage.addEventHandler(WindowEvent.WINDOW_SHOWING, windowShowingHandler);
+            newStage.addEventHandler(WindowEvent.WINDOW_SHOWN, windowVisibilityHandler);
+            newStage.addEventHandler(WindowEvent.WINDOW_HIDDEN, windowVisibilityHandler);
             newStage.iconifiedProperty().addListener(iconifiedListener);
             newStage.maximizedProperty().addListener(stageDecorationListener);
             newStage.fullScreenProperty().addListener(stageDecorationListener);
@@ -887,6 +909,7 @@ public final class Decorator {
         root.setCursor(Cursor.DEFAULT);
         dragging = false;
         allowMove = false;
+        updateVisiblePage();
         return scene;
     }
 
@@ -912,6 +935,8 @@ public final class Decorator {
                 Themes.darkModeProperty().removeListener(windowStyleListener);
             }
             stage.removeEventHandler(WindowEvent.WINDOW_SHOWING, windowShowingHandler);
+            stage.removeEventHandler(WindowEvent.WINDOW_SHOWN, windowVisibilityHandler);
+            stage.removeEventHandler(WindowEvent.WINDOW_HIDDEN, windowVisibilityHandler);
             stage.iconifiedProperty().removeListener(iconifiedListener);
             stage.maximizedProperty().removeListener(stageDecorationListener);
             stage.fullScreenProperty().removeListener(stageDecorationListener);
@@ -920,6 +945,7 @@ public final class Decorator {
             }
         }
         stage = null;
+        updateVisiblePage();
         updateWindowDecoration(false);
         root.setCursor(Cursor.DEFAULT);
         dragging = false;
@@ -1116,6 +1142,22 @@ public final class Decorator {
             region.prefWidthProperty().bind(parent.widthProperty());
             region.prefHeightProperty().bind(parent.heightProperty());
         }
+        updateVisiblePage();
+    }
+
+    /// Sends one leave/enter pair for a real page or window transition, coalescing appearance-only stage swaps.
+    private void updateVisiblePage() {
+        if (replacingStage)
+            return;
+        @Nullable Node next = stage != null && stage.isShowing() ? navigator.getCurrentPage() : null;
+        if (next == visiblePage)
+            return;
+        @Nullable Node previous = visiblePage;
+        visiblePage = next;
+        if (previous instanceof DecoratorPage page)
+            page.onPageVisibilityChanged(false);
+        if (next instanceof DecoratorPage page)
+            page.onPageVisibilityChanged(true);
     }
 
     /// Installs keyboard, full-screen, and auxiliary mouse-button routing.
