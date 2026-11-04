@@ -40,6 +40,11 @@ public interface DecoratorPage extends Refreshable {
     default void closePage() {
     }
 
+    /// Notifies a page when it becomes current in a showing main window, or ceases to be so.
+    /// Minimization and focus changes preserve this state; appearance-driven stage replacement is atomic.
+    default void onPageVisibilityChanged(boolean visible) {
+    }
+
     default void onDecoratorPageNavigating(Navigator.NavigationEvent event) {
         ((Node) this).getStyleClass().add("content-background");
     }

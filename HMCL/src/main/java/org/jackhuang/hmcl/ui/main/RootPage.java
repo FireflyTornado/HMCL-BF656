@@ -18,8 +18,13 @@
 package org.jackhuang.hmcl.ui.main;
 
 import com.jfoenix.controls.JFXPopup;
+import javafx.beans.binding.Bindings;
 import javafx.beans.property.ReadOnlyObjectProperty;
+import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
+import javafx.scene.layout.VBox;
+import org.jackhuang.hmcl.auth.Account;
+import org.jackhuang.hmcl.bf656.BF656GreetingRefresh;
 import org.jackhuang.hmcl.game.GameInstanceID;
 import org.jackhuang.hmcl.game.HMCLGameInstance;
 import org.jackhuang.hmcl.game.ModpackHelper;
@@ -47,6 +52,7 @@ import org.jackhuang.hmcl.upgrade.UpdateChecker;
 import org.jackhuang.hmcl.util.Lang;
 import org.jackhuang.hmcl.util.StringUtils;
 import org.jackhuang.hmcl.util.io.FileUtils;
+import org.jackhuang.hmcl.util.javafx.BindingMapping;
 import org.jackhuang.hmcl.util.platform.*;
 import org.jetbrains.annotations.Nullable;
 
@@ -57,11 +63,34 @@ import static org.jackhuang.hmcl.util.i18n.I18n.i18n;
 import static org.jackhuang.hmcl.util.logging.Logger.LOG;
 
 public class RootPage extends DecoratorAnimatedPage implements DecoratorPage {
-    private MainPage mainPage = null;
+    /// Lazily created game/content area retained across navigation visits.
+    private @Nullable MainPage mainPage;
+    /// Retained greeting control; skin creation and replacement do not create another random selection.
+    private final BF656GreetingPane greeting;
+    /// Delivers one refresh after a visible-home entry, merging navigation and window events.
+    private final BF656GreetingRefresh greetingRefresh;
 
+    /// Creates the normal home page with a visibility-managed greeting.
     public RootPage() {
+        this(new BF656GreetingPane());
+    }
+
+    /// Allows deterministic lifecycle verification with a clock-controlled greeting control.
+    RootPage(BF656GreetingPane greeting) {
+        this.greeting = greeting;
+        greetingRefresh = new BF656GreetingRefresh(javafx.application.Platform::runLater, greeting::refreshGreeting);
+        greeting.setSelectionRequest(greetingRefresh::requestRefresh);
+        greeting.nicknameProperty().bind(BindingMapping.of(Accounts.selectedAccountProperty())
+                .flatMap((@Nullable Account account) -> account == null ? null
+                        : Bindings.createStringBinding(account::getProfileName, account), () -> null));
         getStyleClass().remove("gray-background");
         getLeft().getStyleClass().add("gray-background");
+    }
+
+    /// Refreshes only when this home page is shown or returned to in the logical main window.
+    @Override
+    public void onPageVisibilityChanged(boolean visible) {
+        greetingRefresh.setVisible(visible);
     }
 
     @Override
@@ -107,6 +136,7 @@ public class RootPage extends DecoratorAnimatedPage implements DecoratorPage {
 
     private static class Skin extends DecoratorAnimatedPageSkin<RootPage> {
 
+        /// Builds the home sidebar, including a fixed greeting above the scrollable account and game menus.
         protected Skin(RootPage control) {
             super(control);
 
@@ -204,7 +234,8 @@ public class RootPage extends DecoratorAnimatedPage implements DecoratorPage {
                     });
 
             // the root page, with the sidebar in left, navigator in center.
-            setLeft(sideBar);
+            VBox.setVgrow(sideBar, Priority.ALWAYS);
+            setLeft(control.greeting, sideBar);
             setCenter(getSkinnable().getMainPage());
         }
 

@@ -76,6 +76,8 @@ public final class BF656SignatureVerification {
         }
         require(Arrays.equals(embeddedPublicKey, Files.readAllBytes(publicSource)), "Embedded public key does not match the source resource");
         require(IntegrityChecker.isSelfVerified(), "Signed launcher failed its own production self-verification");
+        require(!JarUtils.getAttribute("hmcl.microsoft.auth.id", "").isBlank(),
+                "Signed BF656 release is missing Microsoft sign-in configuration");
 
         @Unmodifiable List<Path> artifacts = List.of(jar, exe, shell);
         JsonObject report = new JsonObject();
@@ -83,6 +85,7 @@ public final class BF656SignatureVerification {
         report.addProperty("bf656Version", BF656Metadata.VERSION);
         report.addProperty("publicKeySha256", sha256(embeddedPublicKey));
         report.addProperty("selfVerification", "passed");
+        report.addProperty("microsoftAuthenticationConfigured", true);
         for (Path artifact : artifacts) {
             IntegrityChecker.verifyJar(artifact);
             report.addProperty(artifact.getFileName().toString() + ".sha256", sha256(Files.readAllBytes(artifact)));

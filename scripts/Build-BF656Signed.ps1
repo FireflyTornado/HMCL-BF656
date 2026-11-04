@@ -3,6 +3,7 @@
 param(
     [string]$PrivateKey,
     [string]$JavaHome,
+    [string]$ServiceConfig,
     [switch]$Offline
 )
 
@@ -32,10 +33,30 @@ if (!(Test-Path -LiteralPath (Join-Path $JavaHome 'bin/javac.exe') -PathType Lea
 $previousJavaHome = $env:JAVA_HOME
 $previousGradleHome = $env:GRADLE_USER_HOME
 $previousSigningKey = $env:HMCL_SIGNATURE_KEY
+$previousMicrosoftAuthId = $env:MICROSOFT_AUTH_ID
+$previousCurseForgeApiKey = $env:CURSEFORGE_API_KEY
 Push-Location -LiteralPath $repository
 try {
     $env:JAVA_HOME = $JavaHome
     $env:HMCL_SIGNATURE_KEY = $PrivateKey
+    if (!$ServiceConfig) {
+        $ServiceConfig = Join-Path $workspace '.build-tools/bf656-service.properties'
+    }
+    $ServiceConfig = [IO.Path]::GetFullPath($ServiceConfig)
+    if ($ServiceConfig.StartsWith($repository + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'BF656 service settings must be stored outside the source repository.'
+    }
+    if (Test-Path -LiteralPath $ServiceConfig -PathType Leaf) {
+        $serviceSettings = ConvertFrom-StringData ([IO.File]::ReadAllText($ServiceConfig, [Text.Encoding]::UTF8))
+        foreach ($serviceName in @('MICROSOFT_AUTH_ID', 'CURSEFORGE_API_KEY')) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($serviceName, 'Process')) -and $serviceSettings.ContainsKey($serviceName)) {
+                [Environment]::SetEnvironmentVariable($serviceName, $serviceSettings[$serviceName], 'Process')
+            }
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($env:MICROSOFT_AUTH_ID)) {
+        throw 'Microsoft sign-in configuration is missing. Set MICROSOFT_AUTH_ID or provide an external service properties file with -ServiceConfig.'
+    }
     $localGradleHome = Join-Path $workspace '.build-tools/gradle-home'
     if (!$env:GRADLE_USER_HOME -and (Test-Path -LiteralPath $localGradleHome -PathType Container)) {
         $env:GRADLE_USER_HOME = $localGradleHome
@@ -49,5 +70,7 @@ try {
     $env:JAVA_HOME = $previousJavaHome
     $env:GRADLE_USER_HOME = $previousGradleHome
     $env:HMCL_SIGNATURE_KEY = $previousSigningKey
+    $env:MICROSOFT_AUTH_ID = $previousMicrosoftAuthId
+    $env:CURSEFORGE_API_KEY = $previousCurseForgeApiKey
     Pop-Location
 }

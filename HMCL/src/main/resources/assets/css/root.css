@@ -254,6 +254,17 @@
     -fx-spacing: 0;
 }
 
+.bf656-greeting {
+    -fx-padding: 10 16 10 16;
+}
+
+.bf656-greeting > .label {
+    -fx-font-family: "Microsoft YaHei UI";
+    -fx-font-size: 16px;
+    -fx-font-weight: normal;
+    -fx-line-spacing: 4px;
+}
+
 .no-padding .advanced-list-box-content {
     -fx-padding: 0 0 0 0;
 }
