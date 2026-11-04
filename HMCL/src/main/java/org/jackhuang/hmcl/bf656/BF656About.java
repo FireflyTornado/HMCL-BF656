@@ -18,6 +18,8 @@
 package org.jackhuang.hmcl.bf656;
 
 import org.jackhuang.hmcl.ui.FXUtils;
+import org.jackhuang.hmcl.ui.construct.ComponentList;
+import org.jackhuang.hmcl.ui.construct.ImageContainer;
 import org.jackhuang.hmcl.ui.construct.LineButton;
 import org.jetbrains.annotations.NotNullByDefault;
 
@@ -28,13 +30,40 @@ public final class BF656About {
     private BF656About() {
     }
 
-    /// Creates the custom launcher entry with its independently maintained release version.
+    /// Creates the project section, including the configured author when a name is supplied.
+    public static ComponentList createProjectSection() {
+        var project = new ComponentList();
+        project.getContent().add(createLauncherEntry());
+        if (!BF656Metadata.AUTHOR_NAME.isEmpty()) {
+            project.getContent().add(createAuthorEntry());
+        }
+        return project;
+    }
+
+    /// Creates the custom launcher entry with its independent version and optional repository link.
     public static LineButton createLauncherEntry() {
-        var launcher = new LineButton();
+        var launcher = BF656Metadata.PROJECT_URL.isEmpty()
+                ? new LineButton()
+                : LineButton.createExternalLinkButton(BF656Metadata.PROJECT_URL);
         launcher.setLargeTitle(true);
         launcher.setLeading(FXUtils.newBuiltinImage(BF656Icons.ICON));
         launcher.setTitle(BF656Metadata.FULL_NAME);
         launcher.setSubtitle(BF656Metadata.VERSION);
         return launcher;
+    }
+
+    /// Creates the project author entry with a bundled avatar and optional personal profile link.
+    private static LineButton createAuthorEntry() {
+        var author = BF656Metadata.AUTHOR_URL.isEmpty()
+                ? new LineButton()
+                : LineButton.createExternalLinkButton(BF656Metadata.AUTHOR_URL);
+        var avatar = new ImageContainer(32, 32);
+        avatar.setImage(FXUtils.newBuiltinImage("/assets/img/bf656-author.png"));
+        avatar.setMouseTransparent(true);
+        author.setLargeTitle(true);
+        author.setLeading(avatar);
+        author.setTitle(BF656Metadata.AUTHOR_NAME);
+        author.setSubtitle(BF656Metadata.AUTHOR_DESCRIPTION);
+        return author;
     }
 }
