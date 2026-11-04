@@ -134,12 +134,14 @@ public class MicrosoftAccountLoginPane extends JFXDialogLayout implements Dialog
         FXUtils.onChangeAndOperate(step, this::onStep);
     }
 
+    /// Renders the current login step, keeping configuration warnings visible even when login cannot proceed.
     private void onStep(Step currentStep) {
         VBox rootContainer = new VBox(10);
         setBody(rootContainer);
         rootContainer.setAlignment(Pos.TOP_CENTER);
 
         StackPane warningPane = new StackPane();
+        rootContainer.getChildren().add(warningPane);
 
         if (!IntegrityChecker.isOfficial()) {
             var unofficialHintPane = new HintPane(MessageDialogPane.MessageType.WARNING);
@@ -153,8 +155,6 @@ public class MicrosoftAccountLoginPane extends JFXDialogLayout implements Dialog
             loginButtonSpinner.setLoading(false);
             return;
         }
-
-        rootContainer.getChildren().add(warningPane);
 
         if (currentStep instanceof Step.Init) {
             btnLogin.setOnAction(e -> this.step.set(new Step.StartAuthorizationCodeLogin()));

@@ -58,9 +58,21 @@ val requireBF656ReleaseSigningKey = tasks.register("requireBF656ReleaseSigningKe
     doLast { validateSigningKey(true) }
 }
 
+val requireBF656ReleaseServices = tasks.register("requireBF656ReleaseServices") {
+    group = "verification"
+    description = "Rejects BF656 release builds that cannot support Microsoft account sign-in."
+    doNotTrackState("Every release must validate its process-provided service configuration")
+    doLast {
+        check(!System.getenv("MICROSOFT_AUTH_ID").isNullOrBlank()) {
+            "BF656 release requires MICROSOFT_AUTH_ID. Use Build-BF656Signed.ps1 with the external service settings."
+        }
+    }
+}
+
 val signedLauncherJar = tasks.named<Jar>("shadowJar") {
     dependsOn(validateBF656SigningKey)
     mustRunAfter(requireBF656ReleaseSigningKey)
+    mustRunAfter(requireBF656ReleaseServices)
     inputs.property("bf656.signing.enabled", signingKeyLocation != null)
     // A new or changed local key must never silently reuse an artifact from an earlier build.
     outputs.upToDateWhen { signingKeyLocation == null }
@@ -71,7 +83,7 @@ val signingSourceSets = extensions.getByType<SourceSetContainer>()
 val verifyBF656SignedArtifacts = tasks.register<JavaExec>("verifyBF656SignedArtifacts") {
     group = "verification"
     description = "Verifies actual JAR/EXE/SH signatures and rejects tampered, unsigned, and foreign-key packages."
-    dependsOn(requireBF656ReleaseSigningKey, tasks.named("makeExecutables"), tasks.named("testClasses"))
+    dependsOn(requireBF656ReleaseSigningKey, requireBF656ReleaseServices, tasks.named("makeExecutables"), tasks.named("testClasses"))
     // Production classes and the trust root must come from the actual signed JAR, not build/classes.
     classpath = files(signingSourceSets.named("test").map { it.output }, signedLauncherJar)
     mainClass.set("org.jackhuang.hmcl.upgrade.BF656SignatureVerification")
