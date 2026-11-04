@@ -66,6 +66,29 @@ public final class BF656GreetingTest {
         }
     }
 
+    /// All Unicode line-break sequences become spaces in both newly selected and retained greeting names.
+    @Test
+    public void nicknameLineSeparatorsCannotAddRenderedLines() {
+        @Unmodifiable List<String> separators = List.of("\r\n", "\n", "\r", "\u000B", "\f", "\u0085", "\u2028", "\u2029");
+        for (String separator : separators) {
+            String nickname = "  Alice" + separator + separator + "Bob  ";
+            var selected = BF656Greeting.generate(nickname, at("2026-11-03T18:00:00"), () -> 0);
+            var retained = new BF656Greeting.Greeting(EVENING, nickname);
+            assertEquals("Alice Bob", selected.nickname());
+            assertEquals(selected, retained);
+            var text = retained.text(CHINESE);
+            assertEquals("晚上好，Alice Bob。", text.singleLine());
+            assertEquals("晚上好，\nAlice Bob。", text.twoLines());
+        }
+    }
+
+    /// Separator-only names must use the welcome even when String.strip does not remove the separator itself.
+    @Test
+    public void lineSeparatorOnlyNicknamesUseTheWelcomeWithoutRandomness() {
+        assertWelcome("\u0085");
+        assertWelcome(" \r\n\u000B\f\u0085\u2028\u2029 ");
+    }
+
     /// Tests each inclusive boundary and the last nanosecond of the preceding period.
     @Test
     public void timePeriodsUseExactHalfOpenBoundaries() {

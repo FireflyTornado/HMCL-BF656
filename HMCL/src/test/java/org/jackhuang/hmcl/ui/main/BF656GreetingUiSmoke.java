@@ -42,6 +42,9 @@ import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
@@ -71,6 +74,7 @@ public final class BF656GreetingUiSmoke {
             Platform.startup(() -> Platform.setImplicitExit(false));
             FutureTask<Boolean> check = new FutureTask<>(() -> {
                 verifyGreetingLayout(output);
+                verifyNicknameLineSeparators(output);
                 verifyRootSidebar(output);
                 return true;
             });
@@ -133,6 +137,43 @@ public final class BF656GreetingUiSmoke {
         require(label.getText().replace("\n", "").equals("欢迎游玩Battlefield 656！"), "Missing accounts must show the complete agreed welcome");
         require(!label.getText().contains("…"), "Welcome copy cannot be ellipsized");
         requireLinesFit(label);
+    }
+
+    /// Checks raw profile names remain intact while visible and accessible text never gain nickname-supplied lines.
+    private static void verifyNicknameLineSeparators(Path output) throws Exception {
+        Clock clock = Clock.fixed(Instant.parse("2026-11-03T18:00:00Z"), ZoneOffset.UTC);
+        AtomicInteger draws = new AtomicInteger();
+        BF656GreetingPane pane = new BF656GreetingPane(name -> BF656Greeting.generate(name, clock, () -> {
+            draws.incrementAndGet();
+            return 0;
+        }), I18n.getResourceBundle());
+        StackPane surface = new StackPane(pane);
+        surface.setPadding(new Insets(16));
+
+        String initialName = "Alice\r\nBob";
+        pane.nicknameProperty().set(initialName);
+        snapshot(surface, 232, 105, output.resolve("greeting-normalized-nickname.png"));
+        require(pane.getAccessibleText().equals("晚上好，Alice Bob。"), "Initial selection must normalize nickname line breaks");
+        require(initialName.equals(pane.nicknameProperty().get()), "The raw profile name must not be rewritten");
+        requireLinesFit(label(pane));
+
+        pane.nicknameProperty().set("Carl\u0085Dana\u2028Eve\u2029Fox");
+        snapshot(surface, 232, 105, output.resolve("greeting-updated-nickname.png"));
+        require(pane.getAccessibleText().equals("晚上好，Carl Dana Eve Fox。"), "Retained greetings must normalize every Unicode separator");
+        require(draws.get() == 1, "Changing a personalized nickname must retain the selected greeting");
+        requireLinesFit(label(pane));
+
+        pane.nicknameProperty().set("\u0085\u2028\u2029");
+        snapshot(surface, 232, 105, output.resolve("greeting-separator-only-nickname.png"));
+        require(pane.getAccessibleText().equals("欢迎游玩Battlefield 656！"), "Separator-only profile names must restore the welcome");
+        require(draws.get() == 1, "Clearing a nickname must not consume randomness");
+        requireLinesFit(label(pane));
+
+        pane.nicknameProperty().set("\r\nSteve\u0085");
+        snapshot(surface, 232, 105, output.resolve("greeting-restored-nickname.png"));
+        require(pane.getAccessibleText().equals("晚上好，Steve。"), "A valid name after the welcome must select a normalized greeting");
+        require(draws.get() == 2, "Restoring a valid nickname must select exactly once");
+        requireLinesFit(label(pane));
     }
 
     /// Checks the real RootPage places the greeting above menus and tracks selected game profile names.

@@ -97,10 +97,11 @@ public final class BF656GreetingPane extends StackPane {
         this.selectionRequest = selectionRequest;
     }
 
-    /// Updates only the name for an existing personalized greeting, and handles transitions to/from the welcome.
+    /// Normalizes the displayed name while retaining the raw property and handles transitions to/from the welcome.
+    /// Updating an existing personalized greeting retains its selected message identity.
     private void updateNickname() {
-        @Nullable String name = nickname.get();
-        if (name == null || name.isBlank()) {
+        @Nullable String name = BF656Greeting.normalizeNickname(nickname.get());
+        if (name == null) {
             greeting = new BF656Greeting.Greeting(BF656Greeting.Kind.WELCOME, null);
         } else if (greeting.kind() == BF656Greeting.Kind.WELCOME) {
             if (selectionRequest != null)

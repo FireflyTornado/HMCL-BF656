@@ -76,6 +76,34 @@ public final class BF656GreetingLayoutTest {
         assertEquals("早安，\n" + prefix + "…。", fit(text, 5));
     }
 
+    /// A wider intermediate prefix must not prevent a longer, narrower shaped prefix from being displayed.
+    @Test
+    public void keepsTheLongestFittingPrefixWhenMeasuredWidthsAreNotMonotonic() {
+        var text = new BF656Greeting.Text("晚上好，\n", "ABCD", "。");
+        String result = BF656GreetingLayout.fit(text, 20, candidate -> switch (candidate) {
+            case "A…。" -> 12;
+            case "AB…。" -> 24;
+            case "ABC…。" -> 18;
+            case "ABCD…。" -> 30;
+            default -> 100;
+        });
+        assertEquals("晚上好，\nABC…。", result);
+    }
+
+    /// Nickname-first copy must also search past non-fitting prefixes while preserving its comma and question.
+    @Test
+    public void keepsTheLongestFittingPrefixBeforeTheLateNightBreak() {
+        var text = new BF656Greeting.Text("", "ABCD", "，\n熬夜玩吗？");
+        String result = BF656GreetingLayout.fit(text, 20, candidate -> switch (candidate) {
+            case "A…，" -> 12;
+            case "AB…，" -> 24;
+            case "ABC…，" -> 18;
+            case "ABCD…，" -> 30;
+            default -> 100;
+        });
+        assertEquals("ABC…，\n熬夜玩吗？", result);
+    }
+
     /// The fixed welcome is returned intact because there is no nickname to truncate.
     @Test
     public void welcomeCopyIsNeverEllipsized() {

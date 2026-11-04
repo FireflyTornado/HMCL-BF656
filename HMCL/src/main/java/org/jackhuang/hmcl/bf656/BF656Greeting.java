@@ -26,12 +26,15 @@ import java.util.Objects;
 import java.util.ResourceBundle;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.DoubleSupplier;
+import java.util.regex.Pattern;
 
 /// Selects local BF656 greetings without creating UI controls or scheduling refreshes.
 @NotNullByDefault
 public final class BF656Greeting {
     /// Probability of choosing the current time period outside the fixed late-night hours.
     private static final double TIME_GREETING_PROBABILITY = 0.6;
+    /// Unicode line-break runs cannot introduce extra lines through a displayed profile name.
+    private static final Pattern NICKNAME_LINE_BREAKS = Pattern.compile("\\R+");
 
     /// Prevents instantiation of this stateless selector.
     private BF656Greeting() {
@@ -77,11 +80,12 @@ public final class BF656Greeting {
         return new Greeting(kind, name);
     }
 
-    /// Removes surrounding whitespace and represents missing or whitespace-only names as null.
-    private static @Nullable String normalizeNickname(@Nullable String nickname) {
+    /// Returns a display-only name with line-break runs replaced by spaces and surrounding whitespace removed.
+    /// Missing names and names containing only whitespace or line separators are represented as null.
+    public static @Nullable String normalizeNickname(@Nullable String nickname) {
         if (nickname == null)
             return null;
-        String stripped = nickname.strip();
+        String stripped = NICKNAME_LINE_BREAKS.matcher(nickname).replaceAll(" ").strip();
         return stripped.isEmpty() ? null : stripped;
     }
 

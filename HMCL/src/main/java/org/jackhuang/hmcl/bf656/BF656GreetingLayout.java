@@ -71,16 +71,12 @@ public final class BF656GreetingLayout {
             return complete;
 
         int @Unmodifiable [] ends = GRAPHEME.matcher(nickname).results().mapToInt(result -> result.end()).toArray();
-        int low = 0;
-        int high = ends.length;
-        while (low < high) {
-            int middle = (low + high + 1) >>> 1;
-            String candidate = before + nickname.substring(0, ends[middle - 1]) + ELLIPSIS + after;
+        // Shaping can make prefix widths non-monotonic; check proper prefixes from longest to shortest.
+        for (int count = ends.length - 1; count > 0; count--) {
+            String candidate = before + nickname.substring(0, ends[count - 1]) + ELLIPSIS + after;
             if (measure.applyAsDouble(candidate) <= width)
-                low = middle;
-            else
-                high = middle - 1;
+                return candidate;
         }
-        return before + (low == 0 ? "" : nickname.substring(0, ends[low - 1])) + ELLIPSIS + after;
+        return before + ELLIPSIS + after;
     }
 }
