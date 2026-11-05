@@ -27,13 +27,14 @@ import javafx.scene.Scene;
 import javafx.scene.control.Label;
 import javafx.scene.control.ScrollPane;
 import javafx.scene.layout.HBox;
+import javafx.scene.layout.FlowPane;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
 import javafx.scene.text.Text;
 import javafx.scene.text.TextFlow;
 import javafx.stage.Stage;
-import org.jackhuang.hmcl.Metadata;
+import org.jackhuang.hmcl.bf656.BF656Diagnostics;
 import org.jackhuang.hmcl.game.*;
 import org.jackhuang.hmcl.launch.ProcessListener;
 import org.jackhuang.hmcl.setting.StyleSheets;
@@ -329,7 +330,7 @@ public class GameCrashWindow extends Stage {
                 titlePane.getChildren().setAll(title);
             }
 
-            HBox infoPane = new HBox(8);
+            FlowPane infoPane = new FlowPane(8, 8);
             {
                 infoPane.setPadding(new Insets(8));
                 infoPane.setAlignment(Pos.CENTER_LEFT);
@@ -337,7 +338,7 @@ public class GameCrashWindow extends Stage {
                 TwoLineListItem launcher = new TwoLineListItem();
                 launcher.getStyleClass().setAll("two-line-item-second-large");
                 launcher.setTitle(i18n("launcher"));
-                launcher.setSubtitle(Metadata.VERSION);
+                launcher.setSubtitle(BF656Diagnostics.versionSummary());
 
                 TwoLineListItem instance = new TwoLineListItem();
                 instance.getStyleClass().setAll("two-line-item-second-large");

@@ -17,6 +17,7 @@
  */
 package org.jackhuang.hmcl.game;
 
+import org.jackhuang.hmcl.bf656.BF656Diagnostics;
 import org.jackhuang.hmcl.util.gson.JsonUtils;
 import org.jackhuang.hmcl.util.io.IOUtils;
 import org.jackhuang.hmcl.util.io.Zipper;
@@ -44,9 +45,21 @@ public final class LogExporter {
     private LogExporter() {
     }
 
+    /// Writes launcher identity and the original game log messages to a standalone UTF-8 log file.
+    public static void exportPlainLogs(Path logFile, Iterable<Log> logs) throws IOException {
+        try (var writer = Files.newBufferedWriter(logFile, StandardCharsets.UTF_8)) {
+            writer.write(BF656Diagnostics.logHeader());
+            for (Log entry : logs) {
+                writer.write(entry.getLog());
+                writer.newLine();
+            }
+        }
+    }
+
+    /// Exports the current launcher identity alongside the existing game logs, launch script, and instance manifests.
     public static CompletableFuture<Void> exportLogs(
             Path zipFile, DefaultGameInstance instance, LaunchOptions options, String logs, String launchScript,
-            PathMatcher logMatcher) {
+            @Nullable PathMatcher logMatcher) {
         DefaultGameRepositorySnapshot repositorySnapshot = instance.getSnapshot();
         Path runDirectory = options.getGameDir();
         List<GameInstanceID> instances = new ArrayList<>();
@@ -70,6 +83,8 @@ public final class LogExporter {
 
         return CompletableFuture.runAsync(() -> {
             try (Zipper zipper = new Zipper(zipFile, true)) {
+                // Reserve the diagnostic name before collecting user files with potentially identical names.
+                zipper.putTextFile(BF656Diagnostics.describe(), BF656Diagnostics.FILE_NAME);
                 processLogs(runDirectory.resolve("liteconfig"), "*.log", "liteconfig", zipper, logMatcher);
                 processLogs(runDirectory.resolve("logs"), "*.log", "logs", zipper, logMatcher);
                 processLogs(runDirectory, "*.log", "runDirectory", zipper, logMatcher);
@@ -93,7 +108,8 @@ public final class LogExporter {
         });
     }
 
-    private static void processLogs(Path directory, String fileExtension, String logDirectory, Zipper zipper, PathMatcher logMatcher) {
+    /// Collects matching log files without allowing a missing or unreadable directory to abort the export.
+    private static void processLogs(Path directory, String fileExtension, String logDirectory, Zipper zipper, @Nullable PathMatcher logMatcher) {
         try (DirectoryStream<Path> stream = Files.newDirectoryStream(directory, fileExtension)) {
             for (Path file : stream) {
                 if (Files.isRegularFile(file)) {

@@ -34,6 +34,7 @@ import javafx.scene.layout.*;
 import javafx.stage.Stage;
 import org.jackhuang.hmcl.game.GameDumpGenerator;
 import org.jackhuang.hmcl.game.Log;
+import org.jackhuang.hmcl.game.LogExporter;
 import org.jackhuang.hmcl.setting.StyleSheets;
 import org.jackhuang.hmcl.task.Schedulers;
 import org.jackhuang.hmcl.theme.Themes;
@@ -46,7 +47,6 @@ import org.jackhuang.hmcl.util.platform.ManagedProcess;
 import org.jackhuang.hmcl.util.platform.SystemUtils;
 
 import java.io.IOException;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.LocalDateTime;
@@ -206,11 +206,12 @@ public final class LogWindow extends Stage {
             logs.clear();
         }
 
+        /// Exports launcher identity followed by the unmodified game log messages in UTF-8.
         private void onExportLogs() {
             thread(() -> {
                 Path logFile = Paths.get("minecraft-exported-logs-" + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH-mm-ss")) + ".log").toAbsolutePath();
                 try {
-                    Files.write(logFile, logs.stream().map(Log::getLog).collect(Collectors.toList()));
+                    LogExporter.exportPlainLogs(logFile, logs);
                 } catch (IOException e) {
                     LOG.warning("Failed to export logs", e);
                     return;
