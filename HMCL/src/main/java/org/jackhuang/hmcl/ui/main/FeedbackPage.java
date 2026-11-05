@@ -19,13 +19,13 @@ package org.jackhuang.hmcl.ui.main;
 
 import javafx.scene.control.ScrollPane;
 import javafx.scene.layout.VBox;
-import org.jackhuang.hmcl.bf656.BF656Icons;
 import org.jackhuang.hmcl.bf656.BF656Metadata;
 import org.jackhuang.hmcl.theme.Themes;
 import org.jackhuang.hmcl.ui.FXUtils;
 import org.jackhuang.hmcl.ui.SVG;
 import org.jackhuang.hmcl.ui.WeakListenerHolder;
 import org.jackhuang.hmcl.ui.construct.ComponentList;
+import org.jackhuang.hmcl.ui.construct.ImageContainer;
 import org.jackhuang.hmcl.ui.construct.LineButton;
 import org.jackhuang.hmcl.ui.construct.SpinnerPane;
 
@@ -50,8 +50,11 @@ public class FeedbackPage extends SpinnerPane {
         {
             boolean available = !BF656Metadata.QQ_GROUP_URL.isEmpty();
             var users = available ? LineButton.createExternalLinkButton(BF656Metadata.QQ_GROUP_URL) : new LineButton();
+            var groupImage = new ImageContainer(32, 32);
+            groupImage.setImage(FXUtils.newBuiltinImage("/assets/img/bf656-group.jpg"));
+            groupImage.setMouseTransparent(true);
             users.setLargeTitle(true);
-            users.setLeading(FXUtils.newBuiltinImage(BF656Icons.ICON));
+            users.setLeading(groupImage);
             users.setTitle(i18n("contact.chat.qq_group"));
             users.setSubtitle(i18n(available ? "contact.chat.qq_group.statement" : "bf656.contact.unavailable"));
             users.setDisable(!available);
