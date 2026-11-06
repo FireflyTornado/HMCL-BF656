@@ -17,16 +17,12 @@
  */
 package org.jackhuang.hmcl.ui;
 
-import javafx.geometry.Pos;
 import javafx.scene.Scene;
-import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.scene.control.TextArea;
 import javafx.scene.layout.BorderPane;
-import javafx.scene.layout.HBox;
 import javafx.scene.layout.StackPane;
 import javafx.stage.Stage;
-import org.jackhuang.hmcl.Metadata;
 import org.jackhuang.hmcl.countly.CrashReport;
 import org.jackhuang.hmcl.upgrade.UpdateChecker;
 
@@ -51,21 +47,12 @@ public class CrashWindow extends Stage {
         textArea.setText(report.getDisplayText());
         textArea.setEditable(false);
 
-        Button btnContact = new Button();
-        btnContact.setText(i18n("launcher.contact"));
-        btnContact.setOnAction(event -> FXUtils.openLink(Metadata.CONTACT_URL));
-        HBox box = new HBox();
-        box.setStyle("-fx-padding: 8px;");
-        box.getChildren().add(btnContact);
-        box.setAlignment(Pos.CENTER_RIGHT);
-
         BorderPane pane = new BorderPane();
         StackPane stackPane = new StackPane();
         stackPane.setStyle("-fx-padding: 8px;");
         stackPane.getChildren().add(lblCrash);
         pane.setTop(stackPane);
         pane.setCenter(textArea);
-        pane.setBottom(box);
 
         Scene scene = new Scene(pane, 800, 480);
         setScene(scene);

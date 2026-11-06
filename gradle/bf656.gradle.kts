@@ -29,7 +29,8 @@ listOf("jar", "shadowJar").forEach { taskName ->
 require(bf656Config.getProperty("update.channel", "stable").trim() in listOf("stable", "dev", "nightly")) {
     "update.channel must be stable, dev, or nightly in config/bf656.properties"
 }
-listOf("update.url", "update.downloadUrl", "update.changelogUrl").forEach { key ->
+listOf("update.url", "update.downloadUrl", "update.changelogUrl",
+    "project.url", "contact.qqGroupUrl", "contact.feedbackUrl", "author.url").forEach { key ->
     val url = bf656Config.getProperty(key, "").trim()
     if (url.isNotEmpty()) {
         val uri = URI(url)

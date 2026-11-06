@@ -67,7 +67,6 @@ public final class AboutPage extends SpinnerPane {
 
             about.getContent().setAll(launcher, author);
         }
-        about.getContent().add(0, BF656About.createLauncherEntry());
 
         ComponentList thanks = loadIconedTwoLineList("/assets/about/thanks.json");
 
@@ -94,7 +93,9 @@ public final class AboutPage extends SpinnerPane {
         }
 
         content.getChildren().setAll(
-                ComponentList.createComponentListTitle(i18n("about")),
+                ComponentList.createComponentListTitle(i18n("bf656.about.project")),
+                BF656About.createProjectSection(),
+                ComponentList.createComponentListTitle(i18n("bf656.about.hmcl")),
                 about,
                 ComponentList.createComponentListTitle(i18n("about.thanks_to")),
                 thanks,

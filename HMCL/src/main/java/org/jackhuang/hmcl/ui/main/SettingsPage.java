@@ -26,6 +26,7 @@ import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.VBox;
 import org.jackhuang.hmcl.Metadata;
+import org.jackhuang.hmcl.bf656.BF656Diagnostics;
 import org.jackhuang.hmcl.task.Schedulers;
 import org.jackhuang.hmcl.ui.Controllers;
 import org.jackhuang.hmcl.ui.FXUtils;
@@ -42,6 +43,7 @@ import org.tukaani.xz.XZInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDateTime;
@@ -213,6 +215,7 @@ public final class SettingsPage extends ScrollPane {
         }
     }
 
+    /// Exports recent launcher logs with current launcher identity in either text or ZIP format.
     private CompletableFuture<Path> onExportLogs() {
         return CompletableFuture.supplyAsync(Lang.wrap(() -> {
             String nameBase = "hmcl-exported-logs-" + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH-mm-ss"));
@@ -224,6 +227,7 @@ public final class SettingsPage extends ScrollPane {
 
                 LOG.info("Exporting latest logs to " + outputFile);
                 try (OutputStream output = Files.newOutputStream(outputFile)) {
+                    output.write(BF656Diagnostics.logHeader().getBytes(StandardCharsets.UTF_8));
                     LOG.exportLogs(output);
                 }
             } else {
@@ -236,6 +240,9 @@ public final class SettingsPage extends ScrollPane {
                      var zos = new ZipOutputStream(os)) {
 
                     Set<String> entryNames = new HashSet<>();
+                    zos.putNextEntry(new ZipEntry(getEntryName(entryNames, BF656Diagnostics.FILE_NAME)));
+                    zos.write(BF656Diagnostics.describe().getBytes(StandardCharsets.UTF_8));
+                    zos.closeEntry();
 
                     for (Path path : recentLogFiles) {
                         String fileName = FileUtils.getName(path);
