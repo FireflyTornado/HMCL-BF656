@@ -18,6 +18,7 @@
 package org.jackhuang.hmcl.countly;
 
 import org.jackhuang.hmcl.Metadata;
+import org.jackhuang.hmcl.bf656.BF656Diagnostics;
 import org.jackhuang.hmcl.util.StringUtils;
 import org.jackhuang.hmcl.util.platform.Architecture;
 import org.jackhuang.hmcl.util.platform.OperatingSystem;
@@ -51,9 +52,11 @@ public class CrashReport {
         return true;
     }
 
+    /// Formats the exception with both launcher identities while retaining the original HMCL version field.
     public String getDisplayText() {
         return "---- Hello Minecraft! Crash Report ----\n" +
                 "  Version: " + Metadata.VERSION + "\n" +
+                BF656Diagnostics.projectInfo().indent(2) +
                 "  Time: " + DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").format(LocalDateTime.now()) + "\n" +
                 "  Thread: " + thread + "\n" +
                 "\n  Content: \n    " +

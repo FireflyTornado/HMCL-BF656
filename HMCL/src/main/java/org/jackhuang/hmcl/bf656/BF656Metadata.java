@@ -42,6 +42,27 @@ public final class BF656Metadata {
     /// Custom release version maintained separately from the HMCL branch version.
     public static final String VERSION = requiredProperty("version");
 
+    /// Optional project repository URL linked from the custom launcher entry.
+    public static final String PROJECT_URL = optionalProperty("project.url", "");
+
+    /// QQ group number used for the copy action when no invitation link is configured.
+    public static final String QQ_GROUP_NUMBER = optionalProperty("contact.qqGroupNumber", "");
+
+    /// BF656 invitation URL; blank lets the contact page offer copying the group number instead.
+    public static final String QQ_GROUP_URL = optionalProperty("contact.qqGroupUrl", "");
+
+    /// Project issue tracker URL; blank disables the entry without an upstream fallback.
+    public static final String FEEDBACK_URL = optionalProperty("contact.feedbackUrl", "");
+
+    /// Project author's display name; blank omits the custom author entry.
+    public static final String AUTHOR_NAME = optionalProperty("author.name", "");
+
+    /// Project author's short description, displayed as plain text.
+    public static final String AUTHOR_DESCRIPTION = optionalProperty("author.description", "");
+
+    /// Optional project author profile URL; blank leaves the entry without a link.
+    public static final String AUTHOR_URL = optionalProperty("author.url", "");
+
     /// Prevents construction of this metadata utility.
     private BF656Metadata() {
     }

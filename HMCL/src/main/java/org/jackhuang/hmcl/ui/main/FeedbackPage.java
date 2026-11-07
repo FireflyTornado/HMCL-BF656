@@ -19,21 +19,25 @@ package org.jackhuang.hmcl.ui.main;
 
 import javafx.scene.control.ScrollPane;
 import javafx.scene.layout.VBox;
+import org.jackhuang.hmcl.bf656.BF656Metadata;
 import org.jackhuang.hmcl.theme.Themes;
 import org.jackhuang.hmcl.ui.FXUtils;
+import org.jackhuang.hmcl.ui.SVG;
 import org.jackhuang.hmcl.ui.WeakListenerHolder;
 import org.jackhuang.hmcl.ui.construct.ComponentList;
+import org.jackhuang.hmcl.ui.construct.ImageContainer;
 import org.jackhuang.hmcl.ui.construct.LineButton;
 import org.jackhuang.hmcl.ui.construct.SpinnerPane;
 
 import static org.jackhuang.hmcl.util.i18n.I18n.i18n;
 
-import org.jackhuang.hmcl.Metadata;
-
+/// Displays the BF656 community and issue tracker without upstream contact fallbacks.
 public class FeedbackPage extends SpinnerPane {
 
+    /// Retains the theme listener used to switch the GitHub icon.
     private final WeakListenerHolder holder = new WeakListenerHolder();
 
+    /// Creates the project contacts, using a copy action when only a QQ group number is supplied.
     public FeedbackPage() {
         VBox content = new VBox();
         content.getStyleClass().add("spinner-pane-content");
@@ -44,27 +48,34 @@ public class FeedbackPage extends SpinnerPane {
 
         ComponentList groups = new ComponentList();
         {
-            var users = LineButton.createExternalLinkButton(Metadata.GROUPS_URL);
+            boolean available = !BF656Metadata.QQ_GROUP_URL.isEmpty();
+            var users = available ? LineButton.createExternalLinkButton(BF656Metadata.QQ_GROUP_URL) : new LineButton();
+            var groupImage = new ImageContainer(32, 32);
+            groupImage.setImage(FXUtils.newBuiltinImage("/assets/img/bf656-group.jpg"));
+            groupImage.setMouseTransparent(true);
             users.setLargeTitle(true);
-            users.setLeading(FXUtils.newBuiltinImage("/assets/img/icon.png"));
+            users.setLeading(groupImage);
             users.setTitle(i18n("contact.chat.qq_group"));
-            users.setSubtitle(i18n("contact.chat.qq_group.statement"));
+            users.setSubtitle(i18n(available ? "contact.chat.qq_group.statement" : "bf656.contact.unavailable"));
+            users.setDisable(!available);
+            if (!available && !BF656Metadata.QQ_GROUP_NUMBER.isEmpty()) {
+                users.setDisable(false);
+                users.setSubtitle(i18n("bf656.contact.qq_group.copy"));
+                users.setTrailingIcon(SVG.CONTENT_COPY);
+                users.setOnAction(event -> FXUtils.copyText(BF656Metadata.QQ_GROUP_NUMBER));
+            }
 
-            var discord = LineButton.createExternalLinkButton("https://discord.gg/jVvC7HfM6U");
-            discord.setLargeTitle(true);
-            discord.setLeading(FXUtils.newBuiltinImage("/assets/img/discord.png"));
-            discord.setTitle(i18n("contact.chat.discord"));
-            discord.setSubtitle(i18n("contact.chat.discord.statement"));
-
-            groups.getContent().setAll(users, discord);
+            groups.getContent().setAll(users);
         }
 
         ComponentList feedback = new ComponentList();
         {
-            var github = LineButton.createExternalLinkButton("https://github.com/HMCL-dev/HMCL/issues/new/choose");
+            boolean available = !BF656Metadata.FEEDBACK_URL.isEmpty();
+            var github = available ? LineButton.createExternalLinkButton(BF656Metadata.FEEDBACK_URL) : new LineButton();
             github.setLargeTitle(true);
             github.setTitle(i18n("contact.feedback.github"));
-            github.setSubtitle(i18n("contact.feedback.github.statement"));
+            github.setSubtitle(i18n(available ? "contact.feedback.github.statement" : "bf656.contact.unavailable"));
+            github.setDisable(!available);
 
             holder.add(FXUtils.onWeakChangeAndOperate(Themes.darkModeProperty(), darkMode -> {
                 github.setLeading(darkMode
