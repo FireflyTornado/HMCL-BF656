@@ -520,6 +520,47 @@
     -fx-background-color: -monet-on-surface-variant;
 }
 
+.multiplayer-server-selector .context-menu {
+    -fx-background-color: -monet-surface-container;
+    -fx-padding: 4px;
+}
+
+.multiplayer-server-menu-item {
+    -fx-padding: 0;
+}
+
+.multiplayer-server-menu-item:focused {
+    -fx-background-color: -monet-secondary-container;
+}
+
+.multiplayer-server-menu-row {
+    -fx-padding: 6px 10px;
+}
+
+.multiplayer-server-menu-text {
+    -fx-min-width: 0;
+    -fx-max-width: 330px;
+}
+
+.multiplayer-server-menu-name {
+    -fx-text-fill: -monet-on-surface;
+    -fx-font-size: 13px;
+}
+
+.multiplayer-server-menu-address {
+    -fx-text-fill: -monet-on-surface-variant;
+    -fx-font-size: 11px;
+}
+
+.multiplayer-server-menu-item:focused .multiplayer-server-menu-name,
+.multiplayer-server-menu-item:focused .multiplayer-server-menu-address {
+    -fx-text-fill: -monet-on-secondary-container;
+}
+
+.multiplayer-server-menu-check .svg {
+    -fx-fill: -monet-primary;
+}
+
 .multiplayer-server-selector:hover,
 .multiplayer-server-selector:focused,
 .multiplayer-server-refresh:hover,

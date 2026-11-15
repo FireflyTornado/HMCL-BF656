@@ -23,15 +23,18 @@ import javafx.animation.KeyFrame;
 import javafx.animation.PauseTransition;
 import javafx.animation.Timeline;
 import javafx.application.Platform;
+import javafx.beans.binding.Bindings;
+import javafx.beans.property.ObjectProperty;
+import javafx.beans.property.SimpleObjectProperty;
 import javafx.beans.value.ObservableValue;
 import javafx.css.PseudoClass;
 import javafx.geometry.Pos;
 import javafx.geometry.Side;
 import javafx.scene.Node;
 import javafx.scene.Scene;
+import javafx.scene.control.CustomMenuItem;
 import javafx.scene.control.Label;
 import javafx.scene.control.MenuButton;
-import javafx.scene.control.MenuItem;
 import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.Tooltip;
 import javafx.scene.layout.HBox;
@@ -136,7 +139,7 @@ final class MultiplayerServerStatusPane extends HBox {
     /// Entries from the last successful read, in file order.
     private @Unmodifiable List<SavedServer> servers = List.of();
     /// Currently selected entry from the file.
-    private @Nullable SavedServer selected;
+    private final ObjectProperty<@Nullable SavedServer> selected = new SimpleObjectProperty<>();
     /// Guards the status and loading state against results for a previous selection.
     private int targetRevision;
     /// Whether the status card is following the logical homepage.
@@ -298,11 +301,12 @@ final class MultiplayerServerStatusPane extends HBox {
 
         servers = updated.entries();
         rebuildMenu();
-        @Nullable SavedServer previous = selected;
+        @Nullable SavedServer previous = selected.get();
         @Nullable SavedServer next = null;
         if (previous != null) {
-            if (servers.contains(previous)) {
-                next = previous;
+            int exactIndex = servers.indexOf(previous);
+            if (exactIndex >= 0) {
+                next = servers.get(exactIndex);
             } else {
                 List<SavedServer> byAddress = servers.stream()
                         .filter(server -> server.address().equals(previous.address())).toList();
@@ -324,21 +328,47 @@ final class MultiplayerServerStatusPane extends HBox {
     /// Rebuilds the popup in the same order as the saved multiplayer list.
     private void rebuildMenu() {
         selector.getItems().clear();
-        for (SavedServer server : servers) {
-            MenuItem item = new MenuItem(server.name());
-            item.setOnAction(event -> select(server));
-            selector.getItems().add(item);
-        }
+        for (SavedServer server : servers)
+            selector.getItems().add(createServerMenuItem(server));
         Node title = servers.size() > 1 ? selector : name;
         if (details.getChildren().get(0) != title)
             details.getChildren().set(0, title);
     }
 
+    /// Builds a two-line menu item with a check mark reserved for the exact selected entry.
+    private CustomMenuItem createServerMenuItem(SavedServer server) {
+        Label serverName = new Label(server.name());
+        serverName.getStyleClass().add("multiplayer-server-menu-name");
+        serverName.setMinWidth(0);
+        Label address = new Label(server.address());
+        address.getStyleClass().add("multiplayer-server-menu-address");
+        address.setMinWidth(0);
+        VBox text = new VBox(2, serverName, address);
+        text.getStyleClass().add("multiplayer-server-menu-text");
+        HBox.setHgrow(text, Priority.ALWAYS);
+
+        Node check = SVG.CHECK.createIcon(16);
+        check.getStyleClass().add("multiplayer-server-menu-check");
+        check.visibleProperty().bind(Bindings.createBooleanBinding(() -> selected.get() == server, selected));
+        HBox row = new HBox(12, text, check);
+        row.setAlignment(Pos.CENTER_LEFT);
+        row.minWidthProperty().bind(widthProperty());
+        row.getStyleClass().add("multiplayer-server-menu-row");
+
+        // The menu sizes custom content by its preferred width; the wrapper accounts for the row's minimum.
+        CustomMenuItem item = new CustomMenuItem(new StackPane(row), true);
+        item.getStyleClass().add("multiplayer-server-menu-item");
+        item.setText(server.name() + " " + server.address());
+        item.setOnAction(event -> select(server));
+        return item;
+    }
+
     /// Updates the displayed name and resets the status only when the selected endpoint changes.
     private void select(@Nullable SavedServer server) {
-        @Nullable String previousAddress = selected == null ? null : selected.address();
+        @Nullable SavedServer previous = selected.get();
+        @Nullable String previousAddress = previous == null ? null : previous.address();
         @Nullable String nextAddress = server == null ? null : server.address();
-        selected = server;
+        selected.set(server);
         setVisible(server != null);
         if (server != null) {
             name.setText(server.name());
@@ -359,7 +389,7 @@ final class MultiplayerServerStatusPane extends HBox {
 
     /// Starts or joins the query for the selected address and schedules the next refresh after completion.
     private void refresh() {
-        @Nullable SavedServer target = selected;
+        @Nullable SavedServer target = selected.get();
         if (!active || target == null || refreshing)
             return;
         autoRefresh.stop();
