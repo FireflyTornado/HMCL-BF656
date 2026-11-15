@@ -112,19 +112,11 @@ public final class ContentStore {
     /// Loads only ready fallbacks for items that still appear in the latest manifest and need files.
     private @Unmodifiable Map<String, RemoteContent.Announcement> readAnnouncementFallbacks(
             @Nullable JsonElement index, RemoteContent.Manifest manifest) {
-        if (index == null || (!index.isJsonArray() && !index.isJsonObject()))
+        if (index == null || !index.isJsonObject())
             return Map.of();
-        @Nullable JsonObject references = index.isJsonObject() ? index.getAsJsonObject() : null;
-        Instant now = Instant.now();
-        Set<String> pending = new HashSet<>();
-        for (var item : manifest.announcements()) {
-            if ((references == null || references.has(item.id())) && !item.expired(now) && !ready(manifest, item))
-                pending.add(item.id());
-        }
-        if (pending.isEmpty())
+        JsonObject references = index.getAsJsonObject();
+        if (references.size() == 0)
             return Map.of();
-        if (references == null)
-            return readInlineAnnouncementFallbacks(index.getAsJsonArray(), pending, now);
 
         Path directory = fallbackDirectory();
         if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS))
@@ -134,13 +126,15 @@ public final class ContentStore {
         } catch (IOException ignored) {
             return Map.of();
         }
+        Instant now = Instant.now();
         Map<String, RemoteContent.Announcement> fallbacks = new LinkedHashMap<>();
-        for (String id : pending) {
+        for (var item : manifest.announcements()) {
+            String id = item.id();
             @Nullable JsonElement reference = references.get(id);
             if (reference == null || !reference.isJsonPrimitive() || !reference.getAsJsonPrimitive().isString())
                 continue;
             String digest = reference.getAsString();
-            if (!digest.matches("[0-9a-f]{64}"))
+            if (!digest.matches("[0-9a-f]{64}") || item.expired(now) || ready(manifest, item))
                 continue;
             try {
                 Path path = directory.resolve(digest + ".json");
@@ -158,22 +152,6 @@ public final class ContentStore {
                     fallbacks.put(id, announcement);
             } catch (IOException | RuntimeException ignored) {
                 // A damaged fallback cannot invalidate the latest manifest or its other entries.
-            }
-        }
-        return Map.copyOf(fallbacks);
-    }
-
-    /// Reads the former inline format so the next state write can move its metadata into snapshot files.
-    private @Unmodifiable Map<String, RemoteContent.Announcement> readInlineAnnouncementFallbacks(
-            JsonArray entries, Set<String> pending, Instant now) {
-        Map<String, RemoteContent.Announcement> fallbacks = new LinkedHashMap<>();
-        for (int i = 0; i < Math.min(entries.size(), 100); i++) {
-            try {
-                var announcement = RemoteContent.readAnnouncement(entries.get(i).getAsJsonObject());
-                if (pending.contains(announcement.item().id()) && !announcement.item().expired(now) && ready(announcement))
-                    fallbacks.putIfAbsent(announcement.item().id(), announcement);
-            } catch (IOException | RuntimeException ignored) {
-                // The remaining valid entries are still usable.
             }
         }
         return Map.copyOf(fallbacks);

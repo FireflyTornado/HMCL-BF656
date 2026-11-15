@@ -17,7 +17,6 @@
  */
 package org.jackhuang.hmcl.remote;
 
-import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import org.jetbrains.annotations.NotNullByDefault;
@@ -232,7 +231,7 @@ final class RemoteContentTest {
         assertThrows(IOException.class, () -> ContentLinks.parse("<!DOCTYPE x [<!ENTITY e SYSTEM 'file:///secret'>]>&e;"));
     }
 
-    /// Migrates a large inline fallback into a hashed snapshot and keeps corrupt snapshots separate from the latest manifest.
+    /// Stores a large inline body in a hashed snapshot and isolates snapshot damage from the latest manifest.
     @Test
     void storesFallbackBodyOutsideSyncIndex() throws Exception {
         String oldBody = "旧公告正文".repeat(20_000);
@@ -249,20 +248,10 @@ final class RemoteContentTest {
 
         String latest = ContentFixtures.markdown("main", "# 新公告", new byte[0]).toString();
         var store = new ContentStore(root, "source");
-        store.cache(new ContentStore.Cache(latest, "\"next\"", Instant.EPOCH));
+        store.cache(new ContentStore.Cache(latest, "\"next\"", Instant.EPOCH, Map.of("news", fallback)));
         Path state = root.resolve("client/state").resolve(RemoteContent.hash("source"));
         Path sync = state.resolve("sync.json");
-        JsonObject legacy = JsonParser.parseString(Files.readString(sync)).getAsJsonObject();
-        JsonArray inline = new JsonArray();
-        inline.add(RemoteContent.writeAnnouncement(fallback));
-        legacy.add("announcementFallbacks", inline);
-        Files.writeString(sync, legacy.toString());
-
         var reopened = new ContentStore(root, "source");
-        var migrated = java.util.Objects.requireNonNull(reopened.cache("main"));
-        assertTrue(migrated.fallbackIndexNeedsRewrite());
-        assertEquals(fallback, migrated.announcementFallbacks().get("news"));
-        reopened.cache(migrated);
 
         String stateText = Files.readString(sync);
         assertTrue(Files.size(sync) < 4_096);
