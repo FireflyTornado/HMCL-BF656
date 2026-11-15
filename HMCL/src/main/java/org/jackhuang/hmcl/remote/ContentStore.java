@@ -126,7 +126,7 @@ public final class ContentStore {
             String body = json.get("body").getAsString();
             RemoteContent.Manifest manifest = RemoteContent.parse(body, instanceKey);
             @Nullable JsonElement index = json.get("announcementFallbacks");
-            var fallbacks = readAnnouncementFallbacks(index, manifest);
+            @Unmodifiable Map<String, RemoteContent.Announcement> fallbacks = readAnnouncementFallbacks(index, manifest);
             boolean rewrite = index != null && (!index.isJsonObject() || index.getAsJsonObject().size() != fallbacks.size());
             Cache cache = new Cache(body, json.get("etag").getAsString(),
                     Instant.parse(json.get("checkedAt").getAsString()), fallbacks, rewrite);
@@ -183,7 +183,7 @@ public final class ContentStore {
                 Path path = directory.resolve(digest + ".json");
                 if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS))
                     continue;
-                byte[] bytes;
+                byte @Unmodifiable [] bytes;
                 try (var stream = Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS)) {
                     bytes = stream.readNBytes(MAX_STATE_BYTES + 1);
                 }
@@ -271,7 +271,8 @@ public final class ContentStore {
             Files.createDirectories(directory);
             checkFallbackDirectory(directory);
             for (var entry : cache.announcementFallbacks().entrySet()) {
-                byte[] snapshot = RemoteContent.writeAnnouncement(entry.getValue()).toString().getBytes(StandardCharsets.UTF_8);
+                byte @Unmodifiable [] snapshot = RemoteContent.writeAnnouncement(entry.getValue()).toString()
+                        .getBytes(StandardCharsets.UTF_8);
                 String digest = RemoteContent.digest(snapshot);
                 String filename = digest + ".json";
                 Path file = directory.resolve(filename);
@@ -434,12 +435,13 @@ public final class ContentStore {
     }
 
     /// Installs hash-verified bytes atomically and records ownership before creating the managed file.
-    public synchronized void install(RemoteContent.Resource resource, byte[] bytes) throws IOException {
+    public synchronized void install(RemoteContent.Resource resource, byte @Unmodifiable [] bytes) throws IOException {
         install(resource, bytes, null);
     }
 
     /// Installs a verified payload while its synchronization session still owns a usage registration.
-    synchronized void install(RemoteContent.Resource resource, byte[] bytes, @Nullable Usage usage) throws IOException {
+    synchronized void install(RemoteContent.Resource resource, byte @Unmodifiable [] bytes, @Nullable Usage usage)
+            throws IOException {
         if (!RemoteContent.digest(bytes).equals(resource.sha256()))
             throw new IOException("SHA-256 mismatch: " + resource.path());
         withInstanceLock(() -> {
@@ -678,7 +680,7 @@ public final class ContentStore {
     }
 
     /// Writes in the destination directory and replaces atomically where the filesystem supports it.
-    private static void write(Path path, byte[] bytes) throws IOException {
+    private static void write(Path path, byte @Unmodifiable [] bytes) throws IOException {
         Files.createDirectories(path.getParent());
         Path temporary = Files.createTempFile(path.getParent(), "content-", ".tmp");
         try {

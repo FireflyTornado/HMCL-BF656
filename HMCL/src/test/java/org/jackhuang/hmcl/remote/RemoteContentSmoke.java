@@ -99,7 +99,7 @@ public final class RemoteContentSmoke {
         var runtime = Launcher.class.getDeclaredMethod("initializeSettingsRuntime");
         runtime.setAccessible(true);
         onFx(() -> { runtime.invoke(null); return true; });
-        byte[] image = image();
+        byte @Unmodifiable [] image = image();
         String markdown = "# Markdown 图文公告\n\n欢迎 **正式服玩家**，支持 *斜体* 与 ~~删除线~~。\n\n"
                 + "![下载并缓存的示例图片](assets/banner.png)\n\n"
                 + "## 活动安排\n\n| 时间 | 活动 |\n| --- | --- |\n| 20:00 | 开始活动 |\n\n"
@@ -113,7 +113,7 @@ public final class RemoteContentSmoke {
         HttpServer http = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         http.createContext("/", exchange -> {
             String path = exchange.getRequestURI().getPath();
-            byte[] bytes;
+            byte @Unmodifiable [] bytes;
             if (path.endsWith("manifest.json")) {
                 boolean first = path.contains("/a/");
                 if (first)
@@ -291,7 +291,7 @@ public final class RemoteContentSmoke {
     }
 
     /// Creates a public fixture catalog with one notice and one local-document protocol.
-    private static JsonObject catalog(String key, String markdown, byte[] image) {
+    private static JsonObject catalog(String key, String markdown, byte @Unmodifiable [] image) {
         JsonObject root = ContentFixtures.markdown(key, markdown, image);
         JsonObject second = root.getAsJsonArray("announcements").get(0).getAsJsonObject().deepCopy();
         second.addProperty("id", "second-news");
@@ -318,7 +318,7 @@ public final class RemoteContentSmoke {
     }
 
     /// Creates an image decoding fixture rather than relying on network-hosted media.
-    private static byte[] image() throws Exception {
+    private static byte @Unmodifiable [] image() throws Exception {
         BufferedImage bitmap = new BufferedImage(420, 110, BufferedImage.TYPE_INT_RGB);
         for (int y = 0; y < bitmap.getHeight(); y++) {
             for (int x = 0; x < bitmap.getWidth(); x++)
@@ -407,12 +407,13 @@ public final class RemoteContentSmoke {
         RemoteContent.Manifest readyManifest = java.util.Objects.requireNonNull(ready.manifest());
         var firstCached = RemoteContent.Announcement.capture(readyManifest, readyManifest.announcements().get(0));
         var secondCached = RemoteContent.Announcement.capture(readyManifest, readyManifest.announcements().get(1));
-        var fallbacks = Map.of(firstCached.item().id(), firstCached, secondCached.item().id(), secondCached);
+        @Unmodifiable Map<String, RemoteContent.Announcement> fallbacks =
+                Map.of(firstCached.item().id(), firstCached, secondCached.item().id(), secondCached);
         var storeField = session.getClass().getDeclaredField("store");
         storeField.setAccessible(true);
         ContentStore store = (ContentStore) storeField.get(session);
         String firstBody = "# 新版公告 A";
-        byte[] secondBody = "# 新版公告 B".getBytes(StandardCharsets.UTF_8);
+        byte @Unmodifiable [] secondBody = "# 新版公告 B".getBytes(StandardCharsets.UTF_8);
         String secondPath = "announcements/second.md";
         JsonObject replacement = catalog("a", firstBody, image);
         JsonArray items = replacement.getAsJsonArray("announcements");

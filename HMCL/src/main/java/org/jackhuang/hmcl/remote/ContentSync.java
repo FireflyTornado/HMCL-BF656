@@ -277,7 +277,7 @@ public final class ContentSync implements AutoCloseable {
                         verification.put(name, verified);
                     }
                     if (!verified) {
-                        byte[] bytes = download(resourceUri(resource), "", 16_777_216, token).bytes();
+                        byte @Unmodifiable [] bytes = download(resourceUri(resource), "", 16_777_216, token).bytes();
                         checkActive(token);
                         store.install(resource, bytes, java.util.Objects.requireNonNull(usage));
                         verification.put(name, true);
@@ -542,7 +542,7 @@ public final class ContentSync implements AutoCloseable {
             if (status != 200)
                 throw new IOException("HTTP " + status);
             try (var input = request.getInputStream()) {
-                byte[] bytes = input.readNBytes(limit + 1);
+                byte @Unmodifiable [] bytes = input.readNBytes(limit + 1);
                 if (bytes.length > limit)
                     throw new IOException("Response exceeds size limit");
                 @Nullable String validator = request.getHeaderField("ETag");
