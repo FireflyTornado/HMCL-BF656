@@ -34,9 +34,11 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
+import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.time.Instant;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -127,6 +129,114 @@ final class ContentSyncTest {
             } finally {
                 releaseOld.countDown();
                 http.stop(0);
+            }
+        }
+    }
+
+    /// Keeps verified announcements visible through a blocked publication and retries against the latest disk state.
+    @Test
+    void publicationContentionKeepsVerifiedAnnouncements() throws Exception {
+        HttpServer http = java.util.Objects.requireNonNull(server);
+        CountDownLatch firstRequest = new CountDownLatch(1);
+        CountDownLatch releaseResponse = new CountDownLatch(1);
+        AtomicInteger requests = new AtomicInteger();
+        JsonObject cached = ContentFixtures.markdown("main", BODY, IMAGE);
+        JsonObject fetched = cached.deepCopy();
+        fetched.getAsJsonObject("agreement").addProperty("revision", 2);
+        JsonObject latest = cached.deepCopy();
+        latest.getAsJsonObject("agreement").addProperty("revision", 3);
+        http.createContext("/", exchange -> {
+            if (requests.incrementAndGet() == 1) {
+                firstRequest.countDown();
+                try {
+                    if (!releaseResponse.await(5, TimeUnit.SECONDS)) {
+                        send(exchange, 503, new byte[0]);
+                        return;
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    exchange.close();
+                    return;
+                }
+            }
+            if ("\"latest\"".equals(exchange.getRequestHeaders().getFirst("If-None-Match"))) {
+                send(exchange, 304, new byte[0]);
+            } else {
+                exchange.getResponseHeaders().add("ETag", "\"fetched\"");
+                send(exchange, 200, fetched.toString().getBytes(StandardCharsets.UTF_8));
+            }
+        });
+        http.start();
+        var config = config();
+        var store = new ContentStore(directory, config.endpoint().toString());
+        var cachedManifest = RemoteContent.parse(cached.toString(), "main");
+        store.cache(new ContentStore.Cache(cached.toString(), "\"cached\"", Instant.EPOCH));
+        store.install(java.util.Objects.requireNonNull(cachedManifest.files().get(ContentFixtures.BODY)),
+                BODY.getBytes(StandardCharsets.UTF_8));
+        store.install(java.util.Objects.requireNonNull(cachedManifest.files().get(ContentFixtures.IMAGE)), IMAGE);
+        var events = new LinkedBlockingQueue<ContentSync.Result>();
+        try (var sync = new ContentSync(config, store, events::add, new long[]{0})) {
+            sync.activate();
+            assertTrue(firstRequest.await(5, TimeUnit.SECONDS));
+            var initial = java.util.Objects.requireNonNull(events.poll(5, TimeUnit.SECONDS));
+            assertTrue(initial.readyAnnouncements().contains("news"));
+            Path ready = directory.resolve("publication-lock-held");
+            Path javaExecutable = Path.of(System.getProperty("java.home"), "bin", "java");
+            if (!Files.isRegularFile(javaExecutable))
+                javaExecutable = javaExecutable.resolveSibling("java.exe");
+            Path classes = Path.of(PublicationLockPeer.class.getProtectionDomain().getCodeSource().getLocation().toURI());
+            Process peer = new ProcessBuilder(javaExecutable.toString(), "-cp", classes.toString(), PublicationLockPeer.class.getName(),
+                    directory.resolve("client/content.lock").toString(), ready.toString()).redirectErrorStream(true).start();
+            try {
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (!Files.exists(ready) && peer.isAlive() && System.nanoTime() < deadline)
+                    Thread.sleep(20);
+                assertTrue(Files.exists(ready), "The other process must hold the publication lock");
+                releaseResponse.countDown();
+                var waiting = java.util.Objects.requireNonNull(events.poll(5, TimeUnit.SECONDS));
+                assertTrue(waiting.publicationBlocked());
+                assertFalse(waiting.exhausted());
+                assertEquals(cachedManifest, waiting.manifest());
+                assertTrue(waiting.readyAnnouncements().contains("news"));
+                assertNull(waiting.agreementManifest());
+                var exhausted = awaitFinal(events, false);
+                assertEquals(cachedManifest, exhausted.manifest());
+                assertTrue(exhausted.readyAnnouncements().contains("news"));
+                assertNull(exhausted.agreementManifest());
+                assertEquals(2, requests.get());
+                peer.getOutputStream().close();
+                assertTrue(peer.waitFor(5, TimeUnit.SECONDS));
+                assertEquals(0, peer.exitValue());
+            } finally {
+                if (peer.isAlive()) {
+                    peer.destroyForcibly();
+                    peer.waitFor(5, TimeUnit.SECONDS);
+                }
+            }
+            assertEquals(cached.toString(), java.util.Objects.requireNonNull(store.cache("main")).body());
+            new ContentStore(directory, config.endpoint().toString()).cache(
+                    new ContentStore.Cache(latest.toString(), "\"latest\"", Instant.now()));
+            sync.retryFailed();
+            var complete = awaitFinal(events, true);
+            assertFalse(complete.publicationBlocked());
+            assertEquals(3, java.util.Objects.requireNonNull(complete.agreementManifest()).agreement().revision());
+            assertTrue(complete.readyAnnouncements().contains("news"));
+            assertEquals(latest.toString(), java.util.Objects.requireNonNull(store.cache("main")).body());
+            assertEquals(3, requests.get());
+        } finally {
+            releaseResponse.countDown();
+        }
+    }
+
+    /// Holds the actual publication lock from another JVM.
+    @NotNullByDefault
+    public static final class PublicationLockPeer {
+        /// Releases the lock when the parent closes the input pipe.
+        public static void main(String @Unmodifiable [] args) throws Exception {
+            try (var channel = FileChannel.open(Path.of(args[0]), StandardOpenOption.WRITE);
+                 var lock = channel.lock()) {
+                Files.createFile(Path.of(args[1]));
+                System.in.read();
             }
         }
     }

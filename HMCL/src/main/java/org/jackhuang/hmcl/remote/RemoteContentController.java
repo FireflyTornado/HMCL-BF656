@@ -324,9 +324,9 @@ public final class RemoteContentController {
             return;
         Session owner = request.session;
         @Nullable ContentSync.Result result = owner.result;
-        @Nullable RemoteContent.Manifest manifest = result == null ? null : result.manifest();
+        @Nullable RemoteContent.Manifest manifest = result == null ? null : result.agreementManifest();
         String problem = owner.error == null ? "正在检查此实例的用户协议…" : owner.error;
-        if (owner.store != null && owner.config != null && manifest != null && !(result.cached() && result.pending())) {
+        if (owner.store != null && owner.config != null && manifest != null) {
             try {
                 ContentDocuments.validate(owner.root, manifest, manifest.agreement(), owner.store, owner.config.endpoint(), true);
                 if (owner.store.accepted(manifest)) {
@@ -502,9 +502,9 @@ public final class RemoteContentController {
                         pane.saving = false;
                         pane.setDisable(false);
                     }
-                    @Nullable ContentSync.Result latest = owner.result;
-                    if (valid(request) && latest != null && latest.manifest() != null
-                            && latest.manifest().key(latest.manifest().agreement()).equals(manifest.key(manifest.agreement())))
+                    @Nullable RemoteContent.Manifest latest = owner.result == null ? null : owner.result.agreementManifest();
+                    if (valid(request) && latest != null
+                            && latest.key(latest.agreement()).equals(manifest.key(manifest.agreement())))
                         resume(request);
                     else if (valid(request))
                         checkLaunch(request);

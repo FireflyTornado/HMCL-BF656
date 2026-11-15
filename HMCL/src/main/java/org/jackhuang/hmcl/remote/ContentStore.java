@@ -223,6 +223,15 @@ public final class ContentStore {
         }
     }
 
+    /// Signals that the protected operation could not start because another launcher holds the lock.
+    @NotNullByDefault
+    static final class CacheBusyException extends IOException {
+        /// Describes temporary contention for the instance cache.
+        private CacheBusyException() {
+            super("Another launcher is saving this instance's content cache");
+        }
+    }
+
     /// Compares the expected fingerprint while publication and file cleanup hold the same instance lock.
     private DiskState checkCacheVersion(String expectedVersion) throws IOException {
         DiskState state = readSyncState();
@@ -246,11 +255,18 @@ public final class ContentStore {
         checkFallbackDirectory(client);
         synchronized (CACHE_WRITE_LOCK) {
             try (var channel = FileChannel.open(client.resolve("content.lock"), StandardOpenOption.CREATE,
-                    StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
-                 @Nullable FileLock lock = channel.tryLock()) {
+                    StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
+                @Nullable FileLock lock;
+                try {
+                    lock = channel.tryLock();
+                } catch (OverlappingFileLockException e) {
+                    throw new CacheBusyException();
+                }
                 if (lock == null)
-                    throw new IOException("Another launcher is saving this instance's content cache");
-                return operation.run();
+                    throw new CacheBusyException();
+                try (lock) {
+                    return operation.run();
+                }
             }
         }
     }

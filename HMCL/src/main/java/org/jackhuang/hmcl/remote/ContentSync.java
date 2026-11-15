@@ -75,6 +75,8 @@ public final class ContentSync implements AutoCloseable {
     private boolean cacheDirty;
     /// Whether the manifest has been checked successfully during this process session.
     private boolean checked;
+    /// Whether a manifest check reached publication but could not acquire the instance lock.
+    private boolean publicationBlocked;
     /// Whether all current resources are available and no automatic requests remain necessary.
     private boolean success;
     /// Whether this instance is selected and allowed to issue requests.
@@ -133,17 +135,32 @@ public final class ContentSync implements AutoCloseable {
                          @Unmodifiable Map<String, RemoteContent.Announcement> announcementFallbacks,
                          @Unmodifiable Set<String> readyAnnouncements,
                          boolean cached, boolean pending,
-                         boolean success, @Nullable Instant checkedAt, @Nullable String error, boolean exhausted) {
+                         boolean success, @Nullable Instant checkedAt, @Nullable String error, boolean exhausted,
+                         boolean publicationBlocked) {
         /// Detaches the presentation state from the mutable verification run.
         public Result {
             announcementFallbacks = Map.copyOf(announcementFallbacks);
             readyAnnouncements = Set.copyOf(readyAnnouncements);
         }
 
+        /// Creates a result without a blocked publication.
+        public Result(@Nullable RemoteContent.Manifest manifest,
+                      @Unmodifiable Map<String, RemoteContent.Announcement> announcementFallbacks,
+                      @Unmodifiable Set<String> readyAnnouncements, boolean cached, boolean pending,
+                      boolean success, @Nullable Instant checkedAt, @Nullable String error, boolean exhausted) {
+            this(manifest, announcementFallbacks, readyAnnouncements, cached, pending, success, checkedAt, error,
+                    exhausted, false);
+        }
+
         /// Creates a result for callers that have no announcement fallbacks.
         public Result(@Nullable RemoteContent.Manifest manifest, boolean cached, boolean pending, boolean success,
                       @Nullable Instant checkedAt, @Nullable String error, boolean exhausted) {
             this(manifest, Map.of(), Set.of(), cached, pending, success, checkedAt, error, exhausted);
+        }
+
+        /// Returns the manifest once its agreement can be used for a launch decision.
+        @Nullable RemoteContent.Manifest agreementManifest() {
+            return publicationBlocked || (cached && pending) ? null : manifest;
         }
     }
 
@@ -356,6 +373,9 @@ public final class ContentSync implements AutoCloseable {
                     throw e;
                 emit(token, verification, true, null);
                 continue;
+            } catch (ContentStore.CacheBusyException e) {
+                publicationBlocked = true;
+                throw e;
             } catch (IOException e) {
                 clearCacheState();
                 throw e;
@@ -366,6 +386,7 @@ public final class ContentSync implements AutoCloseable {
             cache = replacement;
             cacheDirty = false;
             checked = true;
+            publicationBlocked = false;
             return;
         }
     }
@@ -422,6 +443,8 @@ public final class ContentSync implements AutoCloseable {
 
     /// Retains current resources and files still owned by an available fallback revision.
     private boolean cleanup(Map<String, Boolean> verification) {
+        if (publicationBlocked)
+            return true;
         try {
             @Nullable RemoteContent.Manifest current = manifest;
             @Nullable ContentStore.Usage registered = usage;
@@ -493,7 +516,7 @@ public final class ContentSync implements AutoCloseable {
                 : selectAnnouncementFallbacks(current, null, now, verification);
         if (!worker.isShutdown() && generation == token)
             listener.accept(new Result(current, fallbacks, ready, !checked, pending, success,
-                    cache == null ? null : cache.checkedAt(), error, failures > retrySeconds.length));
+                    cache == null ? null : cache.checkedAt(), error, failures > retrySeconds.length, publicationBlocked));
     }
 
     /// Conditional manifest request is the only network work when all referenced files are unchanged.
