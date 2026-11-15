@@ -119,9 +119,10 @@ public final class ContentSync implements AutoCloseable {
         }
     }
 
-    /// Snapshot carries latest known metadata even when a newer agreement's file is still unavailable.
+    /// Carries current metadata and the previous manifest whose retained files can still be displayed.
     @NotNullByDefault
-    public record Result(@Nullable RemoteContent.Manifest manifest, boolean cached, boolean pending,
+    public record Result(@Nullable RemoteContent.Manifest manifest, @Nullable RemoteContent.Manifest previousManifest,
+                         boolean cached, boolean pending,
                          boolean success, @Nullable Instant checkedAt, @Nullable String error, boolean exhausted) { }
 
     /// Creates a session with production retry intervals.
@@ -206,7 +207,8 @@ public final class ContentSync implements AutoCloseable {
                 ContentStore.Cache fresh = downloadManifest(token);
                 RemoteContent.Manifest next = RemoteContent.parse(fresh.body(), config.instanceKey());
                 checkActive(token);
-                previous = manifest;
+                if (!next.equals(manifest))
+                    previous = manifest;
                 manifest = next;
                 cache = fresh;
                 store.cache(fresh);
@@ -303,7 +305,7 @@ public final class ContentSync implements AutoCloseable {
     /// Delivers ordered snapshots; cancellation checks prevent old selection generations from updating the UI.
     private void emit(boolean pending, @Nullable String error) {
         if (!worker.isShutdown())
-            listener.accept(new Result(manifest, !checked, pending, success,
+            listener.accept(new Result(manifest, previous, !checked, pending, success,
                     cache == null ? null : cache.checkedAt(), error, failures > retrySeconds.length));
     }
 

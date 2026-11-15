@@ -341,8 +341,10 @@ public final class MainPage extends StackPane implements DecoratorPage {
         serverStatus.setHomeVisible(visible);
     }
 
-    /// Replaces the server announcement card, restoring the upstream channel hint when none is visible.
+    /// Updates the announcement slot, retaining the same node across repeated loading updates.
     public void setRemoteAnnouncements(@Nullable Region card) {
+        if (remoteAnnouncements == card)
+            return;
         if (remoteAnnouncements != null)
             getChildren().remove(remoteAnnouncements);
         remoteAnnouncements = card;
