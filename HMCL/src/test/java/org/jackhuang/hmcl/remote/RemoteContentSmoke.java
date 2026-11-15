@@ -175,14 +175,18 @@ public final class RemoteContentSmoke {
         await(() -> decorator.getRoot().lookup("#bf656-announcement-feed") != null);
         onFx(() -> { snapshot(scene, output.resolve("instance-debug.png")); return true; });
         await(() -> imageReady(decorator.getRoot()));
+        await(() -> {
+            @Nullable ContentSync.Result result = currentSyncResult();
+            return result != null && result.success();
+        });
         onFx(() -> {
             require(decorator.getRoot().lookup("#bf656-instance-agreement") == null, "Selecting must not present a protocol");
             snapshot(scene, output.resolve("instance-notice.png"));
             findButton(decorator.getRoot(), "我已知晓").fire();
             require(decorator.getRoot().lookup("#bf656-announcement-loading") == null,
-                    "A ready announcement feed must replace the placeholder");
+                    "The loading card must close once all announcements are ready");
             verifyAnnouncements(scene, output);
-            verifyAnnouncementStates(scene, catalog("a", "# Replacement awaiting a download", image));
+            verifyAnnouncementStates(scene, output, image);
             return true;
         });
         AtomicInteger launchedA = new AtomicInteger();
@@ -339,8 +343,14 @@ public final class RemoteContentSmoke {
         throw new AssertionError("Desktop condition timed out");
     }
 
-    /// Observes completed model state without adding production-only test hooks.
+    /// Observes the selected protocol revision without adding production-only test hooks.
     private static int currentRevision() {
+        @Nullable ContentSync.Result snapshot = currentSyncResult();
+        return snapshot == null || snapshot.manifest() == null ? 0 : snapshot.manifest().agreement().revision();
+    }
+
+    /// Reads the selected instance's latest synchronization result.
+    private static @Nullable ContentSync.Result currentSyncResult() {
         try {
             var manager = RemoteContentController.class.getDeclaredField("instance");
             manager.setAccessible(true);
@@ -349,8 +359,7 @@ public final class RemoteContentSmoke {
             Object session = current.get(manager.get(null));
             var result = session.getClass().getDeclaredField("result");
             result.setAccessible(true);
-            @Nullable ContentSync.Result snapshot = (ContentSync.Result) result.get(session);
-            return snapshot == null || snapshot.manifest() == null ? 0 : snapshot.manifest().agreement().revision();
+            return (ContentSync.Result) result.get(session);
         } catch (ReflectiveOperationException e) {
             throw new AssertionError(e);
         }
@@ -362,7 +371,8 @@ public final class RemoteContentSmoke {
         require(card != null && card.isVisible(), "The announcement placeholder must be visible");
         Node loading = java.util.Objects.requireNonNull(card);
         StackPane slot = (StackPane) java.util.Objects.requireNonNull(loading.getParent());
-        require(slot.isMouseTransparent(), "The announcement placeholder must allow pointer input through its entire slot");
+        require(loading.isMouseTransparent() && !slot.isPickOnBounds(),
+                "The loading card and the slot background must allow pointer input through");
         Node spinner = java.util.Objects.requireNonNull(loading.lookup(".jfx-spinner"));
         Label label = (Label) java.util.Objects.requireNonNull(loading.lookup(".label"));
         require(!spinner.isFocusTraversable() && "加载中...".equals(label.getText()),
@@ -376,13 +386,14 @@ public final class RemoteContentSmoke {
                         - margin.getBottom())) <= 1,
                 "The placeholder slot must fill the content area above the launch controls");
         var bounds = loading.getLayoutBounds();
-        require(Math.abs(loading.getLayoutX() + bounds.getWidth() / 2 - slot.getWidth() / 2) <= 1
-                        && Math.abs(loading.getLayoutY() + bounds.getHeight() / 2 - slot.getHeight() / 2) <= 1,
-                "The loading card must be centered horizontally and vertically in the announcement slot");
+        var overlayMargin = java.util.Objects.requireNonNull(StackPane.getMargin(loading));
+        require(Math.abs(loading.getLayoutX() + bounds.getWidth() + overlayMargin.getRight() - slot.getWidth()) <= 1
+                        && Math.abs(loading.getLayoutY() + bounds.getHeight() + overlayMargin.getBottom() - slot.getHeight()) <= 1,
+                "The loading card must align with the lower-right corner of the announcement slot");
     }
 
     /// Replays replacement, empty and exhausted results for the selected instance with its real cached files.
-    private static void verifyAnnouncementStates(Scene scene, JsonObject replacement) throws Exception {
+    private static void verifyAnnouncementStates(Scene scene, Path output, byte @Unmodifiable [] image) throws Exception {
         var manager = RemoteContentController.class.getDeclaredField("instance");
         manager.setAccessible(true);
         Object controller = manager.get(null);
@@ -392,6 +403,22 @@ public final class RemoteContentSmoke {
         var result = session.getClass().getDeclaredField("result");
         result.setAccessible(true);
         ContentSync.Result ready = (ContentSync.Result) result.get(session);
+        var storeField = session.getClass().getDeclaredField("store");
+        storeField.setAccessible(true);
+        ContentStore store = (ContentStore) storeField.get(session);
+        String firstBody = "# 新版公告 A";
+        byte[] secondBody = "# 新版公告 B".getBytes(StandardCharsets.UTF_8);
+        String secondPath = "announcements/second.md";
+        JsonObject replacement = catalog("a", firstBody, image);
+        JsonArray items = replacement.getAsJsonArray("announcements");
+        JsonObject first = items.get(0).getAsJsonObject();
+        JsonObject second = items.get(1).getAsJsonObject();
+        first.addProperty("revision", 2);
+        first.addProperty("title", "新版公告 A");
+        second.addProperty("revision", 2);
+        second.addProperty("title", "新版公告 B");
+        second.addProperty("contentFile", secondPath);
+        ContentFixtures.file(replacement, secondPath, secondBody);
         RemoteContent.Manifest missing = RemoteContent.parse(replacement.toString(), "a");
         replacement.add("announcements", new JsonArray());
         RemoteContent.Manifest empty = RemoteContent.parse(replacement.toString(), "a");
@@ -400,11 +427,29 @@ public final class RemoteContentSmoke {
         Parent root = scene.getRoot();
         try {
             receive.invoke(controller, session, new ContentSync.Result(missing, ready.manifest(), false, true, false, null, null, false));
-            require(root.lookup("#bf656-announcement-feed") != null && root.lookup("#bf656-announcement-loading") == null,
-                    "Ready cached files must remain visible while their replacement downloads");
-            receive.invoke(controller, session, new ContentSync.Result(missing, null, false, false, false, null, null, false));
+            verifyAnnouncementTitles(root, "服务器公告", "第二条独立公告");
+            require(root.lookup("#bf656-announcement-loading") != null, "Keep the loading card next to ready cache");
+            store.install(missing.files().get(ContentFixtures.BODY), firstBody.getBytes(StandardCharsets.UTF_8));
+            receive.invoke(controller, session, new ContentSync.Result(missing, ready.manifest(), false, true, false, null, null, false));
+            verifyAnnouncementTitles(root, "新版公告 A", "第二条独立公告");
+            require(root.lookup("#bf656-announcement-loading") != null, "Keep the loading card next to a partial feed");
+            snapshot(scene, output.resolve("announcements-partially-loaded.png"));
+            ScrollPane feed = (ScrollPane) java.util.Objects.requireNonNull(root.lookup("#bf656-announcement-feed"));
+            Node overlay = java.util.Objects.requireNonNull(root.lookup("#bf656-announcement-loading"));
+            StackPane slot = (StackPane) java.util.Objects.requireNonNull(feed.getParent());
+            require(slot.getChildren().getLast() == overlay && overlay.isMouseTransparent(),
+                    "The loading card must be above the feed and pass pointer input through");
+            require(Math.abs(feed.getHeight() - slot.getHeight()) <= 1,
+                    "The feed must retain the full announcement viewport while the loading card is visible");
+            store.install(missing.files().get(secondPath), secondBody);
+            receive.invoke(controller, session, new ContentSync.Result(missing, ready.manifest(), false, true, false, null, null, false));
+            verifyAnnouncementTitles(root, "新版公告 A", "新版公告 B");
+            require(root.lookup("#bf656-announcement-loading") == null, "Hide the card once the active announcements are ready");
+            JsonObject pending = catalog("a", "# Another replacement", image);
+            RemoteContent.Manifest waiting = RemoteContent.parse(pending.toString(), "a");
+            receive.invoke(controller, session, new ContentSync.Result(waiting, null, false, false, false, null, null, false));
             require(root.lookup("#bf656-announcement-loading") != null, "A scheduled retry must keep the loading card");
-            receive.invoke(controller, session, new ContentSync.Result(missing, null, false, false, false, null, null, true));
+            receive.invoke(controller, session, new ContentSync.Result(waiting, null, false, false, false, null, null, true));
             require(root.lookup("#bf656-announcement-loading") == null, "Exhausting retries must remove the loading card");
             receive.invoke(controller, session, new ContentSync.Result(empty, ready.manifest(), false, true, false, null, null, false));
             require(root.lookup("#bf656-announcement-feed") == null && root.lookup("#bf656-announcement-loading") == null,
@@ -412,6 +457,17 @@ public final class RemoteContentSmoke {
         } finally {
             receive.invoke(controller, session, ready);
         }
+    }
+
+    /// Confirms that both IDs appear exactly once with the selected revisions.
+    private static void verifyAnnouncementTitles(Parent root, String first, String second) {
+        ScrollPane feed = (ScrollPane) java.util.Objects.requireNonNull(root.lookup("#bf656-announcement-feed"));
+        VBox entries = (VBox) feed.getContent();
+        require(entries.getChildren().size() == 2, "The feed must contain both eligible announcements exactly once");
+        Node firstToggle = java.util.Objects.requireNonNull(entries.getChildren().get(0).lookup("#bf656-announcement-toggle-news"));
+        Node secondToggle = java.util.Objects.requireNonNull(entries.getChildren().get(1).lookup("#bf656-announcement-toggle-second-news"));
+        require(firstToggle.getAccessibleText().endsWith(first) && secondToggle.getAccessibleText().endsWith(second),
+                "Each entry must display its newest ready revision in the order of the current manifest");
     }
 
     /// Replays a normal sync callback without a network request or a new launch request.
