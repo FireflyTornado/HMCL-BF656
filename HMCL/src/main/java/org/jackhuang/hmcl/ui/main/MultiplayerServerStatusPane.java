@@ -214,7 +214,6 @@ final class MultiplayerServerStatusPane extends HBox {
         refreshButton.setAccessibleText(i18n("button.refresh"));
         refreshButton.setGraphic(refreshIcon);
         refreshButton.setOnAction(event -> refresh());
-        refreshButton.managedProperty().bind(refreshButton.visibleProperty());
         getChildren().setAll(details, refreshButton);
 
         filePoll.setCycleCount(Animation.INDEFINITE);
@@ -360,7 +359,9 @@ final class MultiplayerServerStatusPane extends HBox {
     private void setListError(@Nullable ListError error) {
         listError = error;
         refreshButton.setVisible(error == null);
-        status.setWrapText(error != null);
+        @Nullable String hint = error == ListError.UNREADABLE ? i18n("bf656.server_status.list_unreadable") : null;
+        status.setTooltip(hint == null ? null : new Tooltip(hint));
+        status.setAccessibleText(hint);
         if (error != null) {
             name.setText(i18n("bf656.server_status.title"));
             status.setText(i18n(error.messageKey));
@@ -572,7 +573,7 @@ final class MultiplayerServerStatusPane extends HBox {
         /// The list exceeded a parser or display resource budget.
         TOO_LARGE("bf656.server_status.list_too_large"),
         /// The list could not be read after allowing time for an in-progress save.
-        UNREADABLE("bf656.server_status.list_unreadable");
+        UNREADABLE("bf656.server_status.list_unreadable.short");
 
         /// Localized status message for this failure.
         private final String messageKey;

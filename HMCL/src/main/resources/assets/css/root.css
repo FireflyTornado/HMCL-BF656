@@ -499,6 +499,13 @@
 }
 
 .multiplayer-server-name,
+.multiplayer-server-selector,
+.multiplayer-server-message {
+    -fx-min-height: 18px;
+    -fx-max-height: 18px;
+}
+
+.multiplayer-server-name,
 .multiplayer-server-selector > .label {
     -fx-text-fill: -monet-on-surface;
     -fx-font-size: 13px;
