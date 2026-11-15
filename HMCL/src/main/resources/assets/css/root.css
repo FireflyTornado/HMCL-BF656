@@ -495,7 +495,6 @@
     -fx-pref-width: 230px;
     -fx-pref-height: 55px;
     -fx-padding: 5px 8px 5px 12px;
-    -fx-background-color: -monet-surface-container-high;
     -fx-background-radius: 4px;
 }
 
@@ -1149,8 +1148,13 @@
     -fx-padding: 8px;
 }
 
-.card {
+.card,
+.card-no-padding,
+.multiplayer-server-status {
     -fx-background-color: -monet-surface-container-low-transparent-80;
+}
+
+.card {
     -fx-background-radius: 4;
     -fx-padding: 8px;
 
@@ -1158,7 +1162,6 @@
 }
 
 .card-no-padding {
-    -fx-background-color: -monet-surface-container-low-transparent-80;
     -fx-background-radius: 4;
 
     -fx-effect: dropshadow(gaussian, rgba(0, 0, 0, 0.26), 10, 0.12, -1, 2);
