@@ -87,10 +87,11 @@ public class RootPage extends DecoratorAnimatedPage implements DecoratorPage {
         getLeft().getStyleClass().add("gray-background");
     }
 
-    /// Refreshes only when this home page is shown or returned to in the logical main window.
+    /// Updates the greeting and multiplayer status when the logical home page enters or leaves view.
     @Override
     public void onPageVisibilityChanged(boolean visible) {
         greetingRefresh.setVisible(visible);
+        getMainPage().setHomeVisible(visible);
     }
 
     @Override

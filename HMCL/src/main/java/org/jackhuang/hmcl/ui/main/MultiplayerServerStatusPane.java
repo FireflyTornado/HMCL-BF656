@@ -1,0 +1,415 @@
+/*
+ * Hello Minecraft! Launcher
+ * Copyright (C) 2021  huangyuhui <huanghongxun2008@126.com> and contributors
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+package org.jackhuang.hmcl.ui.main;
+
+import com.jfoenix.controls.JFXButton;
+import javafx.animation.Animation;
+import javafx.animation.KeyFrame;
+import javafx.animation.PauseTransition;
+import javafx.animation.Timeline;
+import javafx.application.Platform;
+import javafx.beans.value.ObservableValue;
+import javafx.css.PseudoClass;
+import javafx.geometry.Pos;
+import javafx.geometry.Side;
+import javafx.scene.Node;
+import javafx.scene.Scene;
+import javafx.scene.control.Label;
+import javafx.scene.control.MenuButton;
+import javafx.scene.control.MenuItem;
+import javafx.scene.control.ProgressIndicator;
+import javafx.scene.layout.HBox;
+import javafx.scene.layout.Priority;
+import javafx.scene.layout.Region;
+import javafx.scene.layout.VBox;
+import javafx.stage.Stage;
+import javafx.util.Duration;
+import org.glavo.nbt.tag.ByteTag;
+import org.glavo.nbt.tag.CompoundTag;
+import org.glavo.nbt.tag.ListTag;
+import org.glavo.nbt.tag.StringTag;
+import org.glavo.nbt.tag.Tag;
+import org.jackhuang.hmcl.game.HMCLGameInstance;
+import org.jackhuang.hmcl.task.Schedulers;
+import org.jackhuang.hmcl.ui.SVG;
+import org.jackhuang.hmcl.ui.main.MinecraftServerStatus.Result;
+import org.jackhuang.hmcl.util.NBTUtils;
+import org.jackhuang.hmcl.util.javafx.BindingMapping;
+import org.jetbrains.annotations.NotNullByDefault;
+import org.jetbrains.annotations.Nullable;
+import org.jetbrains.annotations.Unmodifiable;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
+import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.attribute.FileTime;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
+
+import static org.jackhuang.hmcl.util.i18n.I18n.i18n;
+
+/// Shows the current instance's saved multiplayer servers and refreshes the selected server while home is visible.
+@NotNullByDefault
+final class MultiplayerServerStatusPane extends HBox {
+    /// Highlights the dot after a valid response is received.
+    private static final PseudoClass ONLINE = PseudoClass.getPseudoClass("online");
+    /// Highlights the dot after the selected server fails to respond.
+    private static final PseudoClass UNREACHABLE = PseudoClass.getPseudoClass("unreachable");
+
+    /// Shows the saved name when there is only one server.
+    private final Label name = new Label();
+    /// Selects a saved server when multiple entries are present.
+    private final MenuButton selector = new MenuButton();
+    /// Displays the latest status, player counts and latency.
+    private final Label status = new Label();
+    /// Indicates query state independently of the theme's text color.
+    private final Region dot = new Region();
+    /// Immediately refreshes the selected server with keyboard and mouse activation.
+    private final JFXButton refreshButton = new JFXButton();
+    /// Indicates an in-progress query in the refresh button.
+    private final ProgressIndicator spinner = new ProgressIndicator();
+    /// Default graphic restored when the current query finishes.
+    private final Node refreshIcon = SVG.REFRESH.createIcon(18);
+    /// Holds the title control and the state line.
+    private final VBox details = new VBox(1);
+    /// Re-reads the file after a save without depending on directory-watch support.
+    private final Timeline filePoll = new Timeline(new KeyFrame(Duration.seconds(2), event -> readList(false)));
+    /// Schedules the next query relative to the last completion.
+    private final PauseTransition autoRefresh = new PauseTransition(Duration.seconds(30));
+    /// Coalesces concurrent requests to the same server address.
+    private final Map<String, CompletableFuture<@Nullable Result>> requests = new HashMap<>();
+    /// Follows the launcher window through stage replacement and minimization.
+    private final ObservableValue<Boolean> iconified = BindingMapping.of(sceneProperty())
+            .flatMap((@Nullable Scene scene) -> scene == null ? null : scene.windowProperty(), () -> null)
+            .flatMap(window -> window instanceof Stage stage ? stage.iconifiedProperty() : null, () -> false);
+
+    /// Instance whose run directory provides the server list.
+    private @Nullable HMCLGameInstance game;
+    /// File in the current run directory, which may change with instance settings.
+    private @Nullable Path file;
+    /// Version of the list file successfully applied to the controls.
+    private @Nullable FileVersion fileVersion;
+    /// Guards against applying an obsolete file read after an instance or visibility change.
+    private int listRevision;
+    /// Whether a file check is already running for the active list revision.
+    private boolean readingList;
+    /// Entries from the last successful read, in file order.
+    private @Unmodifiable List<SavedServer> servers = List.of();
+    /// Currently selected entry from the file.
+    private @Nullable SavedServer selected;
+    /// Guards the status and loading state against results for a previous selection.
+    private int targetRevision;
+    /// Whether the status card is following the logical homepage.
+    private boolean homeVisible;
+    /// Whether the homepage is visible and the stage is not minimized.
+    private boolean active;
+    /// Whether a query completion is already registered for the selected target.
+    private boolean refreshing;
+
+    /// Builds the card and binds its activity to the homepage and stage.
+    MultiplayerServerStatusPane() {
+        super(8);
+        getStyleClass().add("multiplayer-server-status");
+        setAlignment(Pos.CENTER_LEFT);
+        setMaxSize(USE_PREF_SIZE, USE_PREF_SIZE);
+        setAccessibleText(i18n("bf656.server_status.title"));
+        setVisible(false);
+        managedProperty().bind(visibleProperty());
+
+        name.getStyleClass().add("multiplayer-server-name");
+        name.setMaxWidth(Double.MAX_VALUE);
+        name.setMinWidth(0);
+        selector.getStyleClass().add("multiplayer-server-selector");
+        selector.setMaxWidth(Double.MAX_VALUE);
+        selector.setMinWidth(0);
+        selector.setPopupSide(Side.TOP);
+
+        dot.getStyleClass().add("multiplayer-server-dot");
+        dot.setMinSize(7, 7);
+        dot.setMaxSize(7, 7);
+        status.getStyleClass().add("multiplayer-server-message");
+        status.setMinWidth(0);
+        HBox statusLine = new HBox(6, dot, status);
+        statusLine.setAlignment(Pos.CENTER_LEFT);
+        details.setAlignment(Pos.CENTER_LEFT);
+        details.setMinWidth(0);
+        details.getChildren().setAll(name, statusLine);
+        HBox.setHgrow(details, Priority.ALWAYS);
+
+        spinner.setMinSize(16, 16);
+        spinner.setPrefSize(16, 16);
+        spinner.setMaxSize(16, 16);
+        refreshButton.getStyleClass().add("multiplayer-server-refresh");
+        refreshButton.setAccessibleText(i18n("button.refresh"));
+        refreshButton.setGraphic(refreshIcon);
+        refreshButton.setOnAction(event -> refresh());
+        getChildren().setAll(details, refreshButton);
+
+        filePoll.setCycleCount(Animation.INDEFINITE);
+        autoRefresh.setOnFinished(event -> refresh());
+        iconified.addListener((observable, previous, current) -> updateActivity());
+    }
+
+    /// Switches to a newly selected game and forgets the previous game's selection.
+    void setGame(@Nullable HMCLGameInstance game) {
+        if (this.game == game)
+            return;
+        this.game = game;
+        resetList(null);
+        readList(false);
+    }
+
+    /// Starts or pauses work as the launcher navigates to or away from home.
+    void setHomeVisible(boolean visible) {
+        homeVisible = visible;
+        updateActivity();
+    }
+
+    /// Runs the file check and status polling only while the homepage is visible.
+    private void updateActivity() {
+        boolean shouldRun = homeVisible && !Boolean.TRUE.equals(iconified.getValue());
+        if (shouldRun == active)
+            return;
+        active = shouldRun;
+        if (active) {
+            readList(true);
+            filePoll.playFromStart();
+        } else {
+            filePoll.stop();
+            autoRefresh.stop();
+            selector.hide();
+            listRevision++;
+            readingList = false;
+        }
+    }
+
+    /// Clears list state and invalidates any outstanding read when its source changes.
+    private void resetList(@Nullable Path nextFile) {
+        file = nextFile;
+        fileVersion = null;
+        listRevision++;
+        readingList = false;
+        selector.hide();
+        servers = List.of();
+        rebuildMenu();
+        select(null);
+    }
+
+    /// Checks the selected instance's file off the FX thread, applying only the current source's result.
+    private void readList(boolean refreshOnReturn) {
+        @Nullable HMCLGameInstance currentGame = game;
+        if (!active || currentGame == null)
+            return;
+
+        Path resolved = currentGame.getRunDirectory().resolve("servers.dat");
+        if (!resolved.equals(file))
+            resetList(resolved);
+        if (readingList)
+            return;
+
+        readingList = true;
+        int revision = listRevision;
+        @Nullable FileVersion previous = refreshOnReturn ? null : fileVersion;
+        Schedulers.io().execute(() -> {
+            @Nullable ServerList updated = readFile(resolved, previous);
+            Platform.runLater(() -> {
+                if (revision != listRevision)
+                    return;
+                readingList = false;
+                if (updated != null)
+                    applyList(updated);
+                if (refreshOnReturn)
+                    refresh();
+            });
+        });
+    }
+
+    /// Applies saved entries and retains the current selection if it can be matched after a save.
+    private void applyList(ServerList updated) {
+        fileVersion = updated.version();
+        if (servers.equals(updated.entries()))
+            return;
+
+        servers = updated.entries();
+        rebuildMenu();
+        @Nullable SavedServer previous = selected;
+        @Nullable SavedServer next = null;
+        if (previous != null) {
+            if (servers.contains(previous)) {
+                next = previous;
+            } else {
+                List<SavedServer> byAddress = servers.stream()
+                        .filter(server -> server.address().equals(previous.address())).toList();
+                if (byAddress.size() == 1)
+                    next = byAddress.get(0);
+                else if (byAddress.isEmpty()) {
+                    List<SavedServer> byName = servers.stream()
+                            .filter(server -> server.name().equals(previous.name())).toList();
+                    if (byName.size() == 1)
+                        next = byName.get(0);
+                }
+            }
+        }
+        if (next == null && !servers.isEmpty())
+            next = servers.get(0);
+        select(next);
+    }
+
+    /// Rebuilds the popup in the same order as the saved multiplayer list.
+    private void rebuildMenu() {
+        selector.getItems().clear();
+        for (SavedServer server : servers) {
+            MenuItem item = new MenuItem(server.name());
+            item.setOnAction(event -> select(server));
+            selector.getItems().add(item);
+        }
+        Node title = servers.size() > 1 ? selector : name;
+        if (details.getChildren().get(0) != title)
+            details.getChildren().set(0, title);
+    }
+
+    /// Updates the displayed name and resets the status only when the selected endpoint changes.
+    private void select(@Nullable SavedServer server) {
+        @Nullable String previousAddress = selected == null ? null : selected.address();
+        @Nullable String nextAddress = server == null ? null : server.address();
+        selected = server;
+        setVisible(server != null);
+        if (server != null) {
+            name.setText(server.name());
+            selector.setText(server.name());
+        }
+        if (Objects.equals(previousAddress, nextAddress))
+            return;
+
+        targetRevision++;
+        autoRefresh.stop();
+        setRefreshing(false);
+        status.setText(i18n("bf656.server_status.checking"));
+        dot.pseudoClassStateChanged(ONLINE, false);
+        dot.pseudoClassStateChanged(UNREACHABLE, false);
+        refresh();
+    }
+
+    /// Starts or joins the query for the selected address and schedules the next refresh after completion.
+    private void refresh() {
+        @Nullable SavedServer target = selected;
+        if (!active || target == null || refreshing)
+            return;
+        autoRefresh.stop();
+        setRefreshing(true);
+        int revision = targetRevision;
+        @Nullable CompletableFuture<@Nullable Result> request = requests.get(target.address());
+        if (request == null) {
+            request = CompletableFuture.supplyAsync(() -> {
+                try {
+                    return MinecraftServerStatus.query(target.address());
+                } catch (IOException | IllegalArgumentException e) {
+                    return null;
+                }
+            }, Schedulers.io());
+            var started = request;
+            started.whenCompleteAsync((result, error) -> requests.remove(target.address(), started), Platform::runLater);
+            requests.put(target.address(), started);
+        }
+        request.whenCompleteAsync((result, error) -> {
+            if (targetRevision != revision)
+                return;
+            setRefreshing(false);
+            applyStatus(result);
+            if (active)
+                autoRefresh.playFromStart();
+        }, Platform::runLater);
+    }
+
+    /// Updates the refresh button while preserving the previous status during a same-target refresh.
+    private void setRefreshing(boolean value) {
+        refreshing = value;
+        refreshButton.setGraphic(value ? spinner : refreshIcon);
+        refreshButton.setDisable(value);
+    }
+
+    /// Formats the returned values without inventing unavailable counts or latency.
+    private void applyStatus(@Nullable Result result) {
+        dot.pseudoClassStateChanged(ONLINE, result != null);
+        dot.pseudoClassStateChanged(UNREACHABLE, result == null);
+        if (result == null) {
+            status.setText(i18n("bf656.server_status.unreachable"));
+            return;
+        }
+
+        StringBuilder text = new StringBuilder(i18n("bf656.server_status.online"));
+        if (result.online().isPresent()) {
+            int online = result.online().getAsInt();
+            text.append("  ·  ").append(result.capacity().isPresent()
+                    ? i18n("bf656.server_status.players", online, result.capacity().getAsInt())
+                    : i18n("bf656.server_status.player_count", online));
+        }
+        if (result.latencyMillis().isPresent())
+            text.append("  ·  ").append(i18n("bf656.server_status.latency", result.latencyMillis().getAsLong()));
+        status.setText(text.toString());
+    }
+
+    /// Reads a new version of the file, leaving the previous version in place after a transient read failure.
+    private static @Nullable ServerList readFile(Path file, @Nullable FileVersion previous) {
+        try {
+            BasicFileAttributes attributes = Files.readAttributes(file, BasicFileAttributes.class);
+            FileVersion version = new FileVersion(attributes.lastModifiedTime(), attributes.creationTime(),
+                    attributes.size(), attributes.fileKey());
+            if (version.equals(previous))
+                return null;
+
+            CompoundTag root = NBTUtils.readCompressed(file);
+            if (!(root.get("servers") instanceof ListTag<?> entries))
+                return new ServerList(version, List.of());
+
+            List<SavedServer> visible = new ArrayList<>();
+            for (Tag entry : entries) {
+                if (entry instanceof CompoundTag server
+                        && !(server.get("hidden") instanceof ByteTag hidden && hidden.get() != 0)
+                        && server.get("name") instanceof StringTag savedName
+                        && server.get("ip") instanceof StringTag savedAddress
+                        && !savedAddress.get().isBlank()) {
+                    visible.add(new SavedServer(savedName.get(), savedAddress.get().strip()));
+                }
+            }
+            return new ServerList(version, List.copyOf(visible));
+        } catch (NoSuchFileException e) {
+            return new ServerList(null, List.of());
+        } catch (IOException | IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    /// A named, visible entry from Minecraft's saved multiplayer list.
+    private record SavedServer(String name, String address) {
+    }
+
+    /// File attributes used to detect both in-place writes and replacements.
+    private record FileVersion(FileTime modified, FileTime created, long size, @Nullable Object key) {
+    }
+
+    /// Result of loading a file version, including a missing file represented by an empty list.
+    private record ServerList(@Nullable FileVersion version, @Unmodifiable List<SavedServer> entries) {
+    }
+}

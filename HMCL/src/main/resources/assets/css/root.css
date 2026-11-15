@@ -491,6 +491,75 @@
     -fx-fill: -monet-on-primary-container;
 }
 
+.multiplayer-server-status {
+    -fx-pref-width: 230px;
+    -fx-pref-height: 55px;
+    -fx-padding: 5px 8px 5px 12px;
+    -fx-background-color: -monet-surface-container-high;
+    -fx-background-radius: 4px;
+}
+
+.multiplayer-server-name,
+.multiplayer-server-selector > .label {
+    -fx-text-fill: -monet-on-surface;
+    -fx-font-size: 13px;
+    -fx-font-weight: bold;
+    -fx-padding: 0;
+}
+
+.multiplayer-server-selector {
+    -fx-background-color: transparent;
+    -fx-padding: 0;
+    -fx-cursor: hand;
+}
+
+.multiplayer-server-selector > .arrow-button {
+    -fx-padding: 4px 6px;
+}
+
+.multiplayer-server-selector > .arrow-button > .arrow {
+    -fx-background-color: -monet-on-surface-variant;
+}
+
+.multiplayer-server-selector:hover,
+.multiplayer-server-selector:focused,
+.multiplayer-server-refresh:hover,
+.multiplayer-server-refresh:focused {
+    -fx-background-color: -monet-surface-container-highest;
+    -fx-background-radius: 4px;
+}
+
+.multiplayer-server-message {
+    -fx-text-fill: -monet-on-surface-variant;
+    -fx-font-size: 11px;
+}
+
+.multiplayer-server-dot {
+    -fx-background-color: -monet-outline;
+    -fx-background-radius: 50%;
+}
+
+.multiplayer-server-dot:online {
+    -fx-background-color: #429956;
+}
+
+.multiplayer-server-dot:unreachable {
+    -fx-background-color: -monet-error;
+}
+
+.multiplayer-server-refresh {
+    -fx-min-width: 32px;
+    -fx-max-width: 32px;
+    -fx-min-height: 32px;
+    -fx-max-height: 32px;
+    -fx-padding: 0;
+    -fx-cursor: hand;
+}
+
+.multiplayer-server-refresh .svg {
+    -fx-fill: -monet-on-surface-variant;
+}
+
 /*******************************************************************************
  *                                                                             *
  * JFX Tab Pane                                                                *
