@@ -37,6 +37,7 @@ import javafx.scene.control.Tooltip;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
+import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
 import javafx.stage.Stage;
 import javafx.util.Duration;
@@ -80,6 +81,10 @@ final class MultiplayerServerStatusPane extends HBox {
     private static final PseudoClass UNREACHABLE = PseudoClass.getPseudoClass("unreachable");
     /// Lights a signal bar when the measured latency falls within its tier.
     private static final PseudoClass LIT = PseudoClass.getPseudoClass("lit");
+    /// Colors the lit bars yellow at two or three bars.
+    private static final PseudoClass MEDIUM_LATENCY = PseudoClass.getPseudoClass("medium-latency");
+    /// Colors the lit bar red at one bar.
+    private static final PseudoClass HIGH_LATENCY = PseudoClass.getPseudoClass("high-latency");
 
     /// Shows the saved name when there is only one server.
     private final Label name = new Label();
@@ -89,9 +94,13 @@ final class MultiplayerServerStatusPane extends HBox {
     private final Label status = new Label();
     /// Displays the reported player counts in compact server-list format.
     private final Label players = new Label();
-    /// Shows five ascending latency bars when the server responds.
-    private final HBox signal = new HBox(1);
-    /// Shows the measured round-trip time when the pointer is over the signal bars.
+    /// Holds the latency bars and the connection-failure overlay in the same position.
+    private final StackPane signal = new StackPane();
+    /// Shows five ascending latency bars.
+    private final HBox signalBars = new HBox(1);
+    /// Marks the signal indicator when the server cannot be reached.
+    private final Node signalCross = SVG.CLOSE.createIcon(14);
+    /// Shows the round-trip time or current signal state under the pointer.
     private final Tooltip signalTooltip = new Tooltip();
     /// Indicates query state independently of the theme's text color.
     private final Region dot = new Region();
@@ -165,18 +174,22 @@ final class MultiplayerServerStatusPane extends HBox {
         players.visibleProperty().bind(players.textProperty().isNotEmpty());
         players.managedProperty().bind(players.visibleProperty());
         signal.getStyleClass().add("multiplayer-server-signal");
-        signal.setAlignment(Pos.BOTTOM_LEFT);
         signal.setMaxHeight(USE_PREF_SIZE);
         signal.setPickOnBounds(true);
         signal.setVisible(false);
         signal.managedProperty().bind(signal.visibleProperty());
+        signalBars.setAlignment(Pos.BOTTOM_LEFT);
         for (int height : List.of(3, 5, 7, 9, 11)) {
             Region bar = new Region();
             bar.getStyleClass().add("multiplayer-server-signal-bar");
             bar.setMinSize(3, height);
             bar.setMaxSize(3, height);
-            signal.getChildren().add(bar);
+            signalBars.getChildren().add(bar);
         }
+        signalCross.getStyleClass().add("multiplayer-server-signal-cross");
+        signalCross.setMouseTransparent(true);
+        signalCross.setVisible(false);
+        signal.getChildren().setAll(signalBars, signalCross);
         FXUtils.installFastTooltip(signal, signalTooltip);
 
         Region statusSpacer = new Region();
@@ -387,8 +400,10 @@ final class MultiplayerServerStatusPane extends HBox {
         dot.pseudoClassStateChanged(ONLINE, result != null);
         dot.pseudoClassStateChanged(UNREACHABLE, result == null);
         if (result == null) {
-            status.setText(i18n("bf656.server_status.unreachable"));
-            clearServerDetails();
+            String message = i18n("bf656.server_status.unreachable");
+            status.setText(message);
+            players.setText("");
+            showSignal(0, true, message);
             return;
         }
 
@@ -409,16 +424,24 @@ final class MultiplayerServerStatusPane extends HBox {
 
         long latency = result.latencyMillis().orElse(-1);
         int lit = signalStrength(latency);
-        for (int i = 0; i < signal.getChildren().size(); i++)
-            signal.getChildren().get(i).pseudoClassStateChanged(LIT, i < lit);
         String hint = lit == 0 ? i18n("bf656.server_status.latency_unknown")
                 : i18n("bf656.server_status.latency", latency);
+        showSignal(lit, false, hint);
+    }
+
+    /// Applies the tier color and shows the cross over inactive bars when the connection fails.
+    private void showSignal(int lit, boolean unreachable, String hint) {
+        signal.pseudoClassStateChanged(MEDIUM_LATENCY, lit == 2 || lit == 3);
+        signal.pseudoClassStateChanged(HIGH_LATENCY, lit == 1);
+        for (int i = 0; i < signalBars.getChildren().size(); i++)
+            signalBars.getChildren().get(i).pseudoClassStateChanged(LIT, i < lit);
+        signalCross.setVisible(unreachable);
         signalTooltip.setText(hint);
         signal.setAccessibleText(hint);
         signal.setVisible(true);
     }
 
-    /// Clears the player and latency details while checking a new server or after a failed query.
+    /// Hides the previous server's metrics while checking a new target.
     private void clearServerDetails() {
         players.setText("");
         signalTooltip.hide();
