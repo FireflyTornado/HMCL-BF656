@@ -21,6 +21,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParseException;
 import com.google.gson.JsonParser;
+import org.jackhuang.hmcl.util.Lang;
 import org.jackhuang.hmcl.util.ServerAddress;
 import org.jetbrains.annotations.NotNullByDefault;
 import org.jetbrains.annotations.Nullable;
@@ -39,11 +40,19 @@ import java.io.IOException;
 import java.net.IDN;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.util.Hashtable;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiFunction;
 
 /// Queries Minecraft Java Edition servers using the status handshake and Ping/Pong.
 @NotNullByDefault
@@ -52,6 +61,11 @@ final class MinecraftServerStatus {
     private static final int DEFAULT_PORT = 25565;
     /// TCP connection and read timeout in milliseconds.
     private static final int TIMEOUT_MILLIS = 3000;
+    /// Total time available for DNS lookup, the status exchange and Ping/Pong.
+    private static final int QUERY_TIMEOUT_MILLIS = 8000;
+    /// Bounds concurrent probes even when the system resolver cannot be interrupted.
+    private static final ThreadPoolExecutor QUERY_EXECUTOR = new ThreadPoolExecutor(
+            0, 4, 30, TimeUnit.SECONDS, new SynchronousQueue<>(), Lang.counterThreadFactory("Server status", true));
     /// Maximum status frame size, including the JSON response and optional server icon.
     private static final int MAX_FRAME_BYTES = 128 * 1024;
     /// Protocol version used to request Java Edition status independently of the installed version.
@@ -65,8 +79,38 @@ final class MinecraftServerStatus {
     private MinecraftServerStatus() {
     }
 
-    /// Returns a server status, including any available player counts and latency.
-    static Result query(String address) throws IOException {
+    /// Queries a server off the UI thread and completes within the total time budget.
+    static CompletableFuture<@Nullable Result> query(String address) {
+        return query(address, QUERY_TIMEOUT_MILLIS, InetSocketAddress::new);
+    }
+
+    /// Starts a bounded probe with the given address resolver and time budget.
+    static CompletableFuture<@Nullable Result> query(String address, int timeoutMillis,
+                                                     BiFunction<String, Integer, InetSocketAddress> resolveAddress) {
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
+        var result = new CompletableFuture<@Nullable Result>();
+        var statusWithoutLatency = new AtomicReference<@Nullable Result>();
+        result.orTimeout(timeoutMillis, TimeUnit.MILLISECONDS);
+        try {
+            QUERY_EXECUTOR.execute(() -> {
+                try {
+                    result.complete(probe(address, resolveAddress, deadline, result, statusWithoutLatency));
+                } catch (IOException | RuntimeException e) {
+                    result.completeExceptionally(e);
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            // No queue: a retry gets a fresh budget once a worker is available.
+            result.complete(null);
+        }
+        return result.exceptionally(error -> error instanceof TimeoutException ? statusWithoutLatency.get() : null);
+    }
+
+    /// Resolves the endpoint, exchanges status packets and measures latency if the server sends Pong.
+    private static Result probe(String address, BiFunction<String, Integer, InetSocketAddress> resolveAddress,
+                                long deadline, CompletableFuture<@Nullable Result> completion,
+                                AtomicReference<@Nullable Result> statusWithoutLatency) throws IOException {
+        remainingMillis(deadline);
         ServerAddress parsed = ServerAddress.parse(address.strip());
         String host = parsed.host().indexOf(':') >= 0 ? parsed.host() : IDN.toASCII(parsed.host());
         int port = parsed.port() == -1 ? DEFAULT_PORT : parsed.port();
@@ -78,8 +122,20 @@ final class MinecraftServerStatus {
         String endpoint = redirected == null ? host : redirected.host();
         int endpointPort = redirected == null ? port : redirected.port();
 
+        remainingMillis(deadline);
+        InetSocketAddress socketAddress = resolveAddress.apply(endpoint, endpointPort);
         try (Socket socket = new Socket()) {
-            socket.connect(new InetSocketAddress(endpoint, endpointPort), TIMEOUT_MILLIS);
+            completion.whenComplete((value, error) -> {
+                if (error instanceof TimeoutException) {
+                    try {
+                        socket.close();
+                    } catch (IOException ignored) {
+                        // The query has already expired.
+                    }
+                }
+            });
+            // A resolver returning after expiry must not start a new connection.
+            socket.connect(socketAddress, Math.min(TIMEOUT_MILLIS, remainingMillis(deadline)));
             socket.setSoTimeout(TIMEOUT_MILLIS);
             DataOutputStream output = new DataOutputStream(socket.getOutputStream());
             DataInputStream input = new DataInputStream(socket.getInputStream());
@@ -101,8 +157,17 @@ final class MinecraftServerStatus {
             @Nullable JsonObject counts = players instanceof JsonObject object ? object : null;
             OptionalInt online = counts == null ? OptionalInt.empty() : readCount(counts, "online");
             OptionalInt capacity = counts == null ? OptionalInt.empty() : readCount(counts, "max");
+            statusWithoutLatency.set(new Result(online, capacity, OptionalLong.empty()));
             return new Result(online, capacity, readLatency(input, output));
         }
+    }
+
+    /// Checks the deadline after blocking operations and prevents a zero-millisecond socket timeout.
+    private static int remainingMillis(long deadline) throws SocketTimeoutException {
+        long remaining = deadline - System.nanoTime();
+        if (remaining <= 0)
+            throw new SocketTimeoutException("Minecraft server status query timed out");
+        return (int) Math.max(1, TimeUnit.NANOSECONDS.toMillis(remaining));
     }
 
     /// Looks up an SRV endpoint for a hostname, preferring records with the lowest priority value.

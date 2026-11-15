@@ -444,19 +444,13 @@ final class MultiplayerServerStatusPane extends HBox {
         setRefreshing(true);
         int revision = targetRevision;
         @Nullable CompletableFuture<@Nullable Result> request = requests.get(target.address());
-        if (request == null) {
-            request = CompletableFuture.supplyAsync(() -> {
-                try {
-                    return MinecraftServerStatus.query(target.address());
-                } catch (IOException | IllegalArgumentException e) {
-                    return null;
-                }
-            }, Schedulers.io());
-            var started = request;
-            started.whenCompleteAsync((result, error) -> requests.remove(target.address(), started), Platform::runLater);
-            requests.put(target.address(), started);
+        if (request == null || request.isDone()) {
+            request = MinecraftServerStatus.query(target.address());
+            requests.put(target.address(), request);
         }
-        request.whenCompleteAsync((result, error) -> {
+        var started = request;
+        started.whenCompleteAsync((result, error) -> {
+            requests.remove(target.address(), started);
             if (targetRevision != revision)
                 return;
             setRefreshing(false);
