@@ -98,13 +98,16 @@ public final class RemoteContent {
     /// One announcement and the file index used to read, render and identify its revision.
     @NotNullByDefault
     public record Announcement(Item item, @Unmodifiable Map<String, Resource> files) {
-        /// Snapshots the index and requires a descriptor for every file the announcement declares.
+        /// Snapshots the index and requires its keys to match the announcement's declared files.
         public Announcement {
             files = Map.copyOf(files);
-            for (String path : item.files()) {
+            @Unmodifiable Set<String> required = item.files();
+            for (String path : required) {
                 if (!files.containsKey(path))
                     throw new IllegalArgumentException("Announcement file missing from index: " + path);
             }
+            if (files.size() != required.size())
+                throw new IllegalArgumentException("Announcement file index contains undeclared files");
         }
 
         /// Identifies this revision from its metadata and file digests.
@@ -112,7 +115,7 @@ public final class RemoteContent {
             return itemKey(item, files);
         }
 
-        /// Captures only the resources needed by this announcement for persistent fallback.
+        /// Copies the descriptors declared by this announcement for rendering or persistent fallback.
         static Announcement capture(Manifest manifest, Item item) {
             Map<String, Resource> files = new LinkedHashMap<>();
             for (String path : item.files())
@@ -214,9 +217,11 @@ public final class RemoteContent {
     static Announcement readAnnouncement(JsonObject json) throws IOException {
         Item item = item(json.getAsJsonObject("item"), false);
         @Unmodifiable Map<String, Resource> files = files(json.getAsJsonObject("files"));
-        if (!files.keySet().equals(item.files()))
-            throw new IOException("Cached announcement file index does not match the item");
-        return new Announcement(item, files);
+        try {
+            return new Announcement(item, files);
+        } catch (IllegalArgumentException e) {
+            throw new IOException("Cached announcement file index does not match the item", e);
+        }
     }
 
     /// Encodes a local fallback without storing any agreement or notice metadata from its source manifest.

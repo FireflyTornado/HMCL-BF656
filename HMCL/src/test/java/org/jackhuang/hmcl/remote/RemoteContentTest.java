@@ -99,7 +99,7 @@ final class RemoteContentTest {
         assertEquals(next.key(next.announcements().get(0)), reordered.key(reordered.announcements().get(0)));
     }
 
-    /// Rejects a missing required resource and keeps a valid announcement independent of the caller's map.
+    /// Requires an exact file index during construction and cache reload, with an immutable copy for valid indexes.
     @Test
     void announcementSnapshotsAndValidatesItsFileIndex() throws Exception {
         var catalog = ContentFixtures.markdown("main", "# Announcement", new byte[]{1});
@@ -107,10 +107,17 @@ final class RemoteContentTest {
         ContentFixtures.file(catalog, extra, new byte[]{2});
         var manifest = RemoteContent.parse(catalog.toString(), "main");
         var item = manifest.announcements().getFirst();
-        var index = new HashMap<>(manifest.files());
+        assertThrows(IllegalArgumentException.class, () -> new RemoteContent.Announcement(item, manifest.files()));
+        var captured = RemoteContent.Announcement.capture(manifest, item);
+        assertEquals(item.files(), captured.files().keySet());
+
+        var index = new HashMap<>(captured.files());
         var announcement = new RemoteContent.Announcement(item, index);
         assertEquals(manifest.key(item), announcement.key());
-        assertTrue(announcement.files().containsKey(extra));
+        var snapshot = RemoteContent.writeAnnouncement(announcement);
+        assertEquals(announcement, RemoteContent.readAnnouncement(snapshot));
+        snapshot.getAsJsonObject("files").add(extra, catalog.getAsJsonObject("files").get(extra));
+        assertThrows(IOException.class, () -> RemoteContent.readAnnouncement(snapshot));
 
         index.remove(ContentFixtures.IMAGE);
         assertTrue(announcement.files().containsKey(ContentFixtures.IMAGE));
@@ -255,7 +262,7 @@ final class RemoteContentTest {
         assertThrows(IOException.class, () -> ContentLinks.parse("<!DOCTYPE x [<!ENTITY e SYSTEM 'file:///secret'>]>&e;"));
     }
 
-    /// Stores a large inline body in a hashed snapshot and isolates snapshot damage from the latest manifest.
+    /// Rejects a mismatched fallback key and reloads a valid hashed snapshot independently of the latest manifest.
     @Test
     void storesFallbackBodyOutsideSyncIndex() throws Exception {
         String oldBody = "旧公告正文".repeat(20_000);
@@ -272,6 +279,8 @@ final class RemoteContentTest {
 
         String latest = ContentFixtures.markdown("main", "# 新公告", new byte[0]).toString();
         var store = new ContentStore(root, "source");
+        assertThrows(IllegalArgumentException.class,
+                () -> new ContentStore.Cache(latest, "\"next\"", Instant.EPOCH, Map.of("wrong-id", fallback)));
         store.cache(new ContentStore.Cache(latest, "\"next\"", Instant.EPOCH, Map.of("news", fallback)));
         Path state = root.resolve("client/state").resolve(RemoteContent.hash("source"));
         Path sync = state.resolve("sync.json");

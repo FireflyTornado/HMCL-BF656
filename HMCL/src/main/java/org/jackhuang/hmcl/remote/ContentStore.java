@@ -74,9 +74,14 @@ public final class ContentStore {
     public record Cache(String body, String etag, Instant checkedAt,
                         @Unmodifiable Map<String, RemoteContent.Announcement> announcementFallbacks,
                         boolean fallbackIndexNeedsRewrite) {
-        /// Makes a snapshot safe to publish to the JavaFX thread.
+        /// Snapshots the fallbacks and requires each key to match the stored announcement ID.
         public Cache {
             announcementFallbacks = Map.copyOf(announcementFallbacks);
+            for (var entry : announcementFallbacks.entrySet()) {
+                String id = entry.getValue().item().id();
+                if (!entry.getKey().equals(id))
+                    throw new IllegalArgumentException("Announcement fallback key " + entry.getKey() + " does not match ID " + id);
+            }
         }
 
         /// Creates a cache response before selecting any announcement fallbacks.

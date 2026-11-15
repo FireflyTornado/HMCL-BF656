@@ -641,7 +641,7 @@ public final class RemoteContentController {
             if (!item.active(now))
                 continue;
             if (result.readyAnnouncements().contains(item.id())) {
-                visible.add(new RemoteContent.Announcement(item, manifest.files()));
+                visible.add(RemoteContent.Announcement.capture(manifest, item));
             } else {
                 pendingAnnouncements = true;
                 @Nullable RemoteContent.Announcement cached = result.announcementFallbacks().get(item.id());
@@ -682,6 +682,7 @@ public final class RemoteContentController {
     /// Builds the scrollable feed, resolving each announcement from its own manifest.
     private ScrollPane createAnnouncementFeed(Session owner, ContentSync.Result result,
                                               @Unmodifiable List<RemoteContent.Announcement> visible) {
+        RemoteContent.Manifest manifest = Objects.requireNonNull(result.manifest());
         VBox entries = new VBox(14);
         entries.setMinWidth(0);
         entries.setPadding(new Insets(4, 10, 10, 4));
@@ -697,7 +698,10 @@ public final class RemoteContentController {
             VBox body = new VBox(10);
             if (!item.publishedAt().isEmpty())
                 body.getChildren().add(new Label(item.publishedAt()));
-            body.getChildren().addAll(new MarkdownView(owner.root, announcement.files(), item,
+            // Ready announcements can link to other documents listed in the current manifest.
+            @Unmodifiable Map<String, RemoteContent.Resource> files = result.readyAnnouncements().contains(item.id())
+                    ? manifest.files() : announcement.files();
+            body.getChildren().addAll(new MarkdownView(owner.root, files, item,
                     Objects.requireNonNull(owner.store), Objects.requireNonNull(owner.config).endpoint(), text -> {
                 error.setText(text);
                 error.setManaged(true);
