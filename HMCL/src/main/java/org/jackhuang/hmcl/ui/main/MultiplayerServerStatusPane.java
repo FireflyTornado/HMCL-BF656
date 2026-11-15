@@ -33,6 +33,7 @@ import javafx.scene.control.Label;
 import javafx.scene.control.MenuButton;
 import javafx.scene.control.MenuItem;
 import javafx.scene.control.ProgressIndicator;
+import javafx.scene.control.Tooltip;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
@@ -46,6 +47,7 @@ import org.glavo.nbt.tag.StringTag;
 import org.glavo.nbt.tag.Tag;
 import org.jackhuang.hmcl.game.HMCLGameInstance;
 import org.jackhuang.hmcl.task.Schedulers;
+import org.jackhuang.hmcl.ui.FXUtils;
 import org.jackhuang.hmcl.ui.SVG;
 import org.jackhuang.hmcl.ui.main.MinecraftServerStatus.Result;
 import org.jackhuang.hmcl.util.NBTUtils;
@@ -76,13 +78,21 @@ final class MultiplayerServerStatusPane extends HBox {
     private static final PseudoClass ONLINE = PseudoClass.getPseudoClass("online");
     /// Highlights the dot after the selected server fails to respond.
     private static final PseudoClass UNREACHABLE = PseudoClass.getPseudoClass("unreachable");
+    /// Lights a signal bar when the measured latency falls within its tier.
+    private static final PseudoClass LIT = PseudoClass.getPseudoClass("lit");
 
     /// Shows the saved name when there is only one server.
     private final Label name = new Label();
     /// Selects a saved server when multiple entries are present.
     private final MenuButton selector = new MenuButton();
-    /// Displays the latest status, player counts and latency.
+    /// Displays the latest connection state beside the status dot.
     private final Label status = new Label();
+    /// Displays the reported player counts in compact server-list format.
+    private final Label players = new Label();
+    /// Shows five ascending latency bars when the server responds.
+    private final HBox signal = new HBox(1);
+    /// Shows the measured round-trip time when the pointer is over the signal bars.
+    private final Tooltip signalTooltip = new Tooltip();
     /// Indicates query state independently of the theme's text color.
     private final Region dot = new Region();
     /// Immediately refreshes the selected server with keyboard and mouse activation.
@@ -150,7 +160,29 @@ final class MultiplayerServerStatusPane extends HBox {
         dot.setMaxSize(7, 7);
         status.getStyleClass().add("multiplayer-server-message");
         status.setMinWidth(0);
-        HBox statusLine = new HBox(6, dot, status);
+
+        players.getStyleClass().addAll("multiplayer-server-message", "multiplayer-server-players");
+        players.visibleProperty().bind(players.textProperty().isNotEmpty());
+        players.managedProperty().bind(players.visibleProperty());
+        signal.getStyleClass().add("multiplayer-server-signal");
+        signal.setAlignment(Pos.BOTTOM_LEFT);
+        signal.setMaxHeight(USE_PREF_SIZE);
+        signal.setPickOnBounds(true);
+        signal.setVisible(false);
+        signal.managedProperty().bind(signal.visibleProperty());
+        for (int height : List.of(2, 3, 4, 6, 8)) {
+            Region bar = new Region();
+            bar.getStyleClass().add("multiplayer-server-signal-bar");
+            bar.setMinSize(2, height);
+            bar.setMaxSize(2, height);
+            signal.getChildren().add(bar);
+        }
+        FXUtils.installFastTooltip(signal, signalTooltip);
+
+        Region statusSpacer = new Region();
+        statusSpacer.managedProperty().bind(signal.visibleProperty());
+        HBox.setHgrow(statusSpacer, Priority.ALWAYS);
+        HBox statusLine = new HBox(6, dot, status, statusSpacer, players, signal);
         statusLine.setAlignment(Pos.CENTER_LEFT);
         details.setAlignment(Pos.CENTER_LEFT);
         details.setMinWidth(0);
@@ -308,6 +340,7 @@ final class MultiplayerServerStatusPane extends HBox {
         status.setText(i18n("bf656.server_status.checking"));
         dot.pseudoClassStateChanged(ONLINE, false);
         dot.pseudoClassStateChanged(UNREACHABLE, false);
+        clearServerDetails();
         refresh();
     }
 
@@ -349,25 +382,62 @@ final class MultiplayerServerStatusPane extends HBox {
         refreshButton.setDisable(value);
     }
 
-    /// Formats the returned values without inventing unavailable counts or latency.
+    /// Updates the connection, compact player count and latency bars from the latest response.
     private void applyStatus(@Nullable Result result) {
         dot.pseudoClassStateChanged(ONLINE, result != null);
         dot.pseudoClassStateChanged(UNREACHABLE, result == null);
         if (result == null) {
             status.setText(i18n("bf656.server_status.unreachable"));
+            clearServerDetails();
             return;
         }
 
-        StringBuilder text = new StringBuilder(i18n("bf656.server_status.online"));
+        status.setText(i18n("bf656.server_status.online"));
         if (result.online().isPresent()) {
             int online = result.online().getAsInt();
-            text.append("  ·  ").append(result.capacity().isPresent()
-                    ? i18n("bf656.server_status.players", online, result.capacity().getAsInt())
-                    : i18n("bf656.server_status.player_count", online));
+            if (result.capacity().isPresent()) {
+                int capacity = result.capacity().getAsInt();
+                players.setText(online + "/" + capacity);
+                players.setAccessibleText(i18n("bf656.server_status.players", online, capacity));
+            } else {
+                players.setText(Integer.toString(online));
+                players.setAccessibleText(i18n("bf656.server_status.player_count", online));
+            }
+        } else {
+            players.setText("");
         }
-        if (result.latencyMillis().isPresent())
-            text.append("  ·  ").append(i18n("bf656.server_status.latency", result.latencyMillis().getAsLong()));
-        status.setText(text.toString());
+
+        long latency = result.latencyMillis().orElse(-1);
+        int lit = signalStrength(latency);
+        for (int i = 0; i < signal.getChildren().size(); i++)
+            signal.getChildren().get(i).pseudoClassStateChanged(LIT, i < lit);
+        String hint = lit == 0 ? i18n("bf656.server_status.latency_unknown")
+                : i18n("bf656.server_status.latency", latency);
+        signalTooltip.setText(hint);
+        signal.setAccessibleText(hint);
+        signal.setVisible(true);
+    }
+
+    /// Clears the player and latency details while checking a new server or after a failed query.
+    private void clearServerDetails() {
+        players.setText("");
+        signalTooltip.hide();
+        signal.setVisible(false);
+    }
+
+    /// Maps a round-trip time in milliseconds to the Java Edition server list's five signal tiers.
+    private static int signalStrength(long latency) {
+        if (latency < 0)
+            return 0;
+        if (latency < 150)
+            return 5;
+        if (latency < 300)
+            return 4;
+        if (latency < 600)
+            return 3;
+        if (latency < 1000)
+            return 2;
+        return 1;
     }
 
     /// Reads a new version of the file, leaving the previous version in place after a transient read failure.

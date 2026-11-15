@@ -546,6 +546,18 @@
     -fx-background-color: -monet-error;
 }
 
+.multiplayer-server-signal {
+    -fx-padding: 2px 1px;
+}
+
+.multiplayer-server-signal-bar {
+    -fx-background-color: -monet-outline-variant;
+}
+
+.multiplayer-server-signal-bar:lit {
+    -fx-background-color: #429956;
+}
+
 .multiplayer-server-refresh {
     -fx-min-width: 32px;
     -fx-max-width: 32px;
