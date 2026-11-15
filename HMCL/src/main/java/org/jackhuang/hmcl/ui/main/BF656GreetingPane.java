@@ -37,6 +37,9 @@ import java.util.function.Function;
 /// Compact, noninteractive home-sidebar greeting with a stable two-line footprint and no tooltip.
 @NotNullByDefault
 public final class BF656GreetingPane extends StackPane {
+    /// Extra text height for glyphs that extend beyond the two-line measurement sample.
+    private static final double TEXT_HEIGHT_ALLOWANCE = 4;
+
     /// Current selected account's profile name, supplied by the owning page rather than a global subscription.
     private final ObjectProperty<@Nullable String> nickname = new SimpleObjectProperty<>(this, "nickname");
     /// Label styled with the launcher's normal theme colors and font family.
@@ -69,11 +72,11 @@ public final class BF656GreetingPane extends StackPane {
         setMaxHeight(Region.USE_PREF_SIZE);
         label.setId("bf656-greeting-text");
         label.setManaged(false);
-        label.setAlignment(Pos.TOP_LEFT);
         label.setTextOverrun(OverrunStyle.CLIP);
         label.setWrapText(false);
         label.setMouseTransparent(true);
         label.fontProperty().addListener(observable -> requestLayout());
+        label.insetsProperty().addListener(observable -> requestLayout());
         label.lineSpacingProperty().addListener(observable -> requestLayout());
         getChildren().setAll(label);
         nickname.addListener(observable -> updateNickname());
@@ -122,13 +125,16 @@ public final class BF656GreetingPane extends StackPane {
         return Math.ceil(ruler.getLayoutBounds().getWidth());
     }
 
-    /// Reserves two font-sized lines plus padding even when the actual greeting fits on one line.
+    /// Reserves the same two-line text area, glyph clearance and padding for every greeting.
     @Override
     protected double computePrefHeight(double width) {
         ruler.setFont(label.getFont());
         ruler.setLineSpacing(label.getLineSpacing());
         ruler.setText("Ag国\nAg国");
-        return snappedTopInset() + Math.ceil(ruler.getLayoutBounds().getHeight()) + snappedBottomInset();
+        var labelInsets = label.getInsets();
+        double textHeight = ruler.getLayoutBounds().getHeight() + TEXT_HEIGHT_ALLOWANCE;
+        return snappedTopInset() + Math.ceil(textHeight + labelInsets.getTop() + labelInsets.getBottom())
+                + snappedBottomInset();
     }
 
     /// Reflows retained copy after width or font changes, shortening only a nickname after the preferred break.
@@ -138,6 +144,7 @@ public final class BF656GreetingPane extends StackPane {
         var text = greeting.text(messages);
         String visibleText = BF656GreetingLayout.fit(text, width, this::measure);
         label.setText(visibleText);
+        label.setAlignment(visibleText.indexOf('\n') < 0 ? Pos.CENTER_LEFT : Pos.TOP_LEFT);
         label.resizeRelocate(snappedLeftInset(), snappedTopInset(), width,
                 Math.max(0, getHeight() - snappedTopInset() - snappedBottomInset()));
     }

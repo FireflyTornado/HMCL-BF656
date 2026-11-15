@@ -259,6 +259,7 @@
 }
 
 .bf656-greeting > .label {
+    -fx-padding: 2px 0;
     -fx-font-family: "Microsoft YaHei UI";
     -fx-font-size: 16px;
     -fx-font-weight: normal;

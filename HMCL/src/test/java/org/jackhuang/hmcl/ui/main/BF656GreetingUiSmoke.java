@@ -19,6 +19,7 @@ package org.jackhuang.hmcl.ui.main;
 
 import javafx.application.Platform;
 import javafx.geometry.Insets;
+import javafx.geometry.Pos;
 import javafx.scene.Scene;
 import javafx.scene.control.Label;
 import javafx.scene.image.WritableImage;
@@ -102,9 +103,10 @@ public final class BF656GreetingUiSmoke {
         surface.setPadding(new Insets(16));
         snapshot(surface, 232, 105, output.resolve("greeting-single-line.png"));
         require(label.getText().equals("晚上好，Steve。"), "A fitting greeting must stay on one line");
+        requireLinesFit(label);
         double height = pane.getHeight();
 
-        pane.nicknameProperty().set("VeryLongPlayerName_".repeat(12));
+        pane.nicknameProperty().set("A\u030AygVeryLongPlayerName_".repeat(12));
         snapshot(surface, 232, 105, output.resolve("greeting-long-nickname.png"));
         require(label.getText().startsWith("晚上好，\n"), "Long greetings must split after the template comma");
         require(label.getText().endsWith("…。"), "Only the name may be shortened; retain its final period");
@@ -225,12 +227,16 @@ public final class BF656GreetingUiSmoke {
         return (Label) Objects.requireNonNull(pane.lookup("#bf656-greeting-text"));
     }
 
-    /// Checks visible named-greeting lines against the actual label font and available content width.
+    /// Checks the rendered lines, vertical alignment and additional space for glyphs.
     private static void requireLinesFit(Label label) {
         Text rendered = (Text) Objects.requireNonNull(label.lookup(".text"));
         require(rendered.getText().equals(label.getText()), "JavaFX clipped the displayed copy: " + rendered.getText());
         @Unmodifiable List<String> lines = label.getText().lines().toList();
         require(lines.size() <= 2, "Greeting must not exceed two lines");
+        require(label.getAlignment() == (lines.size() == 1 ? Pos.CENTER_LEFT : Pos.TOP_LEFT),
+                "The text alignment must follow the rendered line count");
+        require(label.getHeight() > label.prefHeight(-1),
+                "The greeting must have more height than the text and its insets require");
         for (String line : lines) {
             Text ruler = new Text(line);
             ruler.setFont(label.getFont());
