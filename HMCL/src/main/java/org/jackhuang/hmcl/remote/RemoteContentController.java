@@ -627,7 +627,6 @@ public final class RemoteContentController {
             renderAnnouncementSlot(null, false);
             return;
         }
-        ContentStore store = owner.store;
         @Nullable ContentSync.Result result = owner.result;
         boolean loading = result == null || (!result.success() && !result.exhausted());
         if (result == null || result.manifest() == null) {
@@ -641,12 +640,12 @@ public final class RemoteContentController {
         for (RemoteContent.Item item : manifest.announcements()) {
             if (!item.active(now))
                 continue;
-            if (store.ready(manifest, item)) {
+            if (result.readyAnnouncements().contains(item.id())) {
                 visible.add(new RemoteContent.Announcement(item, manifest.files()));
             } else {
                 pendingAnnouncements = true;
                 @Nullable RemoteContent.Announcement cached = result.announcementFallbacks().get(item.id());
-                if (cached != null && cached.item().active(now) && store.ready(cached))
+                if (cached != null && cached.item().active(now))
                     visible.add(cached);
             }
         }

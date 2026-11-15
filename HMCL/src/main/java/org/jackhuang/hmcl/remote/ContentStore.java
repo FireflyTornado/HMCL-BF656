@@ -109,7 +109,7 @@ public final class ContentStore {
         }
     }
 
-    /// Loads only ready fallbacks for items that still appear in the latest manifest and need files.
+    /// Loads fallback metadata for items still listed in the latest manifest. Synchronization verifies the payloads.
     private @Unmodifiable Map<String, RemoteContent.Announcement> readAnnouncementFallbacks(
             @Nullable JsonElement index, RemoteContent.Manifest manifest) {
         if (index == null || !index.isJsonObject())
@@ -134,7 +134,7 @@ public final class ContentStore {
             if (reference == null || !reference.isJsonPrimitive() || !reference.getAsJsonPrimitive().isString())
                 continue;
             String digest = reference.getAsString();
-            if (!digest.matches("[0-9a-f]{64}") || item.expired(now) || ready(manifest, item))
+            if (!digest.matches("[0-9a-f]{64}") || item.expired(now))
                 continue;
             try {
                 Path path = directory.resolve(digest + ".json");
@@ -148,7 +148,7 @@ public final class ContentStore {
                     continue;
                 var announcement = RemoteContent.readAnnouncement(
                         JsonParser.parseString(new String(bytes, StandardCharsets.UTF_8)).getAsJsonObject());
-                if (announcement.item().id().equals(id) && !announcement.item().expired(now) && ready(announcement))
+                if (announcement.item().id().equals(id) && !announcement.item().expired(now))
                     fallbacks.put(id, announcement);
             } catch (IOException | RuntimeException ignored) {
                 // A damaged fallback cannot invalidate the latest manifest or its other entries.
@@ -241,11 +241,6 @@ public final class ContentStore {
     /// Lightweight presentation check; full SHA-256 verification happens off the FX thread during synchronization.
     public synchronized boolean ready(RemoteContent.Manifest manifest, RemoteContent.Item item) {
         return ready(item, manifest.files());
-    }
-
-    /// Checks an announcement using the index belonging to its own revision.
-    synchronized boolean ready(RemoteContent.Announcement announcement) {
-        return ready(announcement.item(), announcement.files());
     }
 
     /// Checks that each file required by the item is present in the local cache.

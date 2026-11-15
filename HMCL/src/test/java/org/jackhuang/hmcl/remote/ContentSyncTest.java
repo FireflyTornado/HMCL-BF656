@@ -28,6 +28,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -36,6 +38,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -126,7 +129,7 @@ final class ContentSyncTest {
         }
     }
 
-    /// Interrupts an update after persisting its manifest, then recovers and retires the same cached revision.
+    /// Keeps a good revision across restart when the new file is corrupt and its download is interrupted.
     @Test
     void restartKeepsLastReadyAnnouncementDuringReplacement() throws Exception {
         HttpServer http = java.util.Objects.requireNonNull(server);
@@ -168,6 +171,11 @@ final class ContentSyncTest {
             sync.activate();
             RemoteContent.Manifest original = java.util.Objects.requireNonNull(awaitFinal(events, true).manifest());
             oldBody = store.file(original.files().get(ContentFixtures.BODY));
+            String nextBody = BODY + "\n\nRevision 2";
+            var nextManifest = RemoteContent.parse(ContentFixtures.markdown("main", nextBody, IMAGE).toString(), "main");
+            RemoteContent.Resource corrupt = nextManifest.files().get(ContentFixtures.BODY);
+            store.install(corrupt, nextBody.getBytes(StandardCharsets.UTF_8));
+            Files.writeString(store.file(corrupt), "# Damaged replacement");
             revision.set(2);
             sync.refresh();
             assertTrue(waitingForBody.await(5, TimeUnit.SECONDS), "The replacement request must start after persisting its metadata");
@@ -189,11 +197,12 @@ final class ContentSyncTest {
             nextProcess.activate();
             var first = java.util.Objects.requireNonNull(events.poll(5, TimeUnit.SECONDS));
             assertTrue(first.cached());
+            assertFalse(first.readyAnnouncements().contains("news"));
             assertEquals(2, java.util.Objects.requireNonNull(first.manifest()).agreement().revision());
             var fallback = first.announcementFallbacks().get("news");
             assertNotNull(fallback);
             assertEquals(1, fallback.item().revision());
-            assertTrue(reopened.ready(fallback));
+            assertTrue(reopened.verified(fallback.files().get(ContentFixtures.BODY)));
             assertEquals(BODY + "\n\nRevision 1", reopened.body(fallback.item(), fallback.files()));
             awaitFinal(events, false);
 
@@ -208,10 +217,54 @@ final class ContentSyncTest {
             replacementAvailable.set(true);
             nextProcess.refresh();
             var complete = awaitFinal(events, true);
+            assertTrue(complete.readyAnnouncements().contains("news"));
             assertTrue(complete.announcementFallbacks().isEmpty());
             assertTrue(java.util.Objects.requireNonNull(reopened.cache("main")).announcementFallbacks().isEmpty());
             assertFalse(Files.exists(oldBody));
             assertFalse(Files.exists(snapshot));
+        }
+    }
+
+    /// Rejects a corrupted associated image both when capturing an old revision and when restoring a saved fallback.
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void corruptAnnouncementCannotBecomeAReadyFallback(boolean savedFallback) throws Exception {
+        HttpServer http = java.util.Objects.requireNonNull(server);
+        String original = ContentFixtures.markdown("main", BODY, IMAGE).toString();
+        RemoteContent.Manifest old = RemoteContent.parse(original, "main");
+        String replacement = ContentFixtures.markdown("main", "# New revision", new byte[0]).toString();
+        http.createContext("/", exchange -> {
+            if (exchange.getRequestURI().getPath().endsWith("manifest.json"))
+                send(exchange, 200, replacement.getBytes(StandardCharsets.UTF_8));
+            else
+                send(exchange, 503, new byte[0]);
+        });
+        http.start();
+        var config = config();
+        var store = new ContentStore(directory, config.endpoint().toString());
+        RemoteContent.Resource body = old.files().get(ContentFixtures.BODY);
+        RemoteContent.Resource image = old.files().get(ContentFixtures.IMAGE);
+        store.install(body, BODY.getBytes(StandardCharsets.UTF_8));
+        store.install(image, IMAGE);
+        if (savedFallback) {
+            var fallback = RemoteContent.Announcement.capture(old, old.announcements().getFirst());
+            store.cache(new ContentStore.Cache(replacement, "", Instant.EPOCH, Map.of("news", fallback)));
+        } else {
+            store.cache(new ContentStore.Cache(original, "", Instant.EPOCH));
+        }
+        Files.writeString(store.file(image), "Damaged image");
+
+        var events = new LinkedBlockingQueue<ContentSync.Result>();
+        try (var sync = new ContentSync(config, store, events::add, new long[0])) {
+            sync.activate();
+            var cached = java.util.Objects.requireNonNull(events.poll(5, TimeUnit.SECONDS));
+            assertTrue(cached.cached());
+            assertTrue(cached.readyAnnouncements().isEmpty());
+            assertTrue(cached.announcementFallbacks().isEmpty());
+            var failed = awaitFinal(events, false);
+            assertTrue(failed.readyAnnouncements().isEmpty());
+            assertTrue(failed.announcementFallbacks().isEmpty());
+            assertTrue(java.util.Objects.requireNonNull(store.cache("main")).announcementFallbacks().isEmpty());
         }
     }
 

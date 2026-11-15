@@ -123,16 +123,23 @@ public final class ContentSync implements AutoCloseable {
         }
     }
 
-    /// Carries current metadata and ready announcement revisions retained as fallbacks.
+    /// Carries current metadata and the announcement revisions whose payloads passed background verification.
     @NotNullByDefault
     public record Result(@Nullable RemoteContent.Manifest manifest,
                          @Unmodifiable Map<String, RemoteContent.Announcement> announcementFallbacks,
+                         @Unmodifiable Set<String> readyAnnouncements,
                          boolean cached, boolean pending,
                          boolean success, @Nullable Instant checkedAt, @Nullable String error, boolean exhausted) {
+        /// Detaches the presentation state from the mutable verification run.
+        public Result {
+            announcementFallbacks = Map.copyOf(announcementFallbacks);
+            readyAnnouncements = Set.copyOf(readyAnnouncements);
+        }
+
         /// Creates a result for callers that have no announcement fallbacks.
         public Result(@Nullable RemoteContent.Manifest manifest, boolean cached, boolean pending, boolean success,
                       @Nullable Instant checkedAt, @Nullable String error, boolean exhausted) {
-            this(manifest, Map.of(), cached, pending, success, checkedAt, error, exhausted);
+            this(manifest, Map.of(), Set.of(), cached, pending, success, checkedAt, error, exhausted);
         }
     }
 
@@ -200,11 +207,12 @@ public final class ContentSync implements AutoCloseable {
     /// Runs local expiry cleanup even after all network work has stopped.
     public void prune() {
         if (!worker.isShutdown())
-            worker.execute(this::cleanup);
+            worker.execute(() -> cleanup(new HashMap<>()));
     }
 
     /// Executes one attempt, continuing past individual file failures so unrelated items can still become ready.
     private void run(long token) {
+        Map<String, Boolean> verification = new HashMap<>();
         StringBuilder errors = new StringBuilder();
         try {
             checkActive(token);
@@ -215,12 +223,13 @@ public final class ContentSync implements AutoCloseable {
                     cacheDirty = cache.fallbackIndexNeedsRewrite();
                 }
             }
-            emit(true, null);
+            emit(token, verification, true, null);
             if (!checked) {
                 ContentStore.Cache fresh = downloadManifest(token);
                 RemoteContent.Manifest next = RemoteContent.parse(fresh.body(), config.instanceKey());
                 checkActive(token);
-                var fallbacks = selectAnnouncementFallbacks(next, manifest, Instant.now());
+                @Unmodifiable Map<String, RemoteContent.Announcement> fallbacks =
+                        selectAnnouncementFallbacks(next, manifest, Instant.now(), verification);
                 checkActive(token);
                 if (!next.equals(manifest))
                     previous = manifest;
@@ -229,17 +238,24 @@ public final class ContentSync implements AutoCloseable {
                 cacheDirty = true;
                 persistCache();
                 checked = true;
-                emit(true, null);
+                emit(token, verification, true, null);
             }
             RemoteContent.Manifest current = java.util.Objects.requireNonNull(manifest);
             for (RemoteContent.Resource resource : current.needed(Instant.now())) {
                 checkActive(token);
                 try {
-                    if (!store.verified(resource)) {
+                    String name = resource.cacheName();
+                    @Nullable Boolean verified = verification.get(name);
+                    if (verified == null) {
+                        verified = store.verified(resource);
+                        verification.put(name, verified);
+                    }
+                    if (!verified) {
                         byte[] bytes = download(resourceUri(resource), "", 16_777_216, token).bytes();
                         checkActive(token);
                         store.install(resource, bytes);
-                        emit(true, null);
+                        verification.put(name, true);
+                        emit(token, verification, true, null);
                     }
                 } catch (IOException | IllegalArgumentException e) {
                     errors.append(resource.path()).append(": ").append(e.getMessage()).append('\n');
@@ -247,7 +263,11 @@ public final class ContentSync implements AutoCloseable {
             }
             for (RemoteContent.Kind kind : RemoteContent.Kind.values()) {
                 for (RemoteContent.Item item : current.items(kind)) {
-                    if (!item.expired(Instant.now()) && store.ready(current, item)) {
+                    if (item.expired(Instant.now()))
+                        continue;
+                    boolean ready = kind == RemoteContent.Kind.ANNOUNCEMENTS
+                            ? verifyAnnouncement(item, current.files(), verification) : store.ready(current, item);
+                    if (ready) {
                         try {
                             ContentDocuments.validate(Path.of("."), current, item, store, config.endpoint(), false);
                         } catch (IOException e) {
@@ -274,8 +294,8 @@ public final class ContentSync implements AutoCloseable {
             } else {
                 failures++;
             }
-            cleanup();
-            emit(false, errors.isEmpty() ? null : errors.toString());
+            cleanup(verification);
+            emit(token, verification, false, errors.isEmpty() ? null : errors.toString());
             if (!success && failures <= retrySeconds.length) {
                 retry = worker.schedule(() -> {
                     synchronized (ContentSync.this) {
@@ -287,9 +307,26 @@ public final class ContentSync implements AutoCloseable {
         }
     }
 
-    /// Keeps the newest locally ready revision for each still-published announcement whose replacement needs files.
+    /// Checks each cache object at most once per attempt, including when revisions share the same bytes.
+    private boolean verifyResource(RemoteContent.Resource resource, Map<String, Boolean> verification) {
+        return verification.computeIfAbsent(resource.cacheName(), ignored -> {
+            try {
+                return store.verified(resource);
+            } catch (IOException e) {
+                return false;
+            }
+        });
+    }
+
+    /// Checks the body and all declared resources against the index for this exact announcement revision.
+    private boolean verifyAnnouncement(RemoteContent.Item item, @Unmodifiable Map<String, RemoteContent.Resource> files,
+                                       Map<String, Boolean> verification) {
+        return item.files().stream().allMatch(path -> verifyResource(files.get(path), verification));
+    }
+
+    /// Keeps the newest verified revision for each still-published announcement whose replacement needs files.
     private @Unmodifiable Map<String, RemoteContent.Announcement> selectAnnouncementFallbacks(
-            RemoteContent.Manifest current, @Nullable RemoteContent.Manifest prior, Instant now) {
+            RemoteContent.Manifest current, @Nullable RemoteContent.Manifest prior, Instant now, Map<String, Boolean> verification) {
         Map<String, RemoteContent.Item> previousItems = new HashMap<>();
         if (prior != null) {
             for (RemoteContent.Item item : prior.announcements())
@@ -298,14 +335,14 @@ public final class ContentSync implements AutoCloseable {
         @Unmodifiable Map<String, RemoteContent.Announcement> saved = cache == null ? Map.of() : cache.announcementFallbacks();
         Map<String, RemoteContent.Announcement> fallbacks = new HashMap<>();
         for (RemoteContent.Item item : current.announcements()) {
-            if (item.expired(now) || store.ready(current, item))
+            if (item.expired(now) || verifyAnnouncement(item, current.files(), verification))
                 continue;
             @Nullable RemoteContent.Item old = previousItems.get(item.id());
-            if (prior != null && old != null && old.active(now) && store.ready(prior, old)) {
+            if (prior != null && old != null && old.active(now) && verifyAnnouncement(old, prior.files(), verification)) {
                 fallbacks.put(item.id(), RemoteContent.Announcement.capture(prior, old));
             } else {
                 @Nullable RemoteContent.Announcement cached = saved.get(item.id());
-                if (cached != null && !cached.item().expired(now) && store.ready(cached))
+                if (cached != null && !cached.item().expired(now) && verifyAnnouncement(cached.item(), cached.files(), verification))
                     fallbacks.put(item.id(), cached);
             }
         }
@@ -321,7 +358,7 @@ public final class ContentSync implements AutoCloseable {
     }
 
     /// Retains current resources and files still owned by an available fallback revision.
-    private void cleanup() {
+    private void cleanup(Map<String, Boolean> verification) {
         try {
             @Nullable RemoteContent.Manifest current = manifest;
             if (current == null)
@@ -329,7 +366,8 @@ public final class ContentSync implements AutoCloseable {
             Instant now = Instant.now();
             Set<RemoteContent.Resource> keep = new HashSet<>(current.needed(now));
             if (cache != null) {
-                var fallbacks = selectAnnouncementFallbacks(current, null, now);
+                @Unmodifiable Map<String, RemoteContent.Announcement> fallbacks =
+                        selectAnnouncementFallbacks(current, null, now, verification);
                 if (!fallbacks.equals(cache.announcementFallbacks())) {
                     cache = cache.withAnnouncementFallbacks(fallbacks);
                     cacheDirty = true;
@@ -362,10 +400,22 @@ public final class ContentSync implements AutoCloseable {
     }
 
     /// Delivers ordered snapshots; cancellation checks prevent old selection generations from updating the UI.
-    private void emit(boolean pending, @Nullable String error) {
-        if (!worker.isShutdown())
-            listener.accept(new Result(manifest, cache == null ? Map.of() : cache.announcementFallbacks(),
-                    !checked, pending, success,
+    private void emit(long token, Map<String, Boolean> verification, boolean pending, @Nullable String error) {
+        if (worker.isShutdown() || generation != token)
+            return;
+        @Nullable RemoteContent.Manifest current = manifest;
+        Instant now = Instant.now();
+        Set<String> ready = new HashSet<>();
+        if (current != null) {
+            for (RemoteContent.Item item : current.announcements()) {
+                if (!item.expired(now) && verifyAnnouncement(item, current.files(), verification))
+                    ready.add(item.id());
+            }
+        }
+        @Unmodifiable Map<String, RemoteContent.Announcement> fallbacks = current == null || cache == null ? Map.of()
+                : selectAnnouncementFallbacks(current, null, now, verification);
+        if (!worker.isShutdown() && generation == token)
+            listener.accept(new Result(current, fallbacks, ready, !checked, pending, success,
                     cache == null ? null : cache.checkedAt(), error, failures > retrySeconds.length));
     }
 
