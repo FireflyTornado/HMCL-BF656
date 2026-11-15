@@ -28,10 +28,12 @@ import org.jetbrains.annotations.Unmodifiable;
 import java.io.IOException;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
+import java.nio.channels.OverlappingFileLockException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
@@ -40,15 +42,19 @@ import java.util.Arrays;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
+import java.util.UUID;
 
 /// Instance-local receipts and content-addressed downloads, with ownership-bounded garbage collection.
 @NotNullByDefault
 public final class ContentStore {
     /// Bounds local metadata reads and writes, including the escaped current manifest.
     private static final int MAX_STATE_BYTES = 12_582_912;
-    /// Serializes local writers before acquiring the per-source file lock shared by launcher processes.
+    /// Serializes local writers before taking the instance lock shared across launcher processes.
     private static final Object CACHE_WRITE_LOCK = new Object();
+    /// Avoids opening a second channel to a locally locked registration.
+    private static final Set<Path> LOCAL_USERS = new HashSet<>();
     /// This instance's `.launcher` directory.
     private final Path root;
     /// Source-specific receipt and HTTP state directory beneath `client`.
@@ -93,19 +99,56 @@ public final class ContentStore {
     /// Loads a source-bound valid manifest; corrupt HTTP state is not treated as usable content.
     public synchronized @Nullable Cache cache(String instanceKey) {
         try {
-            Path path = stateDirectory.resolve("sync.json");
-            if (!Files.isRegularFile(path))
-                return null;
-            JsonObject json = read(path);
+            return loadCache(instanceKey).cache();
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    /// Associates a loaded HTTP cache with the exact on-disk state a subsequent write may replace.
+    @NotNullByDefault
+    record CacheState(@Nullable Cache cache, String version) { }
+
+    /// Reads the authoritative state and its fingerprint in one pass.
+    synchronized CacheState loadCache(String instanceKey) throws IOException {
+        return Objects.requireNonNull(loadChangedCache(instanceKey, null));
+    }
+
+    /// Reloads metadata and sidecars only when the caller's disk fingerprint changed.
+    synchronized @Nullable CacheState loadChangedCache(String instanceKey, @Nullable String knownVersion) throws IOException {
+        DiskState disk = readSyncState();
+        if (disk.version().equals(knownVersion))
+            return null;
+        if (disk.version().isEmpty())
+            return new CacheState(null, disk.version());
+        try {
+            JsonObject json = JsonParser.parseString(disk.text()).getAsJsonObject();
             String body = json.get("body").getAsString();
             RemoteContent.Manifest manifest = RemoteContent.parse(body, instanceKey);
             @Nullable JsonElement index = json.get("announcementFallbacks");
             var fallbacks = readAnnouncementFallbacks(index, manifest);
             boolean rewrite = index != null && (!index.isJsonObject() || index.getAsJsonObject().size() != fallbacks.size());
-            return new Cache(body, json.get("etag").getAsString(), Instant.parse(json.get("checkedAt").getAsString()),
-                    fallbacks, rewrite);
+            Cache cache = new Cache(body, json.get("etag").getAsString(),
+                    Instant.parse(json.get("checkedAt").getAsString()), fallbacks, rewrite);
+            return new CacheState(cache, disk.version());
         } catch (IOException | RuntimeException e) {
-            return null;
+            return new CacheState(null, disk.version());
+        }
+    }
+
+    /// One atomic read of the state file. An empty version identifies an absent file.
+    @NotNullByDefault
+    private record DiskState(String text, String version) { }
+
+    /// Fingerprints the whole state, including fallback-only and compaction changes.
+    private DiskState readSyncState() throws IOException {
+        try (var input = Files.newInputStream(stateDirectory.resolve("sync.json"), LinkOption.NOFOLLOW_LINKS)) {
+            byte @Unmodifiable [] bytes = input.readNBytes(MAX_STATE_BYTES + 1);
+            if (bytes.length > MAX_STATE_BYTES)
+                throw new IOException("Content state is too large");
+            return new DiskState(new String(bytes, StandardCharsets.UTF_8), RemoteContent.digest(bytes));
+        } catch (NoSuchFileException e) {
+            return new DiskState("", "");
         }
     }
 
@@ -159,22 +202,65 @@ public final class ContentStore {
 
     /// Saves validated metadata before payload downloads, so a known new agreement cannot revert to old consent.
     public synchronized void cache(Cache cache) throws IOException {
-        Files.createDirectories(stateDirectory);
-        checkFallbackDirectory(stateDirectory);
+        withInstanceLock(() -> saveCache(cache, null));
+    }
+
+    /// Publishes only if nobody has replaced the source cache since the caller read it.
+    synchronized String publishCache(Cache cache, String expectedVersion, Usage usage) throws IOException {
+        return withInstanceLock(() -> {
+            usage.checkOpen();
+            checkCacheVersion(expectedVersion);
+            return saveCache(cache, usage);
+        });
+    }
+
+    /// Signals a concurrent publication so the caller can reload the authoritative state.
+    @NotNullByDefault
+    static final class CacheChangedException extends IOException {
+        /// Describes a rejected update based on an older snapshot.
+        private CacheChangedException() {
+            super("Another launcher updated this instance's content cache");
+        }
+    }
+
+    /// Compares the expected fingerprint while publication and file cleanup hold the same instance lock.
+    private DiskState checkCacheVersion(String expectedVersion) throws IOException {
+        DiskState state = readSyncState();
+        if (!state.version().equals(expectedVersion))
+            throw new CacheChangedException();
+        return state;
+    }
+
+    /// A short filesystem operation protected by the instance lock.
+    @FunctionalInterface
+    @NotNullByDefault
+    private interface LockedOperation<T> {
+        /// Performs the protected operation.
+        T run() throws IOException;
+    }
+
+    /// Shares one lock across all sources that use this instance's managed files.
+    private <T> T withInstanceLock(LockedOperation<T> operation) throws IOException {
+        Path client = root.resolve("client");
+        Files.createDirectories(client);
+        checkFallbackDirectory(client);
         synchronized (CACHE_WRITE_LOCK) {
-            try (var channel = FileChannel.open(stateDirectory.resolve("sync.lock"), StandardOpenOption.CREATE,
+            try (var channel = FileChannel.open(client.resolve("content.lock"), StandardOpenOption.CREATE,
                     StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
                  @Nullable FileLock lock = channel.tryLock()) {
                 if (lock == null)
                     throw new IOException("Another launcher is saving this instance's content cache");
-                saveCache(cache);
+                return operation.run();
             }
         }
     }
 
     /// Installs immutable snapshots and publishes their index before collecting unreferenced files.
-    private void saveCache(Cache cache) throws IOException {
+    private String saveCache(Cache cache, @Nullable Usage usage) throws IOException {
+        Files.createDirectories(stateDirectory);
+        checkFallbackDirectory(stateDirectory);
         JsonObject json = new JsonObject();
+        json.addProperty("cacheRevision", UUID.randomUUID().toString());
         json.addProperty("body", cache.body());
         json.addProperty("etag", cache.etag());
         json.addProperty("checkedAt", cache.checkedAt().toString());
@@ -197,10 +283,100 @@ public final class ContentStore {
             }
         }
         json.add("announcementFallbacks", references);
-        write(stateDirectory.resolve("sync.json"), json.toString().getBytes(StandardCharsets.UTF_8));
-        pruneFallbackSnapshots(directory, keep);
-        ensureServer();
-        write(server.resolve("manifest.json"), cache.body().getBytes(StandardCharsets.UTF_8));
+        byte @Unmodifiable [] bytes = json.toString().getBytes(StandardCharsets.UTF_8);
+        write(stateDirectory.resolve("sync.json"), bytes);
+        try {
+            ensureServer();
+            write(server.resolve("manifest.json"), cache.body().getBytes(StandardCharsets.UTF_8));
+            if (!hasOtherUsers(usage))
+                pruneFallbackSnapshots(directory, keep);
+        } catch (IOException e) {
+            org.jackhuang.hmcl.util.logging.Logger.LOG.warning("Cannot update the public content cache", e);
+        }
+        return RemoteContent.digest(bytes);
+    }
+
+    /// A launcher keeps this registration open for as long as it can present the instance's cached files.
+    @NotNullByDefault
+    static final class Usage implements AutoCloseable {
+        /// Unique registration file within the instance.
+        private final Path path;
+        /// The open channel holds the exclusive OS lock until close or process exit.
+        private final FileChannel channel;
+
+        /// Owns a newly locked registration.
+        private Usage(Path path, FileChannel channel) {
+            this.path = path;
+            this.channel = channel;
+        }
+
+        /// Prevents queued work from changing storage after this registration has closed.
+        private void checkOpen() throws IOException {
+            if (!channel.isOpen())
+                throw new IOException("The instance content cache is no longer in use");
+        }
+
+        /// Releases the registration for the next cleanup to collect.
+        @Override
+        public void close() throws IOException {
+            synchronized (CACHE_WRITE_LOCK) {
+                try {
+                    channel.close();
+                } finally {
+                    LOCAL_USERS.remove(path);
+                }
+            }
+        }
+    }
+
+    /// Registers before loading or presenting cached files, under the same lock used by garbage collection.
+    synchronized Usage registerUsage() throws IOException {
+        return withInstanceLock(() -> {
+            Path directory = usageDirectory();
+            Files.createDirectories(directory);
+            checkFallbackDirectory(directory);
+            Path path = Files.createTempFile(directory.toRealPath(), "session-", ".lock");
+            FileChannel channel = FileChannel.open(path, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
+            try {
+                channel.lock();
+                LOCAL_USERS.add(path);
+                return new Usage(path, channel);
+            } catch (IOException | RuntimeException e) {
+                channel.close();
+                throw e;
+            }
+        });
+    }
+
+    /// Keeps usage registrations at the instance level because resources are shared across sources.
+    private Path usageDirectory() {
+        return root.resolve("client/content-users");
+    }
+
+    /// Checks for live users and removes registrations left unlocked by closed or crashed launchers.
+    private boolean hasOtherUsers(@Nullable Usage own) throws IOException {
+        Path directory = usageDirectory();
+        if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS))
+            return false;
+        checkFallbackDirectory(directory);
+        try (var paths = Files.newDirectoryStream(directory.toRealPath(), "session-*.lock")) {
+            for (Path path : paths) {
+                if ((own != null && path.equals(own.path)) || !path.getFileName().toString().matches("session-[0-9]+\\.lock")
+                        || !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS))
+                    continue;
+                if (LOCAL_USERS.contains(path))
+                    return true;
+                try (var channel = FileChannel.open(path, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
+                     @Nullable FileLock lock = channel.tryLock()) {
+                    if (lock == null)
+                        return true;
+                } catch (OverlappingFileLockException e) {
+                    return true;
+                }
+                Files.deleteIfExists(path);
+            }
+        }
+        return false;
     }
 
     /// Resolves the snapshot directory dedicated to this instance and remote source.
@@ -259,20 +435,68 @@ public final class ContentStore {
 
     /// Installs hash-verified bytes atomically and records ownership before creating the managed file.
     public synchronized void install(RemoteContent.Resource resource, byte[] bytes) throws IOException {
+        install(resource, bytes, null);
+    }
+
+    /// Installs a verified payload while its synchronization session still owns a usage registration.
+    synchronized void install(RemoteContent.Resource resource, byte[] bytes, @Nullable Usage usage) throws IOException {
         if (!RemoteContent.digest(bytes).equals(resource.sha256()))
             throw new IOException("SHA-256 mismatch: " + resource.path());
-        ensureServer();
-        Path path = file(resource);
-        Files.createDirectories(path.getParent());
-        checkOwnedPath(path);
-        Set<String> owned = owned();
-        owned.add(resource.cacheName());
-        saveOwned(owned);
-        write(path, bytes);
+        withInstanceLock(() -> {
+            if (usage != null)
+                usage.checkOpen();
+            ensureServer();
+            Path path = file(resource);
+            Files.createDirectories(path.getParent());
+            checkOwnedPath(path);
+            Set<String> owned = owned();
+            owned.add(resource.cacheName());
+            saveOwned(owned);
+            write(path, bytes);
+            return true;
+        });
     }
 
     /// Deletes only previously managed objects no longer needed by active/future content or a pending replacement.
     public synchronized void prune(@Unmodifiable Set<RemoteContent.Resource> keep) throws IOException {
+        withInstanceLock(() -> {
+            if (!hasOtherUsers(null))
+                pruneFiles(keep);
+            return true;
+        });
+    }
+
+    /// Reclaims files only for the latest persisted source state and while this launcher is the sole user.
+    synchronized void prune(@Unmodifiable Set<RemoteContent.Resource> keep, String expectedVersion, Usage usage)
+            throws IOException {
+        withInstanceLock(() -> {
+            usage.checkOpen();
+            DiskState state = checkCacheVersion(expectedVersion);
+            if (!hasOtherUsers(usage)) {
+                pruneFiles(keep);
+                if (!state.version().isEmpty())
+                    prunePublishedFallbacks(state.text());
+            }
+            return true;
+        });
+    }
+
+    /// Reclaims obsolete snapshots left behind when cleanup was deferred during publication.
+    private void prunePublishedFallbacks(String text) {
+        @Nullable JsonElement index = JsonParser.parseString(text).getAsJsonObject().get("announcementFallbacks");
+        Set<String> keep = new HashSet<>();
+        if (index != null && index.isJsonObject()) {
+            for (var entry : index.getAsJsonObject().entrySet()) {
+                JsonElement value = entry.getValue();
+                if (value.isJsonPrimitive() && value.getAsJsonPrimitive().isString())
+                    keep.add(value.getAsString() + ".json");
+            }
+        }
+        pruneFallbackSnapshots(fallbackDirectory(), keep);
+    }
+
+    /// Removes managed payload objects under the instance lock.
+    private void pruneFiles(@Unmodifiable Set<RemoteContent.Resource> keep) throws IOException {
         Set<String> names = new HashSet<>();
         for (var resource : keep)
             names.add(resource.cacheName());
@@ -293,6 +517,14 @@ public final class ContentStore {
 
     /// Removes expired inline bodies and unused file descriptors while retaining the HTTP validator for revalidation.
     public synchronized Cache compact(Cache cache, String instanceKey, Instant now) throws IOException {
+        Cache compacted = compacted(cache, instanceKey, now);
+        if (compacted != cache)
+            cache(compacted);
+        return compacted;
+    }
+
+    /// Prepares compaction without publishing it, so synchronization can check its cache version first.
+    static Cache compacted(Cache cache, String instanceKey, Instant now) throws IOException {
         RemoteContent.Manifest manifest = RemoteContent.parse(cache.body(), instanceKey);
         JsonObject json = JsonParser.parseString(cache.body()).getAsJsonObject();
         boolean changed = false;
@@ -319,9 +551,7 @@ public final class ContentStore {
         }
         if (!changed)
             return cache;
-        Cache compacted = new Cache(json.toString(), cache.etag(), cache.checkedAt(), cache.announcementFallbacks());
-        cache(compacted);
-        return compacted;
+        return new Cache(json.toString(), cache.etag(), cache.checkedAt(), cache.announcementFallbacks());
     }
 
     /// Whether this exact agreement, including its indexed document/image digests, was accepted.

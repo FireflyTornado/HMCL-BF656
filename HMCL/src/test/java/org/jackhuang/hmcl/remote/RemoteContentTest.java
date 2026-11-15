@@ -20,11 +20,13 @@ package org.jackhuang.hmcl.remote;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import org.jetbrains.annotations.NotNullByDefault;
+import org.jetbrains.annotations.Unmodifiable;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.io.File;
 import java.io.IOException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -33,6 +35,7 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -272,6 +275,99 @@ final class RemoteContentTest {
         assertTrue(damaged.fallbackIndexNeedsRewrite());
         reopened.cache(damaged.withAnnouncementFallbacks(Map.of()));
         assertFalse(Files.exists(snapshot));
+    }
+
+    /// Preserves an older reader's payload and snapshot and rejects a stale publisher before reclaiming either file.
+    @Test
+    void protectsSharedCacheUntilTheOtherReaderCloses() throws Exception {
+        var store = new ContentStore(root, "source");
+        var readerStore = new ContentStore(root, "source");
+        String oldBody = "# Old announcement";
+        var old = RemoteContent.parse(ContentFixtures.markdown("main", oldBody, new byte[0]).toString(), "main");
+        var resource = old.files().get(ContentFixtures.BODY);
+        store.install(resource, oldBody.getBytes(StandardCharsets.UTF_8));
+        var fallback = RemoteContent.Announcement.capture(old, old.announcements().getFirst());
+        String waiting = ContentFixtures.markdown("main", "# Replacement", new byte[0]).toString();
+        store.cache(new ContentStore.Cache(waiting, "", Instant.EPOCH, Map.of("news", fallback)));
+        Path state = root.resolve("client/state").resolve(RemoteContent.hash("source"));
+        var initial = JsonParser.parseString(Files.readString(state.resolve("sync.json"))).getAsJsonObject();
+        String digest = initial.getAsJsonObject("announcementFallbacks").get("news").getAsString();
+        Path snapshot = state.resolve("announcement-fallbacks").resolve(digest + ".json");
+        String replacement = ContentFixtures.basic("main").toString();
+
+        try (var writer = store.registerUsage()) {
+            String baseline = store.loadCache("main").version();
+            String published;
+            try (var reader = readerStore.registerUsage()) {
+                assertNotNull(reader);
+                assertEquals(fallback, readerStore.loadCache("main").cache().announcementFallbacks().get("news"));
+                published = store.publishCache(new ContentStore.Cache(replacement, "", Instant.EPOCH), baseline, writer);
+                assertThrows(ContentStore.CacheChangedException.class, () -> readerStore.publishCache(
+                        new ContentStore.Cache(waiting, "", Instant.EPOCH, Map.of("news", fallback)), baseline, reader));
+                assertThrows(ContentStore.CacheChangedException.class, () -> readerStore.prune(Set.of(), baseline, reader));
+                store.prune(Set.of(), published, writer);
+                assertTrue(Files.isRegularFile(snapshot));
+                assertEquals(oldBody, readerStore.body(fallback.item(), fallback.files()));
+            }
+
+            store.prune(Set.of(), published, writer);
+            assertFalse(Files.exists(snapshot));
+            assertFalse(Files.exists(store.file(resource)));
+            assertEquals(replacement, java.util.Objects.requireNonNull(store.cache("main")).body());
+        }
+    }
+
+    /// Exercises the OS lock path with a reader in a separate JVM.
+    @Test
+    void protectsSharedPayloadAcrossProcesses() throws Exception {
+        var store = new ContentStore(root, "source");
+        byte @Unmodifiable [] bytes = "announcement".getBytes(StandardCharsets.UTF_8);
+        var resource = new RemoteContent.Resource("announcements/shared.md", RemoteContent.digest(bytes), "");
+        store.install(resource, bytes);
+        Path ready = root.resolve("peer-ready");
+        Path java = Path.of(System.getProperty("java.home"), "bin", "java");
+        if (!Files.isRegularFile(java))
+            java = java.resolveSibling("java.exe");
+        String classPath = String.join(File.pathSeparator,
+                Path.of(PeerReader.class.getProtectionDomain().getCodeSource().getLocation().toURI()).toString(),
+                Path.of(ContentStore.class.getProtectionDomain().getCodeSource().getLocation().toURI()).toString(),
+                Path.of(JsonObject.class.getProtectionDomain().getCodeSource().getLocation().toURI()).toString());
+
+        try (var writer = store.registerUsage()) {
+            Process peer = new ProcessBuilder(java.toString(), "-cp", classPath, PeerReader.class.getName(),
+                    root.toString(), ready.toString()).redirectErrorStream(true).start();
+            try {
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+                while (!Files.exists(ready) && peer.isAlive() && System.nanoTime() < deadline)
+                    Thread.sleep(20);
+                assertTrue(Files.exists(ready), "The second JVM must hold an instance registration");
+                store.prune(Set.of(), "", writer);
+                assertTrue(Files.exists(store.file(resource)));
+                peer.getOutputStream().close();
+                assertTrue(peer.waitFor(5, TimeUnit.SECONDS));
+                assertEquals(0, peer.exitValue(), new String(peer.getInputStream().readAllBytes(), StandardCharsets.UTF_8));
+            } finally {
+                if (peer.isAlive()) {
+                    peer.destroyForcibly();
+                    peer.waitFor(5, TimeUnit.SECONDS);
+                }
+            }
+            store.prune(Set.of(), "", writer);
+            assertFalse(Files.exists(store.file(resource)));
+        }
+    }
+
+    /// Holds the real cache registration in another launcher process.
+    @NotNullByDefault
+    public static final class PeerReader {
+        /// Holds the registration until the parent closes its input pipe.
+        public static void main(String @Unmodifiable [] args) throws Exception {
+            var store = new ContentStore(Path.of(args[0]), "other-source");
+            try (var registration = store.registerUsage()) {
+                Files.createFile(Path.of(args[1]));
+                System.in.read();
+            }
+        }
     }
 
     /// Expired inline text is removed from persisted metadata while its conditional HTTP validator remains usable.

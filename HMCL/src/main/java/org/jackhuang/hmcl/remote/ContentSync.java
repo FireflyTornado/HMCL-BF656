@@ -67,6 +67,10 @@ public final class ContentSync implements AutoCloseable {
     private @Nullable RemoteContent.Manifest previous;
     /// Conditional-request validator and original response.
     private @Nullable ContentStore.Cache cache;
+    /// Fingerprint of the authoritative cache used for the request and subsequent maintenance.
+    private String cacheVersion = "";
+    /// Protects all cached files this session may still present, even while it is paused.
+    private volatile @Nullable ContentStore.Usage usage;
     /// A metadata write must complete before managed file cleanup can use the new state.
     private boolean cacheDirty;
     /// Whether the manifest has been checked successfully during this process session.
@@ -205,9 +209,49 @@ public final class ContentSync implements AutoCloseable {
     }
 
     /// Runs local expiry cleanup even after all network work has stopped.
-    public void prune() {
+    public synchronized void prune() {
         if (!worker.isShutdown())
-            worker.execute(() -> cleanup(new HashMap<>()));
+            worker.execute(() -> {
+                if (!cleanup(new HashMap<>())) {
+                    synchronized (this) {
+                        if (active && !running && !worker.isShutdown()) {
+                            success = false;
+                            failures = 0;
+                            activate();
+                        }
+                    }
+                }
+            });
+    }
+
+    /// Acquires filesystem protection before loading any documents into this session.
+    private synchronized void registerUsage(long token) throws IOException {
+        checkActive(token);
+        if (usage == null)
+            usage = store.registerUsage();
+    }
+
+    /// Adopts a newer on-disk state without treating its cached response as a fresh network check.
+    private void reloadCache() throws IOException {
+        @Nullable ContentStore.CacheState disk = store.loadChangedCache(config.instanceKey(),
+                cache == null ? null : cacheVersion);
+        if (disk == null)
+            return;
+        previous = manifest;
+        cacheVersion = disk.version();
+        cache = disk.cache();
+        manifest = cache == null ? null : RemoteContent.parse(cache.body(), config.instanceKey());
+        cacheDirty = cache != null && cache.fallbackIndexNeedsRewrite();
+        checked = false;
+    }
+
+    /// Discards authorization metadata when a conflicting or incomplete publication must be reloaded.
+    private void clearCacheState() {
+        cache = null;
+        manifest = null;
+        previous = null;
+        cacheDirty = false;
+        checked = false;
     }
 
     /// Executes one attempt, continuing past individual file failures so unrelated items can still become ready.
@@ -215,29 +259,11 @@ public final class ContentSync implements AutoCloseable {
         Map<String, Boolean> verification = new HashMap<>();
         StringBuilder errors = new StringBuilder();
         try {
-            checkActive(token);
-            if (cache == null) {
-                cache = store.cache(config.instanceKey());
-                if (cache != null) {
-                    manifest = RemoteContent.parse(cache.body(), config.instanceKey());
-                    cacheDirty = cache.fallbackIndexNeedsRewrite();
-                }
-            }
+            registerUsage(token);
+            reloadCache();
             emit(token, verification, true, null);
             if (!checked) {
-                ContentStore.Cache fresh = downloadManifest(token);
-                RemoteContent.Manifest next = RemoteContent.parse(fresh.body(), config.instanceKey());
-                checkActive(token);
-                @Unmodifiable Map<String, RemoteContent.Announcement> fallbacks =
-                        selectAnnouncementFallbacks(next, manifest, Instant.now(), verification);
-                checkActive(token);
-                if (!next.equals(manifest))
-                    previous = manifest;
-                manifest = next;
-                cache = fresh.withAnnouncementFallbacks(fallbacks);
-                cacheDirty = true;
-                persistCache();
-                checked = true;
+                checkManifest(token, verification);
                 emit(token, verification, true, null);
             }
             RemoteContent.Manifest current = java.util.Objects.requireNonNull(manifest);
@@ -253,7 +279,7 @@ public final class ContentSync implements AutoCloseable {
                     if (!verified) {
                         byte[] bytes = download(resourceUri(resource), "", 16_777_216, token).bytes();
                         checkActive(token);
-                        store.install(resource, bytes);
+                        store.install(resource, bytes, java.util.Objects.requireNonNull(usage));
                         verification.put(name, true);
                         emit(token, verification, true, null);
                     }
@@ -289,12 +315,15 @@ public final class ContentSync implements AutoCloseable {
                 return;
             running = false;
             success = errors.isEmpty();
+            if (!cleanup(verification)) {
+                success = false;
+                errors.append("Another launcher updated the content cache during synchronization");
+            }
             if (success) {
                 previous = null;
             } else {
                 failures++;
             }
-            cleanup(verification);
             emit(token, verification, false, errors.isEmpty() ? null : errors.toString());
             if (!success && failures <= retrySeconds.length) {
                 retry = worker.schedule(() -> {
@@ -304,6 +333,40 @@ public final class ContentSync implements AutoCloseable {
                     }
                 }, retrySeconds[failures - 1], TimeUnit.SECONDS);
             }
+        }
+    }
+
+    /// Publishes a response against its original disk baseline, retrying once from a competing publication.
+    private void checkManifest(long token, Map<String, Boolean> verification) throws IOException {
+        for (int attempt = 0; ; attempt++) {
+            ContentStore.Cache fresh = downloadManifest(token);
+            RemoteContent.Manifest next = RemoteContent.parse(fresh.body(), config.instanceKey());
+            checkActive(token);
+            @Unmodifiable Map<String, RemoteContent.Announcement> fallbacks =
+                    selectAnnouncementFallbacks(next, manifest, Instant.now(), verification);
+            ContentStore.Cache replacement = fresh.withAnnouncementFallbacks(fallbacks);
+            checkActive(token);
+            try {
+                cacheVersion = store.publishCache(replacement, cacheVersion, java.util.Objects.requireNonNull(usage));
+            } catch (ContentStore.CacheChangedException e) {
+                clearCacheState();
+                reloadCache();
+                verification.clear();
+                if (attempt > 0)
+                    throw e;
+                emit(token, verification, true, null);
+                continue;
+            } catch (IOException e) {
+                clearCacheState();
+                throw e;
+            }
+            if (!next.equals(manifest))
+                previous = manifest;
+            manifest = next;
+            cache = replacement;
+            cacheDirty = false;
+            checked = true;
+            return;
         }
     }
 
@@ -352,17 +415,18 @@ public final class ContentSync implements AutoCloseable {
     /// Writes current metadata and its fallback index before any files can be garbage-collected.
     private void persistCache() throws IOException {
         if (cacheDirty && cache != null) {
-            store.cache(cache);
+            cacheVersion = store.publishCache(cache, cacheVersion, java.util.Objects.requireNonNull(usage));
             cacheDirty = false;
         }
     }
 
     /// Retains current resources and files still owned by an available fallback revision.
-    private void cleanup(Map<String, Boolean> verification) {
+    private boolean cleanup(Map<String, Boolean> verification) {
         try {
             @Nullable RemoteContent.Manifest current = manifest;
-            if (current == null)
-                return;
+            @Nullable ContentStore.Usage registered = usage;
+            if (current == null || registered == null)
+                return true;
             Instant now = Instant.now();
             Set<RemoteContent.Resource> keep = new HashSet<>(current.needed(now));
             if (cache != null) {
@@ -370,6 +434,11 @@ public final class ContentSync implements AutoCloseable {
                         selectAnnouncementFallbacks(current, null, now, verification);
                 if (!fallbacks.equals(cache.announcementFallbacks())) {
                     cache = cache.withAnnouncementFallbacks(fallbacks);
+                    cacheDirty = true;
+                }
+                ContentStore.Cache compacted = ContentStore.compacted(cache, config.instanceKey(), now);
+                if (compacted != cache) {
+                    cache = compacted;
                     cacheDirty = true;
                 }
                 persistCache();
@@ -391,12 +460,20 @@ public final class ContentSync implements AutoCloseable {
                     }
                 }
             }
-            store.prune(Set.copyOf(keep));
-            if (cache != null)
-                cache = store.compact(cache, config.instanceKey(), now);
+            store.prune(Set.copyOf(keep), cacheVersion, registered);
+        } catch (ContentStore.CacheChangedException e) {
+            clearCacheState();
+            verification.clear();
+            try {
+                reloadCache();
+            } catch (IOException failure) {
+                org.jackhuang.hmcl.util.logging.Logger.LOG.warning("Cannot reload the instance content cache", failure);
+            }
+            return false;
         } catch (IOException | RuntimeException e) {
             org.jackhuang.hmcl.util.logging.Logger.LOG.warning("Cannot prune instance content", e);
         }
+        return true;
     }
 
     /// Delivers ordered snapshots; cancellation checks prevent old selection generations from updating the UI.
@@ -488,5 +565,14 @@ public final class ContentSync implements AutoCloseable {
     public synchronized void close() {
         pause();
         worker.shutdownNow();
+        @Nullable ContentStore.Usage registered = usage;
+        usage = null;
+        if (registered != null) {
+            try {
+                registered.close();
+            } catch (IOException e) {
+                org.jackhuang.hmcl.util.logging.Logger.LOG.warning("Cannot release instance content cache", e);
+            }
+        }
     }
 }

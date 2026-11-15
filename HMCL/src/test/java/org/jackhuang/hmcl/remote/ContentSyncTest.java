@@ -40,6 +40,7 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -65,6 +66,69 @@ final class ContentSyncTest {
     @BeforeEach
     void setup() throws Exception {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+    }
+
+    /// Lets an older HTTP response finish after a second session has published a newer agreement.
+    @Test
+    void retriesLateManifestUsingTheNewerDiskState() throws Exception {
+        HttpServer http = java.util.Objects.requireNonNull(server);
+        CountDownLatch oldRequest = new CountDownLatch(1);
+        CountDownLatch releaseOld = new CountDownLatch(1);
+        AtomicInteger requests = new AtomicInteger();
+        AtomicReference<@Nullable String> retriedValidator = new AtomicReference<>();
+        JsonObject original = ContentFixtures.basic("main");
+        JsonObject newer = original.deepCopy();
+        newer.getAsJsonObject("agreement").addProperty("revision", 2);
+        try (var handlers = Executors.newVirtualThreadPerTaskExecutor()) {
+            http.setExecutor(handlers);
+            http.createContext("/", exchange -> {
+                int request = requests.incrementAndGet();
+                if (request == 1) {
+                    oldRequest.countDown();
+                    try {
+                        if (!releaseOld.await(5, TimeUnit.SECONDS)) {
+                            send(exchange, 503, new byte[0]);
+                            return;
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        exchange.close();
+                        return;
+                    }
+                    exchange.getResponseHeaders().add("ETag", "\"old\"");
+                    send(exchange, 200, original.toString().getBytes(StandardCharsets.UTF_8));
+                } else if (request == 2) {
+                    exchange.getResponseHeaders().add("ETag", "\"new\"");
+                    send(exchange, 200, newer.toString().getBytes(StandardCharsets.UTF_8));
+                } else {
+                    retriedValidator.set(exchange.getRequestHeaders().getFirst("If-None-Match"));
+                    send(exchange, 304, new byte[0]);
+                }
+            });
+            http.start();
+            var config = config();
+            var storeA = new ContentStore(directory, config.endpoint().toString());
+            var storeB = new ContentStore(directory, config.endpoint().toString());
+            var eventsA = new LinkedBlockingQueue<ContentSync.Result>();
+            var eventsB = new LinkedBlockingQueue<ContentSync.Result>();
+            try (var launcherA = new ContentSync(config, storeA, eventsA::add, new long[0]);
+                 var launcherB = new ContentSync(config, storeB, eventsB::add, new long[0])) {
+                launcherA.activate();
+                assertTrue(oldRequest.await(5, TimeUnit.SECONDS));
+                launcherB.activate();
+                assertEquals(2, java.util.Objects.requireNonNull(awaitFinal(eventsB, true).manifest()).agreement().revision());
+                releaseOld.countDown();
+                ContentSync.Result accepted = awaitFinal(eventsA, true);
+                assertEquals(2, java.util.Objects.requireNonNull(accepted.manifest()).agreement().revision());
+                assertEquals("\"new\"", retriedValidator.get());
+                assertEquals(3, requests.get());
+                assertEquals(newer.toString(), java.util.Objects.requireNonNull(storeA.cache("main")).body());
+                assertEquals(newer.toString(), Files.readString(directory.resolve("server/manifest.json")));
+            } finally {
+                releaseOld.countDown();
+                http.stop(0);
+            }
+        }
     }
 
     /// Releases the local listener.
