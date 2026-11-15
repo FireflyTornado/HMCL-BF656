@@ -225,6 +225,60 @@ final class ContentSyncTest {
         }
     }
 
+    /// Retains a verified future announcement through cleanup and restart while its replacement is unavailable.
+    @Test
+    void retainsScheduledFallbackBeforePublication() throws Exception {
+        HttpServer http = java.util.Objects.requireNonNull(server);
+        Instant start = Instant.now().plusSeconds(3_600);
+        JsonObject original = ContentFixtures.markdown("main", BODY, IMAGE);
+        original.getAsJsonArray("announcements").get(0).getAsJsonObject().addProperty("startsAt", start.toString());
+        JsonObject replacement = ContentFixtures.markdown("main", "# New scheduled revision", new byte[0]);
+        JsonObject next = replacement.getAsJsonArray("announcements").get(0).getAsJsonObject();
+        next.addProperty("revision", 2);
+        next.addProperty("startsAt", start.toString());
+        AtomicReference<String> catalog = new AtomicReference<>(original.toString());
+        http.createContext("/", exchange -> {
+            String path = exchange.getRequestURI().getPath();
+            if (path.endsWith("manifest.json")) {
+                send(exchange, 200, catalog.get().getBytes(StandardCharsets.UTF_8));
+            } else if (path.endsWith("news.md")) {
+                boolean isOriginal = catalog.get().equals(original.toString());
+                send(exchange, isOriginal ? 200 : 503, BODY.getBytes(StandardCharsets.UTF_8));
+            } else {
+                send(exchange, 200, IMAGE);
+            }
+        });
+        http.start();
+        var config = config();
+        var store = new ContentStore(directory, config.endpoint().toString());
+        var events = new LinkedBlockingQueue<ContentSync.Result>();
+        try (var sync = new ContentSync(config, store, events::add, new long[0])) {
+            sync.activate();
+            assertTrue(awaitFinal(events, true).readyAnnouncements().contains("news"));
+            catalog.set(replacement.toString());
+            sync.refresh();
+            ContentSync.Result waiting = awaitFinal(events, false);
+            assertFalse(waiting.readyAnnouncements().contains("news"));
+            var fallback = waiting.announcementFallbacks().get("news");
+            assertNotNull(fallback);
+            assertEquals(start, fallback.item().startsAt());
+            assertFalse(fallback.item().active(start.minusNanos(1)));
+            assertTrue(fallback.item().active(start));
+            assertTrue(store.verified(fallback.files().get(ContentFixtures.BODY)));
+        }
+
+        var reopened = new ContentStore(directory, config.endpoint().toString());
+        try (var sync = new ContentSync(config, reopened, events::add, new long[0])) {
+            sync.activate();
+            var cached = java.util.Objects.requireNonNull(events.poll(5, TimeUnit.SECONDS));
+            assertTrue(cached.cached());
+            var fallback = cached.announcementFallbacks().get("news");
+            assertNotNull(fallback);
+            assertEquals(1, fallback.item().revision());
+            assertTrue(fallback.item().active(start));
+        }
+    }
+
     /// Rejects a corrupted associated image both when capturing an old revision and when restoring a saved fallback.
     @ParameterizedTest
     @ValueSource(booleans = {false, true})

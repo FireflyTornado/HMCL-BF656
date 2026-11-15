@@ -324,7 +324,7 @@ public final class ContentSync implements AutoCloseable {
         return item.files().stream().allMatch(path -> verifyResource(files.get(path), verification));
     }
 
-    /// Keeps the newest verified revision for each still-published announcement whose replacement needs files.
+    /// Keeps verified, unexpired revisions while replacements download, including revisions scheduled for later.
     private @Unmodifiable Map<String, RemoteContent.Announcement> selectAnnouncementFallbacks(
             RemoteContent.Manifest current, @Nullable RemoteContent.Manifest prior, Instant now, Map<String, Boolean> verification) {
         Map<String, RemoteContent.Item> previousItems = new HashMap<>();
@@ -338,7 +338,7 @@ public final class ContentSync implements AutoCloseable {
             if (item.expired(now) || verifyAnnouncement(item, current.files(), verification))
                 continue;
             @Nullable RemoteContent.Item old = previousItems.get(item.id());
-            if (prior != null && old != null && old.active(now) && verifyAnnouncement(old, prior.files(), verification)) {
+            if (prior != null && old != null && !old.expired(now) && verifyAnnouncement(old, prior.files(), verification)) {
                 fallbacks.put(item.id(), RemoteContent.Announcement.capture(prior, old));
             } else {
                 @Nullable RemoteContent.Announcement cached = saved.get(item.id());

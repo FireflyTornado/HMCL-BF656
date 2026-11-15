@@ -455,6 +455,19 @@ public final class RemoteContentSmoke {
             require(root.lookup("#bf656-announcement-loading") == null, "Hide the card once the active announcements are ready");
             JsonObject pending = catalog("a", "# Another replacement", image);
             RemoteContent.Manifest waiting = RemoteContent.parse(pending.toString(), "a");
+            JsonObject scheduled = RemoteContent.writeAnnouncement(firstCached);
+            scheduled.getAsJsonObject("item").addProperty("startsAt", Instant.now().plusSeconds(3_600).toString());
+            var futureFallback = RemoteContent.readAnnouncement(scheduled);
+            receive.invoke(controller, session, new ContentSync.Result(waiting, Map.of("news", futureFallback), Set.of(),
+                    false, true, false, null, null, false));
+            require(root.lookup("#bf656-announcement-feed") == null, "A scheduled fallback must stay hidden before its start time");
+            scheduled.getAsJsonObject("item").addProperty("startsAt", Instant.now().minusSeconds(60).toString());
+            var activeFallback = RemoteContent.readAnnouncement(scheduled);
+            receive.invoke(controller, session, new ContentSync.Result(waiting, Map.of("news", activeFallback), Set.of(),
+                    false, true, false, null, null, false));
+            require(root.lookup("#bf656-announcement-feed") != null && root.lookup("#bf656-announcement-loading") != null,
+                    "A scheduled fallback must appear once active while the replacement is still loading");
+
             receive.invoke(controller, session, new ContentSync.Result(waiting, false, false, false, null, null, false));
             require(root.lookup("#bf656-announcement-loading") != null, "A scheduled retry must keep the loading card");
             receive.invoke(controller, session, new ContentSync.Result(waiting, false, false, false, null, null, true));
