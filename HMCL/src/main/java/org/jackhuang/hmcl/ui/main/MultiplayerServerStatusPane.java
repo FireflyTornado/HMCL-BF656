@@ -183,7 +183,8 @@ final class MultiplayerServerStatusPane extends HBox {
         signal.setVisible(false);
         signal.managedProperty().bind(signal.visibleProperty());
         signalBars.setAlignment(Pos.BOTTOM_LEFT);
-        for (int height : List.of(3, 5, 7, 9, 11)) {
+        @Unmodifiable List<Integer> heights = List.of(3, 5, 7, 9, 11);
+        for (int height : heights) {
             Region bar = new Region();
             bar.getStyleClass().add("multiplayer-server-signal-bar");
             bar.setMinSize(3, height);
@@ -338,12 +339,12 @@ final class MultiplayerServerStatusPane extends HBox {
             if (exactIndex >= 0) {
                 next = servers.get(exactIndex);
             } else {
-                List<SavedServer> byAddress = servers.stream()
+                @Unmodifiable List<SavedServer> byAddress = servers.stream()
                         .filter(server -> server.address().equals(previous.address())).toList();
                 if (byAddress.size() == 1)
                     next = byAddress.get(0);
                 else if (byAddress.isEmpty()) {
-                    List<SavedServer> byName = servers.stream()
+                    @Unmodifiable List<SavedServer> byName = servers.stream()
                             .filter(server -> server.name().equals(previous.name())).toList();
                     if (byName.size() == 1)
                         next = byName.get(0);
