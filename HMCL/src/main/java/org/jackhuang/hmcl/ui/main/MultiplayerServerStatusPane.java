@@ -35,6 +35,7 @@ import javafx.scene.Scene;
 import javafx.scene.control.CustomMenuItem;
 import javafx.scene.control.Label;
 import javafx.scene.control.MenuButton;
+import javafx.scene.control.MenuItem;
 import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.Tooltip;
 import javafx.scene.layout.HBox;
@@ -44,17 +45,14 @@ import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
 import javafx.stage.Stage;
 import javafx.util.Duration;
-import org.glavo.nbt.tag.ByteTag;
-import org.glavo.nbt.tag.CompoundTag;
-import org.glavo.nbt.tag.ListTag;
-import org.glavo.nbt.tag.StringTag;
-import org.glavo.nbt.tag.Tag;
 import org.jackhuang.hmcl.game.HMCLGameInstance;
 import org.jackhuang.hmcl.task.Schedulers;
 import org.jackhuang.hmcl.ui.FXUtils;
 import org.jackhuang.hmcl.ui.SVG;
 import org.jackhuang.hmcl.ui.main.MinecraftServerStatus.Result;
-import org.jackhuang.hmcl.util.NBTUtils;
+import org.jackhuang.hmcl.ui.main.SavedServerList.Contents;
+import org.jackhuang.hmcl.ui.main.SavedServerList.LimitExceededException;
+import org.jackhuang.hmcl.ui.main.SavedServerList.SavedServer;
 import org.jackhuang.hmcl.util.javafx.BindingMapping;
 import org.jetbrains.annotations.NotNullByDefault;
 import org.jetbrains.annotations.Nullable;
@@ -66,7 +64,6 @@ import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileTime;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -130,14 +127,18 @@ final class MultiplayerServerStatusPane extends HBox {
     private @Nullable HMCLGameInstance game;
     /// File in the current run directory, which may change with instance settings.
     private @Nullable Path file;
-    /// Version of the list file successfully applied to the controls.
+    /// Version last accepted or rejected after reading the file.
     private @Nullable FileVersion fileVersion;
+    /// Error currently displayed on the card, if any.
+    private @Nullable ListError listError;
+    /// Allows one unsuccessful read before displaying an error for a possible in-progress save.
+    private boolean retryingList;
     /// Guards against applying an obsolete file read after an instance or visibility change.
     private int listRevision;
     /// Whether a file check is already running for the active list revision.
     private boolean readingList;
-    /// Entries from the last successful read, in file order.
-    private @Unmodifiable List<SavedServer> servers = List.of();
+    /// Visible list contents from the last successful read.
+    private Contents serverList = SavedServerList.EMPTY;
     /// Currently selected entry from the file.
     private final ObjectProperty<@Nullable SavedServer> selected = new SimpleObjectProperty<>();
     /// Guards the status and loading state against results for a previous selection.
@@ -212,6 +213,7 @@ final class MultiplayerServerStatusPane extends HBox {
         refreshButton.setAccessibleText(i18n("button.refresh"));
         refreshButton.setGraphic(refreshIcon);
         refreshButton.setOnAction(event -> refresh());
+        refreshButton.managedProperty().bind(refreshButton.visibleProperty());
         getChildren().setAll(details, refreshButton);
 
         filePoll.setCycleCount(Animation.INDEFINITE);
@@ -258,8 +260,10 @@ final class MultiplayerServerStatusPane extends HBox {
         fileVersion = null;
         listRevision++;
         readingList = false;
+        retryingList = false;
         selector.hide();
-        servers = List.of();
+        serverList = SavedServerList.EMPTY;
+        setListError(null);
         rebuildMenu();
         select(null);
     }
@@ -278,29 +282,55 @@ final class MultiplayerServerStatusPane extends HBox {
 
         readingList = true;
         int revision = listRevision;
-        @Nullable FileVersion previous = refreshOnReturn ? null : fileVersion;
+        @Nullable FileVersion previous = refreshOnReturn && listError == null ? null : fileVersion;
         Schedulers.io().execute(() -> {
             @Nullable ServerList updated = readFile(resolved, previous);
             Platform.runLater(() -> {
                 if (revision != listRevision)
                     return;
                 readingList = false;
-                if (updated != null)
-                    applyList(updated);
+                if (updated == null)
+                    retryingList = false;
+                else
+                    applyRead(updated);
                 if (refreshOnReturn)
                     refresh();
             });
         });
     }
 
-    /// Applies saved entries and retains the current selection if it can be matched after a save.
-    private void applyList(ServerList updated) {
+    /// Applies a stable result, allowing one failed read while Minecraft may be saving the file.
+    private void applyRead(ServerList updated) {
+        if (updated.error() == ListError.UNREADABLE && !retryingList && listError == null) {
+            retryingList = true;
+            return;
+        }
+        retryingList = false;
         fileVersion = updated.version();
-        if (servers.equals(updated.entries()))
+        if (updated.error() != null) {
+            if (listError != updated.error()) {
+                selector.hide();
+                serverList = SavedServerList.EMPTY;
+                rebuildMenu();
+                select(null);
+                setListError(updated.error());
+            }
+            return;
+        }
+
+        boolean recovering = listError != null;
+        setListError(null);
+        if (!recovering && serverList.equals(updated.contents()))
             return;
 
-        servers = updated.entries();
+        applyList(updated.contents());
+    }
+
+    /// Applies saved entries and retains the current selection if it can be matched after a save.
+    private void applyList(Contents contents) {
+        serverList = contents;
         rebuildMenu();
+        @Unmodifiable List<SavedServer> servers = contents.entries();
         @Nullable SavedServer previous = selected.get();
         @Nullable SavedServer next = null;
         if (previous != null) {
@@ -325,11 +355,29 @@ final class MultiplayerServerStatusPane extends HBox {
         select(next);
     }
 
+    /// Shows a file error separately from the connection status and restores the controls on recovery.
+    private void setListError(@Nullable ListError error) {
+        listError = error;
+        refreshButton.setVisible(error == null);
+        status.setWrapText(error != null);
+        if (error != null) {
+            name.setText(i18n("bf656.server_status.title"));
+            status.setText(i18n(error.messageKey));
+            setVisible(true);
+        }
+    }
+
     /// Rebuilds the popup in the same order as the saved multiplayer list.
     private void rebuildMenu() {
         selector.getItems().clear();
+        @Unmodifiable List<SavedServer> servers = serverList.entries();
         for (SavedServer server : servers)
             selector.getItems().add(createServerMenuItem(server));
+        if (serverList.truncated()) {
+            MenuItem notice = new MenuItem(i18n("bf656.server_status.list_truncated", SavedServerList.MAX_VISIBLE_SERVERS));
+            notice.setDisable(true);
+            selector.getItems().add(notice);
+        }
         Node title = servers.size() > 1 ? selector : name;
         if (details.getChildren().get(0) != title)
             details.getChildren().set(0, title);
@@ -493,46 +541,58 @@ final class MultiplayerServerStatusPane extends HBox {
         return 1;
     }
 
-    /// Reads a new version of the file, leaving the previous version in place after a transient read failure.
+    /// Reads a changed file within its size budget and distinguishes limit failures from other read errors.
     private static @Nullable ServerList readFile(Path file, @Nullable FileVersion previous) {
+        @Nullable FileVersion version = null;
         try {
             BasicFileAttributes attributes = Files.readAttributes(file, BasicFileAttributes.class);
-            FileVersion version = new FileVersion(attributes.lastModifiedTime(), attributes.creationTime(),
+            version = new FileVersion(attributes.lastModifiedTime(), attributes.creationTime(),
                     attributes.size(), attributes.fileKey());
             if (version.equals(previous))
                 return null;
-
-            CompoundTag root = NBTUtils.readCompressed(file);
-            if (!(root.get("servers") instanceof ListTag<?> entries))
-                return new ServerList(version, List.of());
-
-            List<SavedServer> visible = new ArrayList<>();
-            for (Tag entry : entries) {
-                if (entry instanceof CompoundTag server
-                        && !(server.get("hidden") instanceof ByteTag hidden && hidden.get() != 0)
-                        && server.get("name") instanceof StringTag savedName
-                        && server.get("ip") instanceof StringTag savedAddress
-                        && !savedAddress.get().isBlank()) {
-                    visible.add(new SavedServer(savedName.get(), savedAddress.get().strip()));
-                }
+            if (attributes.size() > SavedServerList.MAX_FILE_BYTES)
+                return new ServerList(version, SavedServerList.EMPTY, ListError.TOO_LARGE);
+            if (!attributes.isRegularFile())
+                return new ServerList(version, SavedServerList.EMPTY, ListError.UNREADABLE);
+            byte[] bytes = SavedServerList.readBytes(file);
+            try {
+                return new ServerList(version, SavedServerList.parse(bytes), null);
+            } catch (LimitExceededException e) {
+                throw e;
+            } catch (IOException e) {
+                return new ServerList(version, SavedServerList.EMPTY, ListError.UNREADABLE);
             }
-            return new ServerList(version, List.copyOf(visible));
         } catch (NoSuchFileException e) {
-            return new ServerList(null, List.of());
-        } catch (IOException | IllegalArgumentException e) {
-            return null;
+            return new ServerList(null, SavedServerList.EMPTY, null);
+        } catch (LimitExceededException e) {
+            return new ServerList(version, SavedServerList.EMPTY, ListError.TOO_LARGE);
+        } catch (IOException | SecurityException e) {
+            // An I/O failure can disappear without a change to the file's contents.
+            return new ServerList(null, SavedServerList.EMPTY, ListError.UNREADABLE);
         }
     }
 
-    /// A named, visible entry from Minecraft's saved multiplayer list.
-    private record SavedServer(String name, String address) {
+    /// File errors displayed separately from the server's own status.
+    private enum ListError {
+        /// The list exceeded a parser or display resource budget.
+        TOO_LARGE("bf656.server_status.list_too_large"),
+        /// The list could not be read after allowing time for an in-progress save.
+        UNREADABLE("bf656.server_status.list_unreadable");
+
+        /// Localized status message for this failure.
+        private final String messageKey;
+
+        /// Associates a file error with a localized message.
+        ListError(String messageKey) {
+            this.messageKey = messageKey;
+        }
     }
 
     /// File attributes used to detect both in-place writes and replacements.
     private record FileVersion(FileTime modified, FileTime created, long size, @Nullable Object key) {
     }
 
-    /// Result of loading a file version, including a missing file represented by an empty list.
-    private record ServerList(@Nullable FileVersion version, @Unmodifiable List<SavedServer> entries) {
+    /// Result of loading a file version, including an empty list when the file is absent.
+    private record ServerList(@Nullable FileVersion version, Contents contents, @Nullable ListError error) {
     }
 }
