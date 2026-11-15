@@ -448,17 +448,17 @@ final class MultiplayerServerStatusPane extends HBox {
         signal.setVisible(false);
     }
 
-    /// Maps a round-trip time in milliseconds to the Java Edition server list's five signal tiers.
+    /// Maps a round-trip time in milliseconds to BF656's five gameplay-oriented signal tiers.
     private static int signalStrength(long latency) {
         if (latency < 0)
             return 0;
-        if (latency < 150)
+        if (latency < 50)
             return 5;
-        if (latency < 300)
+        if (latency < 100)
             return 4;
-        if (latency < 600)
+        if (latency < 150)
             return 3;
-        if (latency < 1000)
+        if (latency < 250)
             return 2;
         return 1;
     }
