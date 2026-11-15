@@ -98,6 +98,15 @@ public final class RemoteContent {
     /// One announcement and the file index used to read, render and identify its revision.
     @NotNullByDefault
     public record Announcement(Item item, @Unmodifiable Map<String, Resource> files) {
+        /// Snapshots the index and requires a descriptor for every file the announcement declares.
+        public Announcement {
+            files = Map.copyOf(files);
+            for (String path : item.files()) {
+                if (!files.containsKey(path))
+                    throw new IllegalArgumentException("Announcement file missing from index: " + path);
+            }
+        }
+
         /// Identifies this revision from its metadata and file digests.
         public String key() {
             return itemKey(item, files);
@@ -108,7 +117,7 @@ public final class RemoteContent {
             Map<String, Resource> files = new LinkedHashMap<>();
             for (String path : item.files())
                 files.put(path, manifest.files().get(path));
-            return new Announcement(item, Map.copyOf(files));
+            return new Announcement(item, files);
         }
     }
 

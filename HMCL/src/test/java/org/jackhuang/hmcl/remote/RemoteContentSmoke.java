@@ -174,13 +174,12 @@ public final class RemoteContentSmoke {
         });
         imageGate.complete(true);
         await(() -> hasButton(decorator.getRoot(), "我已知晓"));
-        await(() -> decorator.getRoot().lookup("#bf656-announcement-feed") != null);
-        onFx(() -> { snapshot(scene, output.resolve("instance-debug.png")); return true; });
-        await(() -> imageReady(decorator.getRoot()));
         await(() -> {
             @Nullable ContentSync.Result result = currentSyncResult();
-            return result != null && result.success();
+            return result != null && result.success() && decorator.getRoot().lookup("#bf656-announcement-feed") != null;
         });
+        onFx(() -> { snapshot(scene, output.resolve("instance-debug.png")); return true; });
+        await(() -> imageReady(decorator.getRoot()));
         onFx(() -> {
             require(decorator.getRoot().lookup("#bf656-instance-agreement") == null, "Selecting must not present a protocol");
             snapshot(scene, output.resolve("instance-notice.png"));

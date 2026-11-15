@@ -33,6 +33,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
@@ -96,6 +97,26 @@ final class RemoteContentTest {
         nextJson.getAsJsonArray("announcements").get(0).getAsJsonObject().addProperty("priority", 999);
         var reordered = RemoteContent.parse(nextJson.toString(), "main");
         assertEquals(next.key(next.announcements().get(0)), reordered.key(reordered.announcements().get(0)));
+    }
+
+    /// Rejects a missing required resource and keeps a valid announcement independent of the caller's map.
+    @Test
+    void announcementSnapshotsAndValidatesItsFileIndex() throws Exception {
+        var catalog = ContentFixtures.markdown("main", "# Announcement", new byte[]{1});
+        String extra = "notices/other.md";
+        ContentFixtures.file(catalog, extra, new byte[]{2});
+        var manifest = RemoteContent.parse(catalog.toString(), "main");
+        var item = manifest.announcements().getFirst();
+        var index = new HashMap<>(manifest.files());
+        var announcement = new RemoteContent.Announcement(item, index);
+        assertEquals(manifest.key(item), announcement.key());
+        assertTrue(announcement.files().containsKey(extra));
+
+        index.remove(ContentFixtures.IMAGE);
+        assertTrue(announcement.files().containsKey(ContentFixtures.IMAGE));
+        assertThrows(UnsupportedOperationException.class, () -> announcement.files().remove(ContentFixtures.IMAGE));
+        var failure = assertThrows(IllegalArgumentException.class, () -> new RemoteContent.Announcement(item, index));
+        assertTrue(failure.getMessage().contains(ContentFixtures.IMAGE));
     }
 
     /// Receipts belong to an instance directory and server source, and survive payload garbage collection.
