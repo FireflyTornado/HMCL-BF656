@@ -18,6 +18,7 @@
 package org.jackhuang.hmcl.remote;
 
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import org.jetbrains.annotations.NotNullByDefault;
@@ -38,6 +39,7 @@ import java.time.Instant;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -121,6 +123,95 @@ final class ContentSyncTest {
             assertEquals(3, manifests.get());
             assertEquals(1, bodies.get());
             assertEquals(2, images.get());
+        }
+    }
+
+    /// Interrupts an update after persisting its manifest, then recovers and retires the same cached revision.
+    @Test
+    void restartKeepsLastReadyAnnouncementDuringReplacement() throws Exception {
+        HttpServer http = java.util.Objects.requireNonNull(server);
+        AtomicInteger revision = new AtomicInteger(1);
+        AtomicBoolean replacementAvailable = new AtomicBoolean();
+        AtomicBoolean blockFirstReplacement = new AtomicBoolean(true);
+        CountDownLatch waitingForBody = new CountDownLatch(1);
+        CountDownLatch releaseBody = new CountDownLatch(1);
+        http.createContext("/", exchange -> {
+            int published = revision.get();
+            String body = BODY + "\n\nRevision " + published;
+            String path = exchange.getRequestURI().getPath();
+            if (path.endsWith("manifest.json")) {
+                JsonObject catalog = ContentFixtures.markdown("main", body, IMAGE);
+                catalog.getAsJsonArray("announcements").get(0).getAsJsonObject().addProperty("revision", published);
+                catalog.getAsJsonObject("agreement").addProperty("revision", published);
+                send(exchange, 200, catalog.toString().getBytes(StandardCharsets.UTF_8));
+            } else if (path.endsWith("news.md")) {
+                if (published == 2 && blockFirstReplacement.getAndSet(false)) {
+                    waitingForBody.countDown();
+                    try {
+                        releaseBody.await(5, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+                send(exchange, published == 1 || replacementAvailable.get() ? 200 : 503, body.getBytes(StandardCharsets.UTF_8));
+            } else {
+                send(exchange, 200, IMAGE);
+            }
+        });
+        http.start();
+        var config = config();
+        var store = new ContentStore(directory, config.endpoint().toString());
+        var events = new LinkedBlockingQueue<ContentSync.Result>();
+        Path oldBody;
+        Path snapshot;
+        try (var sync = new ContentSync(config, store, events::add, new long[0])) {
+            sync.activate();
+            RemoteContent.Manifest original = java.util.Objects.requireNonNull(awaitFinal(events, true).manifest());
+            oldBody = store.file(original.files().get(ContentFixtures.BODY));
+            revision.set(2);
+            sync.refresh();
+            assertTrue(waitingForBody.await(5, TimeUnit.SECONDS), "The replacement request must start after persisting its metadata");
+            var saved = java.util.Objects.requireNonNull(store.cache("main"));
+            assertEquals(2, RemoteContent.parse(saved.body(), "main").agreement().revision());
+            assertEquals(1, saved.announcementFallbacks().get("news").item().revision());
+            Path state = directory.resolve("client/state").resolve(RemoteContent.hash(config.endpoint().toString()));
+            JsonObject index = JsonParser.parseString(Files.readString(state.resolve("sync.json"))).getAsJsonObject();
+            String digest = index.getAsJsonObject("announcementFallbacks").get("news").getAsString();
+            snapshot = state.resolve("announcement-fallbacks").resolve(digest + ".json");
+            assertTrue(Files.isRegularFile(snapshot));
+        } finally {
+            releaseBody.countDown();
+        }
+
+        var reopened = new ContentStore(directory, config.endpoint().toString());
+        events.clear();
+        try (var nextProcess = new ContentSync(config, reopened, events::add, new long[0])) {
+            nextProcess.activate();
+            var first = java.util.Objects.requireNonNull(events.poll(5, TimeUnit.SECONDS));
+            assertTrue(first.cached());
+            assertEquals(2, java.util.Objects.requireNonNull(first.manifest()).agreement().revision());
+            var fallback = first.announcementFallbacks().get("news");
+            assertNotNull(fallback);
+            assertEquals(1, fallback.item().revision());
+            assertTrue(reopened.ready(fallback));
+            assertEquals(BODY + "\n\nRevision 1", reopened.body(fallback.item(), fallback.files()));
+            awaitFinal(events, false);
+
+            revision.set(3);
+            nextProcess.refresh();
+            var third = awaitFinal(events, false);
+            assertEquals(3, java.util.Objects.requireNonNull(third.manifest()).agreement().revision());
+            assertEquals(fallback, third.announcementFallbacks().get("news"));
+            assertTrue(Files.exists(oldBody));
+            assertTrue(Files.isRegularFile(snapshot), "The same fallback snapshot must survive another update");
+
+            replacementAvailable.set(true);
+            nextProcess.refresh();
+            var complete = awaitFinal(events, true);
+            assertTrue(complete.announcementFallbacks().isEmpty());
+            assertTrue(java.util.Objects.requireNonNull(reopened.cache("main")).announcementFallbacks().isEmpty());
+            assertFalse(Files.exists(oldBody));
+            assertFalse(Files.exists(snapshot));
         }
     }
 

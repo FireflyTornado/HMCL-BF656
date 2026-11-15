@@ -27,6 +27,7 @@ import org.commonmark.node.Node;
 import org.commonmark.parser.Parser;
 import org.jetbrains.annotations.NotNullByDefault;
 import org.jetbrains.annotations.Nullable;
+import org.jetbrains.annotations.Unmodifiable;
 
 import java.io.IOException;
 import java.net.URI;
@@ -34,6 +35,7 @@ import java.net.URISyntaxException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 
 /// Shared Markdown parsing and deterministic link-to-index resolution for rendering and prelaunch checks.
 @NotNullByDefault
@@ -53,11 +55,17 @@ public final class ContentDocuments {
     /// Resolves a Markdown-relative resource or an explicitly indexed absolute image URL.
     public static @Nullable RemoteContent.Resource resource(RemoteContent.Manifest manifest, RemoteContent.Item item,
                                                             URI endpoint, String destination) throws IOException {
+        return resource(manifest.files(), item, endpoint, destination);
+    }
+
+    /// Resolves a reference using the index for the document revision being rendered.
+    static @Nullable RemoteContent.Resource resource(@Unmodifiable Map<String, RemoteContent.Resource> files,
+                                                     RemoteContent.Item item, URI endpoint, String destination) throws IOException {
         try {
             URI reference = URI.create(destination.replace(" ", "%20"));
             URI document = endpoint.resolve(new URI(null, null, item.contentFile(), null));
             URI absolute = document.resolve(reference).normalize();
-            for (var resource : manifest.files().values()) {
+            for (var resource : files.values()) {
                 URI target = resource.url().isEmpty()
                         ? endpoint.resolve(new URI(null, null, resource.path(), null)) : URI.create(resource.url());
                 if (withoutFragment(target).equals(withoutFragment(absolute)))
@@ -72,9 +80,15 @@ public final class ContentDocuments {
     /// Converts links into cached public documents, explicit instance-local documents or external web pages.
     public static URI link(Path root, RemoteContent.Manifest manifest, RemoteContent.Item item,
                            ContentStore store, URI endpoint, String destination) throws IOException {
+        return link(root, manifest.files(), item, store, endpoint, destination);
+    }
+
+    /// Resolves a clickable link against the document revision's file index.
+    static URI link(Path root, @Unmodifiable Map<String, RemoteContent.Resource> files, RemoteContent.Item item,
+                    ContentStore store, URI endpoint, String destination) throws IOException {
         if (item.contentFile().isEmpty() || destination.startsWith("client/"))
             return ContentLinks.resolve(root, destination);
-        @Nullable RemoteContent.Resource resource = resource(manifest, item, endpoint, destination);
+        @Nullable RemoteContent.Resource resource = resource(files, item, endpoint, destination);
         if (resource != null) {
             Path file = store.file(resource);
             if (!Files.isRegularFile(file))

@@ -636,25 +636,18 @@ public final class RemoteContentController {
         }
         RemoteContent.Manifest manifest = result.manifest();
         Instant now = Instant.now();
-        @Nullable RemoteContent.Manifest previous = result.previousManifest();
-        Map<String, RemoteContent.Item> previousItems = new HashMap<>();
-        if (previous != null)
-            for (RemoteContent.Item item : previous.announcements())
-                if (item.active(now))
-                    previousItems.put(item.id(), item);
-
         boolean pendingAnnouncements = result.cached();
-        List<DisplayedAnnouncement> visible = new ArrayList<>();
+        List<RemoteContent.Announcement> visible = new ArrayList<>();
         for (RemoteContent.Item item : manifest.announcements()) {
             if (!item.active(now))
                 continue;
             if (store.ready(manifest, item)) {
-                visible.add(new DisplayedAnnouncement(manifest, item));
+                visible.add(new RemoteContent.Announcement(item, manifest.files()));
             } else {
                 pendingAnnouncements = true;
-                @Nullable RemoteContent.Item cached = previousItems.get(item.id());
-                if (previous != null && cached != null && store.ready(previous, cached))
-                    visible.add(new DisplayedAnnouncement(previous, cached));
+                @Nullable RemoteContent.Announcement cached = result.announcementFallbacks().get(item.id());
+                if (cached != null && cached.item().active(now) && store.ready(cached))
+                    visible.add(cached);
             }
         }
         @Nullable ScrollPane feed = visible.isEmpty() ? null : createAnnouncementFeed(owner, result, List.copyOf(visible));
@@ -687,20 +680,15 @@ public final class RemoteContentController {
         Controllers.getRootPage().getMainPage().setRemoteAnnouncements(children.isEmpty() ? null : announcementSlot);
     }
 
-    /// Pairs a displayed revision with the manifest that owns its cached files.
-    @NotNullByDefault
-    private record DisplayedAnnouncement(RemoteContent.Manifest manifest, RemoteContent.Item item) { }
-
     /// Builds the scrollable feed, resolving each announcement from its own manifest.
     private ScrollPane createAnnouncementFeed(Session owner, ContentSync.Result result,
-                                              @Unmodifiable List<DisplayedAnnouncement> visible) {
+                                              @Unmodifiable List<RemoteContent.Announcement> visible) {
         VBox entries = new VBox(14);
         entries.setMinWidth(0);
         entries.setPadding(new Insets(4, 10, 10, 4));
-        for (DisplayedAnnouncement announcement : visible) {
-            RemoteContent.Manifest manifest = announcement.manifest();
+        for (RemoteContent.Announcement announcement : visible) {
             RemoteContent.Item item = announcement.item();
-            String key = manifest.key(item);
+            String key = announcement.key();
             Label title = heading((item.pinned() ? "[置顶] " : "") + item.title());
             title.setMaxWidth(Double.MAX_VALUE);
             HBox.setHgrow(title, Priority.ALWAYS);
@@ -710,7 +698,8 @@ public final class RemoteContentController {
             VBox body = new VBox(10);
             if (!item.publishedAt().isEmpty())
                 body.getChildren().add(new Label(item.publishedAt()));
-            body.getChildren().addAll(view(owner, manifest, item, text -> {
+            body.getChildren().addAll(new MarkdownView(owner.root, announcement.files(), item,
+                    Objects.requireNonNull(owner.store), Objects.requireNonNull(owner.config).endpoint(), text -> {
                 error.setText(text);
                 error.setManaged(true);
             }), error);
@@ -768,8 +757,9 @@ public final class RemoteContentController {
                 continue;
             for (RemoteContent.Kind kind : RemoteContent.Kind.values()) {
                 @Unmodifiable List<RemoteContent.Item> items = result.manifest().items(kind);
-                if (owner == current && kind == RemoteContent.Kind.ANNOUNCEMENTS && result.previousManifest() != null)
-                    items = Stream.concat(items.stream(), result.previousManifest().announcements().stream()).toList();
+                if (owner == current && kind == RemoteContent.Kind.ANNOUNCEMENTS)
+                    items = Stream.concat(items.stream(), result.announcementFallbacks().values().stream()
+                            .map(RemoteContent.Announcement::item)).toList();
                 for (RemoteContent.Item item : items) {
                     @Nullable Instant start = item.startsAt();
                     @Nullable Instant expiry = item.expiresAt();

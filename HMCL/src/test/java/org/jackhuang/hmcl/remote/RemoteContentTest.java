@@ -17,6 +17,9 @@
  */
 package org.jackhuang.hmcl.remote;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import org.jetbrains.annotations.NotNullByDefault;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -29,6 +32,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -226,6 +230,59 @@ final class RemoteContentTest {
     @Test
     void rejectsXmlEntities() {
         assertThrows(IOException.class, () -> ContentLinks.parse("<!DOCTYPE x [<!ENTITY e SYSTEM 'file:///secret'>]>&e;"));
+    }
+
+    /// Migrates a large inline fallback into a hashed snapshot and keeps corrupt snapshots separate from the latest manifest.
+    @Test
+    void storesFallbackBodyOutsideSyncIndex() throws Exception {
+        String oldBody = "旧公告正文".repeat(20_000);
+        JsonObject original = ContentFixtures.basic("main");
+        JsonObject old = new JsonObject();
+        old.addProperty("id", "news");
+        old.addProperty("revision", 1);
+        old.addProperty("title", "旧公告");
+        old.addProperty("content", oldBody);
+        original.getAsJsonArray("announcements").add(old);
+        RemoteContent.Manifest originalManifest = RemoteContent.parse(original.toString(), "main");
+        RemoteContent.Announcement fallback = RemoteContent.Announcement.capture(originalManifest,
+                originalManifest.announcements().getFirst());
+
+        String latest = ContentFixtures.markdown("main", "# 新公告", new byte[0]).toString();
+        var store = new ContentStore(root, "source");
+        store.cache(new ContentStore.Cache(latest, "\"next\"", Instant.EPOCH));
+        Path state = root.resolve("client/state").resolve(RemoteContent.hash("source"));
+        Path sync = state.resolve("sync.json");
+        JsonObject legacy = JsonParser.parseString(Files.readString(sync)).getAsJsonObject();
+        JsonArray inline = new JsonArray();
+        inline.add(RemoteContent.writeAnnouncement(fallback));
+        legacy.add("announcementFallbacks", inline);
+        Files.writeString(sync, legacy.toString());
+
+        var reopened = new ContentStore(root, "source");
+        var migrated = java.util.Objects.requireNonNull(reopened.cache("main"));
+        assertTrue(migrated.fallbackIndexNeedsRewrite());
+        assertEquals(fallback, migrated.announcementFallbacks().get("news"));
+        reopened.cache(migrated);
+
+        String stateText = Files.readString(sync);
+        assertTrue(Files.size(sync) < 4_096);
+        assertFalse(stateText.contains("旧公告正文"));
+        JsonObject references = JsonParser.parseString(stateText).getAsJsonObject().getAsJsonObject("announcementFallbacks");
+        String digest = references.get("news").getAsString();
+        Path snapshot = state.resolve("announcement-fallbacks").resolve(digest + ".json");
+        assertEquals(digest, RemoteContent.digest(Files.readAllBytes(snapshot)));
+        assertEquals(oldBody, java.util.Objects.requireNonNull(reopened.cache("main"))
+                .announcementFallbacks().get("news").item().content());
+        assertFalse(java.util.Objects.requireNonNull(reopened.cache("main")).fallbackIndexNeedsRewrite());
+        assertNull(new ContentStore(root, "other-source").cache("main"));
+
+        Files.writeString(snapshot, "{}");
+        var damaged = java.util.Objects.requireNonNull(reopened.cache("main"));
+        assertEquals(latest, damaged.body());
+        assertTrue(damaged.announcementFallbacks().isEmpty());
+        assertTrue(damaged.fallbackIndexNeedsRewrite());
+        reopened.cache(damaged.withAnnouncementFallbacks(Map.of()));
+        assertFalse(Files.exists(snapshot));
     }
 
     /// Expired inline text is removed from persisted metadata while its conditional HTTP validator remains usable.

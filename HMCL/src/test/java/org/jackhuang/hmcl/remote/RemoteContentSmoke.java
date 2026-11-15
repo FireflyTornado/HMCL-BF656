@@ -58,6 +58,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.FutureTask;
@@ -403,6 +404,10 @@ public final class RemoteContentSmoke {
         var result = session.getClass().getDeclaredField("result");
         result.setAccessible(true);
         ContentSync.Result ready = (ContentSync.Result) result.get(session);
+        RemoteContent.Manifest readyManifest = java.util.Objects.requireNonNull(ready.manifest());
+        var firstCached = RemoteContent.Announcement.capture(readyManifest, readyManifest.announcements().get(0));
+        var secondCached = RemoteContent.Announcement.capture(readyManifest, readyManifest.announcements().get(1));
+        var fallbacks = Map.of(firstCached.item().id(), firstCached, secondCached.item().id(), secondCached);
         var storeField = session.getClass().getDeclaredField("store");
         storeField.setAccessible(true);
         ContentStore store = (ContentStore) storeField.get(session);
@@ -426,11 +431,11 @@ public final class RemoteContentSmoke {
         receive.setAccessible(true);
         Parent root = scene.getRoot();
         try {
-            receive.invoke(controller, session, new ContentSync.Result(missing, ready.manifest(), false, true, false, null, null, false));
+            receive.invoke(controller, session, new ContentSync.Result(missing, fallbacks, false, true, false, null, null, false));
             verifyAnnouncementTitles(root, "服务器公告", "第二条独立公告");
             require(root.lookup("#bf656-announcement-loading") != null, "Keep the loading card next to ready cache");
             store.install(missing.files().get(ContentFixtures.BODY), firstBody.getBytes(StandardCharsets.UTF_8));
-            receive.invoke(controller, session, new ContentSync.Result(missing, ready.manifest(), false, true, false, null, null, false));
+            receive.invoke(controller, session, new ContentSync.Result(missing, fallbacks, false, true, false, null, null, false));
             verifyAnnouncementTitles(root, "新版公告 A", "第二条独立公告");
             require(root.lookup("#bf656-announcement-loading") != null, "Keep the loading card next to a partial feed");
             snapshot(scene, output.resolve("announcements-partially-loaded.png"));
@@ -442,16 +447,16 @@ public final class RemoteContentSmoke {
             require(Math.abs(feed.getHeight() - slot.getHeight()) <= 1,
                     "The feed must retain the full announcement viewport while the loading card is visible");
             store.install(missing.files().get(secondPath), secondBody);
-            receive.invoke(controller, session, new ContentSync.Result(missing, ready.manifest(), false, true, false, null, null, false));
+            receive.invoke(controller, session, new ContentSync.Result(missing, fallbacks, false, true, false, null, null, false));
             verifyAnnouncementTitles(root, "新版公告 A", "新版公告 B");
             require(root.lookup("#bf656-announcement-loading") == null, "Hide the card once the active announcements are ready");
             JsonObject pending = catalog("a", "# Another replacement", image);
             RemoteContent.Manifest waiting = RemoteContent.parse(pending.toString(), "a");
-            receive.invoke(controller, session, new ContentSync.Result(waiting, null, false, false, false, null, null, false));
+            receive.invoke(controller, session, new ContentSync.Result(waiting, false, false, false, null, null, false));
             require(root.lookup("#bf656-announcement-loading") != null, "A scheduled retry must keep the loading card");
-            receive.invoke(controller, session, new ContentSync.Result(waiting, null, false, false, false, null, null, true));
+            receive.invoke(controller, session, new ContentSync.Result(waiting, false, false, false, null, null, true));
             require(root.lookup("#bf656-announcement-loading") == null, "Exhausting retries must remove the loading card");
-            receive.invoke(controller, session, new ContentSync.Result(empty, ready.manifest(), false, true, false, null, null, false));
+            receive.invoke(controller, session, new ContentSync.Result(empty, fallbacks, false, true, false, null, null, false));
             require(root.lookup("#bf656-announcement-feed") == null && root.lookup("#bf656-announcement-loading") == null,
                     "A fresh empty manifest must remove withdrawn announcements and hide the loading card");
         } finally {

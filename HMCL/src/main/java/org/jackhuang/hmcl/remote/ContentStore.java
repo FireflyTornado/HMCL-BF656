@@ -18,6 +18,7 @@
 package org.jackhuang.hmcl.remote;
 
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import org.jetbrains.annotations.NotNullByDefault;
@@ -25,18 +26,29 @@ import org.jetbrains.annotations.Nullable;
 import org.jetbrains.annotations.Unmodifiable;
 
 import java.io.IOException;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Set;
 
 /// Instance-local receipts and content-addressed downloads, with ownership-bounded garbage collection.
 @NotNullByDefault
 public final class ContentStore {
+    /// Bounds local metadata reads and writes, including the escaped current manifest.
+    private static final int MAX_STATE_BYTES = 12_582_912;
+    /// Serializes local writers before acquiring the per-source file lock shared by launcher processes.
+    private static final Object CACHE_WRITE_LOCK = new Object();
     /// This instance's `.launcher` directory.
     private final Path root;
     /// Source-specific receipt and HTTP state directory beneath `client`.
@@ -51,9 +63,32 @@ public final class ContentStore {
         stateDirectory = root.resolve("client/state").resolve(RemoteContent.hash(source));
     }
 
-    /// Persisted manifest response and HTTP validator, retained even while some payloads are unavailable.
+    /// Current server response and the displayable announcement revisions retained during its download.
     @NotNullByDefault
-    public record Cache(String body, String etag, Instant checkedAt) { }
+    public record Cache(String body, String etag, Instant checkedAt,
+                        @Unmodifiable Map<String, RemoteContent.Announcement> announcementFallbacks,
+                        boolean fallbackIndexNeedsRewrite) {
+        /// Makes a snapshot safe to publish to the JavaFX thread.
+        public Cache {
+            announcementFallbacks = Map.copyOf(announcementFallbacks);
+        }
+
+        /// Creates a cache response before selecting any announcement fallbacks.
+        public Cache(String body, String etag, Instant checkedAt) {
+            this(body, etag, checkedAt, Map.of());
+        }
+
+        /// Creates a snapshot with the fallback revisions selected for the current manifest.
+        public Cache(String body, String etag, Instant checkedAt,
+                     @Unmodifiable Map<String, RemoteContent.Announcement> announcementFallbacks) {
+            this(body, etag, checkedAt, announcementFallbacks, false);
+        }
+
+        /// Replaces the fallback set without altering the current manifest or validator.
+        Cache withAnnouncementFallbacks(@Unmodifiable Map<String, RemoteContent.Announcement> fallbacks) {
+            return new Cache(body, etag, checkedAt, fallbacks);
+        }
+    }
 
     /// Loads a source-bound valid manifest; corrupt HTTP state is not treated as usable content.
     public synchronized @Nullable Cache cache(String instanceKey) {
@@ -63,22 +98,161 @@ public final class ContentStore {
                 return null;
             JsonObject json = read(path);
             String body = json.get("body").getAsString();
-            RemoteContent.parse(body, instanceKey);
-            return new Cache(body, json.get("etag").getAsString(), Instant.parse(json.get("checkedAt").getAsString()));
+            RemoteContent.Manifest manifest = RemoteContent.parse(body, instanceKey);
+            @Nullable JsonElement index = json.get("announcementFallbacks");
+            var fallbacks = readAnnouncementFallbacks(index, manifest);
+            boolean rewrite = index != null && (!index.isJsonObject() || index.getAsJsonObject().size() != fallbacks.size());
+            return new Cache(body, json.get("etag").getAsString(), Instant.parse(json.get("checkedAt").getAsString()),
+                    fallbacks, rewrite);
         } catch (IOException | RuntimeException e) {
             return null;
         }
     }
 
+    /// Loads only ready fallbacks for items that still appear in the latest manifest and need files.
+    private @Unmodifiable Map<String, RemoteContent.Announcement> readAnnouncementFallbacks(
+            @Nullable JsonElement index, RemoteContent.Manifest manifest) {
+        if (index == null || (!index.isJsonArray() && !index.isJsonObject()))
+            return Map.of();
+        @Nullable JsonObject references = index.isJsonObject() ? index.getAsJsonObject() : null;
+        Instant now = Instant.now();
+        Set<String> pending = new HashSet<>();
+        for (var item : manifest.announcements()) {
+            if ((references == null || references.has(item.id())) && !item.expired(now) && !ready(manifest, item))
+                pending.add(item.id());
+        }
+        if (pending.isEmpty())
+            return Map.of();
+        if (references == null)
+            return readInlineAnnouncementFallbacks(index.getAsJsonArray(), pending, now);
+
+        Path directory = fallbackDirectory();
+        if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS))
+            return Map.of();
+        try {
+            checkFallbackDirectory(directory);
+        } catch (IOException ignored) {
+            return Map.of();
+        }
+        Map<String, RemoteContent.Announcement> fallbacks = new LinkedHashMap<>();
+        for (String id : pending) {
+            @Nullable JsonElement reference = references.get(id);
+            if (reference == null || !reference.isJsonPrimitive() || !reference.getAsJsonPrimitive().isString())
+                continue;
+            String digest = reference.getAsString();
+            if (!digest.matches("[0-9a-f]{64}"))
+                continue;
+            try {
+                Path path = directory.resolve(digest + ".json");
+                if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS))
+                    continue;
+                byte[] bytes;
+                try (var stream = Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS)) {
+                    bytes = stream.readNBytes(MAX_STATE_BYTES + 1);
+                }
+                if (bytes.length > MAX_STATE_BYTES || !RemoteContent.digest(bytes).equals(digest))
+                    continue;
+                var announcement = RemoteContent.readAnnouncement(
+                        JsonParser.parseString(new String(bytes, StandardCharsets.UTF_8)).getAsJsonObject());
+                if (announcement.item().id().equals(id) && !announcement.item().expired(now) && ready(announcement))
+                    fallbacks.put(id, announcement);
+            } catch (IOException | RuntimeException ignored) {
+                // A damaged fallback cannot invalidate the latest manifest or its other entries.
+            }
+        }
+        return Map.copyOf(fallbacks);
+    }
+
+    /// Reads the former inline format so the next state write can move its metadata into snapshot files.
+    private @Unmodifiable Map<String, RemoteContent.Announcement> readInlineAnnouncementFallbacks(
+            JsonArray entries, Set<String> pending, Instant now) {
+        Map<String, RemoteContent.Announcement> fallbacks = new LinkedHashMap<>();
+        for (int i = 0; i < Math.min(entries.size(), 100); i++) {
+            try {
+                var announcement = RemoteContent.readAnnouncement(entries.get(i).getAsJsonObject());
+                if (pending.contains(announcement.item().id()) && !announcement.item().expired(now) && ready(announcement))
+                    fallbacks.putIfAbsent(announcement.item().id(), announcement);
+            } catch (IOException | RuntimeException ignored) {
+                // The remaining valid entries are still usable.
+            }
+        }
+        return Map.copyOf(fallbacks);
+    }
+
     /// Saves validated metadata before payload downloads, so a known new agreement cannot revert to old consent.
     public synchronized void cache(Cache cache) throws IOException {
+        Files.createDirectories(stateDirectory);
+        checkFallbackDirectory(stateDirectory);
+        synchronized (CACHE_WRITE_LOCK) {
+            try (var channel = FileChannel.open(stateDirectory.resolve("sync.lock"), StandardOpenOption.CREATE,
+                    StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
+                 @Nullable FileLock lock = channel.tryLock()) {
+                if (lock == null)
+                    throw new IOException("Another launcher is saving this instance's content cache");
+                saveCache(cache);
+            }
+        }
+    }
+
+    /// Installs immutable snapshots and publishes their index before collecting unreferenced files.
+    private void saveCache(Cache cache) throws IOException {
         JsonObject json = new JsonObject();
         json.addProperty("body", cache.body());
         json.addProperty("etag", cache.etag());
         json.addProperty("checkedAt", cache.checkedAt().toString());
+        Path directory = fallbackDirectory();
+        JsonObject references = new JsonObject();
+        Set<String> keep = new HashSet<>();
+        if (!cache.announcementFallbacks().isEmpty()) {
+            Files.createDirectories(directory);
+            checkFallbackDirectory(directory);
+            for (var entry : cache.announcementFallbacks().entrySet()) {
+                byte[] snapshot = RemoteContent.writeAnnouncement(entry.getValue()).toString().getBytes(StandardCharsets.UTF_8);
+                String digest = RemoteContent.digest(snapshot);
+                String filename = digest + ".json";
+                Path file = directory.resolve(filename);
+                if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS) || Files.size(file) != snapshot.length
+                        || !Arrays.equals(Files.readAllBytes(file), snapshot))
+                    write(file, snapshot);
+                references.addProperty(entry.getKey(), digest);
+                keep.add(filename);
+            }
+        }
+        json.add("announcementFallbacks", references);
         write(stateDirectory.resolve("sync.json"), json.toString().getBytes(StandardCharsets.UTF_8));
+        pruneFallbackSnapshots(directory, keep);
         ensureServer();
         write(server.resolve("manifest.json"), cache.body().getBytes(StandardCharsets.UTF_8));
+    }
+
+    /// Resolves the snapshot directory dedicated to this instance and remote source.
+    private Path fallbackDirectory() {
+        return stateDirectory.resolve("announcement-fallbacks");
+    }
+
+    /// Rejects linked directories that resolve outside their exact instance and source path.
+    private void checkFallbackDirectory(Path directory) throws IOException {
+        if (!directory.toRealPath().equals(root.toRealPath().resolve(root.relativize(directory))))
+            throw new IOException("Announcement fallback cache escapes the instance state directory");
+    }
+
+    /// Cleans previously published or interrupted snapshots once the replacement index is durable.
+    private void pruneFallbackSnapshots(Path directory, Set<String> keep) {
+        if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS))
+            return;
+        try {
+            checkFallbackDirectory(directory);
+            try (var files = Files.newDirectoryStream(directory, "*.json")) {
+                for (Path file : files) {
+                    String name = file.getFileName().toString();
+                    if (name.matches("[0-9a-f]{64}\\.json") && !keep.contains(name)
+                            && Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS))
+                        Files.deleteIfExists(file);
+                }
+            }
+        } catch (IOException e) {
+            org.jackhuang.hmcl.util.logging.Logger.LOG.warning("Cannot prune announcement fallback snapshots", e);
+        }
     }
 
     /// Returns the content-addressed location without using an untrusted server path as a filesystem path.
@@ -88,7 +262,17 @@ public final class ContentStore {
 
     /// Lightweight presentation check; full SHA-256 verification happens off the FX thread during synchronization.
     public synchronized boolean ready(RemoteContent.Manifest manifest, RemoteContent.Item item) {
-        return item.files().stream().allMatch(path -> Files.isRegularFile(file(manifest.files().get(path))));
+        return ready(item, manifest.files());
+    }
+
+    /// Checks an announcement using the index belonging to its own revision.
+    synchronized boolean ready(RemoteContent.Announcement announcement) {
+        return ready(announcement.item(), announcement.files());
+    }
+
+    /// Checks that each file required by the item is present in the local cache.
+    private boolean ready(RemoteContent.Item item, @Unmodifiable Map<String, RemoteContent.Resource> files) {
+        return item.files().stream().allMatch(path -> Files.isRegularFile(file(files.get(path))));
     }
 
     /// Verifies cached bytes before deciding that a network download is unnecessary.
@@ -162,7 +346,7 @@ public final class ContentStore {
         }
         if (!changed)
             return cache;
-        Cache compacted = new Cache(json.toString(), cache.etag(), cache.checkedAt());
+        Cache compacted = new Cache(json.toString(), cache.etag(), cache.checkedAt(), cache.announcementFallbacks());
         cache(compacted);
         return compacted;
     }
@@ -219,9 +403,14 @@ public final class ContentStore {
 
     /// Reads UTF-8 Markdown after its file has passed synchronization checks.
     public String body(RemoteContent.Manifest manifest, RemoteContent.Item item) throws IOException {
+        return body(item, manifest.files());
+    }
+
+    /// Reads a document with the resource index that belongs to that revision.
+    String body(RemoteContent.Item item, @Unmodifiable Map<String, RemoteContent.Resource> files) throws IOException {
         if (item.contentFile().isEmpty())
             return item.content();
-        Path path = file(manifest.files().get(item.contentFile()));
+        Path path = file(files.get(item.contentFile()));
         if (!Files.isRegularFile(path) || Files.size(path) > 2_097_152)
             throw new IOException("Markdown body is missing or too large: " + item.contentFile());
         return Files.readString(path, StandardCharsets.UTF_8);
@@ -276,7 +465,7 @@ public final class ContentStore {
 
     /// Reads a bounded JSON object; metadata may contain an escaped copy of a two-megabyte manifest.
     private static JsonObject read(Path path) throws IOException {
-        if (Files.size(path) > 12_582_912)
+        if (Files.size(path) > MAX_STATE_BYTES)
             throw new IOException("Content state is too large");
         try {
             return JsonParser.parseString(Files.readString(path, StandardCharsets.UTF_8)).getAsJsonObject();

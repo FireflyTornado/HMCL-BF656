@@ -43,6 +43,7 @@ import org.jackhuang.hmcl.ui.image.ImageLoader;
 import org.jackhuang.hmcl.ui.image.ImageUtils;
 import org.jetbrains.annotations.NotNullByDefault;
 import org.jetbrains.annotations.Nullable;
+import org.jetbrains.annotations.Unmodifiable;
 
 import java.awt.Desktop;
 import java.io.IOException;
@@ -52,6 +53,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.function.Consumer;
@@ -61,8 +63,8 @@ import java.util.function.Consumer;
 public final class MarkdownView extends VBox {
     /// Instance root for explicitly local links such as `client/documents/terms.html`.
     private final Path root;
-    /// Current item and indexed resources used for relative Markdown URL resolution.
-    private final RemoteContent.Manifest manifest;
+    /// Indexed resources for the exact document revision being rendered.
+    private final @Unmodifiable Map<String, RemoteContent.Resource> files;
     /// Item whose body is displayed.
     private final RemoteContent.Item item;
     /// Content-addressed local downloads.
@@ -77,9 +79,15 @@ public final class MarkdownView extends VBox {
     /// Builds a complete document; parsing and rendering never execute embedded HTML.
     public MarkdownView(Path root, RemoteContent.Manifest manifest, RemoteContent.Item item,
                         ContentStore store, URI endpoint, Consumer<String> error) {
+        this(root, manifest.files(), item, store, endpoint, error);
+    }
+
+    /// Builds a document with only the resource index needed to resolve its body, images and links.
+    MarkdownView(Path root, @Unmodifiable Map<String, RemoteContent.Resource> files, RemoteContent.Item item,
+                 ContentStore store, URI endpoint, Consumer<String> error) {
         super(10);
         this.root = root;
-        this.manifest = manifest;
+        this.files = files;
         this.item = item;
         this.store = store;
         this.endpoint = endpoint;
@@ -89,7 +97,7 @@ public final class MarkdownView extends VBox {
         setFillWidth(true);
         setMinWidth(0);
         try {
-            String body = store.body(manifest, item);
+            String body = store.body(item, files);
             if (item.contentFile().isEmpty())
                 getChildren().add(richText(body));
             else
@@ -202,7 +210,7 @@ public final class MarkdownView extends VBox {
         box.setMinWidth(0);
         box.prefWidthProperty().bind(Bindings.max(80, parent.widthProperty().subtract(10)));
         try {
-            @Nullable RemoteContent.Resource resource = ContentDocuments.resource(manifest, item, endpoint, node.getDestination());
+            @Nullable RemoteContent.Resource resource = ContentDocuments.resource(files, item, endpoint, node.getDestination());
             if (resource == null || !item.files().contains(resource.path()))
                 throw new IOException("图片未列入此条内容的 resources");
             Path path = store.file(resource);
@@ -301,7 +309,7 @@ public final class MarkdownView extends VBox {
         link.setStyle("-fx-font-size: 14px; -fx-padding: 0;");
         link.setOnAction(event -> {
             try {
-                URI target = ContentDocuments.link(root, manifest, item, store, endpoint, destination);
+                URI target = ContentDocuments.link(root, files, item, store, endpoint, destination);
                 if (!"file".equalsIgnoreCase(target.getScheme())) {
                     FXUtils.openLink(target.toASCIIString());
                     return;

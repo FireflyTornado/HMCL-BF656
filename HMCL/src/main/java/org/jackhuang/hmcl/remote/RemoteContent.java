@@ -17,6 +17,7 @@
  */
 package org.jackhuang.hmcl.remote;
 
+import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -94,6 +95,23 @@ public final class RemoteContent {
         }
     }
 
+    /// One announcement and the file index used to read, render and identify its revision.
+    @NotNullByDefault
+    public record Announcement(Item item, @Unmodifiable Map<String, Resource> files) {
+        /// Identifies this revision from its metadata and file digests.
+        public String key() {
+            return itemKey(item, files);
+        }
+
+        /// Captures only the resources needed by this announcement for persistent fallback.
+        static Announcement capture(Manifest manifest, Item item) {
+            Map<String, Resource> files = new LinkedHashMap<>();
+            for (String path : item.files())
+                files.put(path, manifest.files().get(path));
+            return new Announcement(item, Map.copyOf(files));
+        }
+    }
+
     /// A complete instance catalog; one conditional request checks all three content types.
     @NotNullByDefault
     public record Manifest(String instanceKey, Item agreement, @Unmodifiable List<Item> notices,
@@ -123,12 +141,17 @@ public final class RemoteContent {
 
         /// Body/resource changes invalidate receipts; presentation-only introductions keep existing consent unless revision changes.
         public String key(Item item) {
-            StringBuilder identity = new StringBuilder(item.id()).append('\n').append(item.revision())
-                    .append('\n').append(item.title()).append('\n').append(item.content());
-            item.files().stream().sorted().forEach(path -> identity.append('\n').append(path)
-                    .append(':').append(files.get(path).sha256()));
-            return hash(identity.toString());
+            return itemKey(item, files);
         }
+    }
+
+    /// Computes a revision key using the exact file digests for one item.
+    private static String itemKey(Item item, @Unmodifiable Map<String, Resource> files) {
+        StringBuilder identity = new StringBuilder(item.id()).append('\n').append(item.revision())
+                .append('\n').append(item.title()).append('\n').append(item.content());
+        item.files().stream().sorted().forEach(path -> identity.append('\n').append(path)
+                .append(':').append(files.get(path).sha256()));
+        return hash(identity.toString());
     }
 
     /// Parses and validates an instance-bound manifest before it can replace known-good metadata.
@@ -140,24 +163,11 @@ public final class RemoteContent {
             String key = required(root, "instanceKey", 64);
             if (!key.matches("[A-Za-z0-9][A-Za-z0-9._-]{0,63}") || !key.equals(expectedInstanceKey))
                 throw new IllegalArgumentException("Manifest instanceKey does not match client configuration");
-            Map<String, Resource> files = new LinkedHashMap<>();
-            for (var entry : root.getAsJsonObject("files").entrySet()) {
-                String path = logicalPath(entry.getKey());
-                JsonObject descriptor = entry.getValue().getAsJsonObject();
-                String digest = required(descriptor, "sha256", 64).toLowerCase(java.util.Locale.ROOT);
-                if (!digest.matches("[0-9a-f]{64}"))
-                    throw new IllegalArgumentException("Invalid SHA-256: " + path);
-                String url = string(descriptor, "url", "");
-                if (!url.isEmpty())
-                    validateHttp(URI.create(url));
-                if (files.size() >= 500)
-                    throw new IllegalArgumentException("Too many managed files");
-                files.put(path, new Resource(path, digest, url));
-            }
+            @Unmodifiable Map<String, Resource> files = files(root.getAsJsonObject("files"));
             Item agreement = item(root.getAsJsonObject("agreement"), true);
             @Unmodifiable List<Item> notices = items(root, "notices");
             @Unmodifiable List<Item> announcements = items(root, "announcements");
-            Manifest manifest = new Manifest(key, agreement, notices, announcements, Map.copyOf(files));
+            Manifest manifest = new Manifest(key, agreement, notices, announcements, files);
             for (Kind kind : Kind.values()) {
                 for (Item item : manifest.items(kind)) {
                     for (String path : item.files()) {
@@ -170,6 +180,69 @@ public final class RemoteContent {
         } catch (RuntimeException e) {
             throw new IOException("Invalid manifest.json: " + e.getMessage(), e);
         }
+    }
+
+    /// Reads and validates the resource descriptors shared by public manifests and local snapshots.
+    private static @Unmodifiable Map<String, Resource> files(JsonObject index) {
+        Map<String, Resource> files = new LinkedHashMap<>();
+        for (var entry : index.entrySet()) {
+            String path = logicalPath(entry.getKey());
+            JsonObject descriptor = entry.getValue().getAsJsonObject();
+            String digest = required(descriptor, "sha256", 64).toLowerCase(java.util.Locale.ROOT);
+            if (!digest.matches("[0-9a-f]{64}"))
+                throw new IllegalArgumentException("Invalid SHA-256: " + path);
+            String url = string(descriptor, "url", "");
+            if (!url.isEmpty())
+                validateHttp(URI.create(url));
+            if (files.size() >= 500)
+                throw new IllegalArgumentException("Too many managed files");
+            files.put(path, new Resource(path, digest, url));
+        }
+        return Map.copyOf(files);
+    }
+
+    /// Validates one persisted announcement with its own exact resource index.
+    static Announcement readAnnouncement(JsonObject json) throws IOException {
+        Item item = item(json.getAsJsonObject("item"), false);
+        @Unmodifiable Map<String, Resource> files = files(json.getAsJsonObject("files"));
+        if (!files.keySet().equals(item.files()))
+            throw new IOException("Cached announcement file index does not match the item");
+        return new Announcement(item, files);
+    }
+
+    /// Encodes a local fallback without storing any agreement or notice metadata from its source manifest.
+    static JsonObject writeAnnouncement(Announcement announcement) {
+        Item item = announcement.item();
+        JsonObject fields = new JsonObject();
+        fields.addProperty("id", item.id());
+        fields.addProperty("revision", item.revision());
+        fields.addProperty("title", item.title());
+        fields.addProperty("content", item.content());
+        fields.addProperty("contentFile", item.contentFile());
+        JsonArray resources = new JsonArray();
+        item.resources().forEach(resources::add);
+        fields.add("resources", resources);
+        fields.addProperty("publishedAt", item.publishedAt());
+        if (item.startsAt() != null)
+            fields.addProperty("startsAt", item.startsAt().toString());
+        if (item.expiresAt() != null)
+            fields.addProperty("expiresAt", item.expiresAt().toString());
+        fields.addProperty("priority", item.priority());
+        fields.addProperty("pinned", item.pinned());
+        fields.addProperty("repeat", item.repeat());
+
+        JsonObject index = new JsonObject();
+        for (var entry : announcement.files().entrySet().stream().sorted(Map.Entry.comparingByKey()).toList()) {
+            Resource resource = entry.getValue();
+            JsonObject descriptor = new JsonObject();
+            descriptor.addProperty("sha256", resource.sha256());
+            descriptor.addProperty("url", resource.url());
+            index.add(entry.getKey(), descriptor);
+        }
+        JsonObject json = new JsonObject();
+        json.add("item", fields);
+        json.add("files", index);
+        return json;
     }
 
     /// Parses a bounded list and rejects duplicate IDs within the content type.
