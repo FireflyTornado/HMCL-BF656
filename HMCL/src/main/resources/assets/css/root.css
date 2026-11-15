@@ -628,6 +628,11 @@
     -fx-cursor: hand;
 }
 
+.multiplayer-server-refresh:disabled {
+    -fx-background-color: transparent;
+    -fx-cursor: default;
+}
+
 .multiplayer-server-refresh .svg {
     -fx-fill: -monet-on-surface-variant;
 }
