@@ -491,6 +491,139 @@
     -fx-fill: -monet-on-primary-container;
 }
 
+.multiplayer-server-status {
+    -fx-pref-width: 230px;
+    -fx-pref-height: 55px;
+    -fx-padding: 5px 8px 5px 12px;
+    -fx-background-radius: 4px;
+}
+
+.multiplayer-server-name,
+.multiplayer-server-selector > .label {
+    -fx-text-fill: -monet-on-surface;
+    -fx-font-size: 13px;
+    -fx-font-weight: bold;
+    -fx-padding: 0;
+}
+
+.multiplayer-server-selector {
+    -fx-background-color: transparent;
+    -fx-padding: 0;
+    -fx-cursor: hand;
+}
+
+.multiplayer-server-selector > .arrow-button {
+    -fx-padding: 4px 6px;
+}
+
+.multiplayer-server-selector > .arrow-button > .arrow {
+    -fx-background-color: -monet-on-surface-variant;
+}
+
+.multiplayer-server-selector .context-menu {
+    -fx-background-color: -monet-surface-container;
+    -fx-padding: 4px;
+}
+
+.multiplayer-server-menu-item {
+    -fx-padding: 0;
+}
+
+.multiplayer-server-menu-item:focused {
+    -fx-background-color: -monet-secondary-container;
+}
+
+.multiplayer-server-menu-row {
+    -fx-padding: 6px 10px;
+}
+
+.multiplayer-server-menu-text {
+    -fx-min-width: 0;
+    -fx-max-width: 330px;
+}
+
+.multiplayer-server-menu-name {
+    -fx-text-fill: -monet-on-surface;
+    -fx-font-size: 13px;
+}
+
+.multiplayer-server-menu-address {
+    -fx-text-fill: -monet-on-surface-variant;
+    -fx-font-size: 11px;
+}
+
+.multiplayer-server-menu-item:focused .multiplayer-server-menu-name,
+.multiplayer-server-menu-item:focused .multiplayer-server-menu-address {
+    -fx-text-fill: -monet-on-secondary-container;
+}
+
+.multiplayer-server-menu-check .svg {
+    -fx-fill: -monet-primary;
+}
+
+.multiplayer-server-selector:hover,
+.multiplayer-server-selector:focused,
+.multiplayer-server-refresh:hover,
+.multiplayer-server-refresh:focused {
+    -fx-background-color: -monet-surface-container-highest;
+    -fx-background-radius: 4px;
+}
+
+.multiplayer-server-message {
+    -fx-text-fill: -monet-on-surface-variant;
+    -fx-font-size: 11px;
+}
+
+.multiplayer-server-dot {
+    -fx-background-color: -monet-outline;
+    -fx-background-radius: 50%;
+}
+
+.multiplayer-server-dot:online {
+    -fx-background-color: #429956;
+}
+
+.multiplayer-server-dot:unreachable {
+    -fx-background-color: -monet-error;
+}
+
+.multiplayer-server-signal {
+    -fx-padding: 2px 1px;
+}
+
+.multiplayer-server-signal-bar {
+    -fx-background-color: -monet-outline-variant;
+}
+
+.multiplayer-server-signal-bar:lit {
+    -fx-background-color: #429956;
+}
+
+.multiplayer-server-signal:medium-latency .multiplayer-server-signal-bar:lit {
+    -fx-background-color: #ae7b00;
+}
+
+.multiplayer-server-signal:high-latency .multiplayer-server-signal-bar:lit {
+    -fx-background-color: -monet-error;
+}
+
+.multiplayer-server-signal-cross .svg {
+    -fx-fill: -monet-error;
+}
+
+.multiplayer-server-refresh {
+    -fx-min-width: 32px;
+    -fx-max-width: 32px;
+    -fx-min-height: 32px;
+    -fx-max-height: 32px;
+    -fx-padding: 0;
+    -fx-cursor: hand;
+}
+
+.multiplayer-server-refresh .svg {
+    -fx-fill: -monet-on-surface-variant;
+}
+
 /*******************************************************************************
  *                                                                             *
  * JFX Tab Pane                                                                *
@@ -1080,8 +1213,13 @@
     -fx-padding: 8px;
 }
 
-.card {
+.card,
+.card-no-padding,
+.multiplayer-server-status {
     -fx-background-color: -monet-surface-container-low-transparent-80;
+}
+
+.card {
     -fx-background-radius: 4;
     -fx-padding: 8px;
 
@@ -1089,7 +1227,6 @@
 }
 
 .card-no-padding {
-    -fx-background-color: -monet-surface-container-low-transparent-80;
     -fx-background-radius: 4;
 
     -fx-effect: dropshadow(gaussian, rgba(0, 0, 0, 0.26), 10, 0.12, -1, 2);

@@ -115,6 +115,8 @@ public final class MainPage extends StackPane implements DecoratorPage {
     private @Nullable Region remoteAnnouncements;
     /// Bottom controls determine the space reserved below the announcement feed.
     private final HBox launchPane = new HBox();
+    /// Status card for the multiplayer list of the current game instance.
+    private final MultiplayerServerStatusPane serverStatus = new MultiplayerServerStatusPane();
     private final StackPane updatePane;
     private final JFXButton menuButton;
 
@@ -232,7 +234,6 @@ public final class MainPage extends StackPane implements DecoratorPage {
             return Lang.indexWhere(list, instance -> instance.getId().equals(currentId));
         }, instance -> instance.getRepository().setSelectedInstance(instance));
 
-        StackPane.setAlignment(launchPane, Pos.BOTTOM_RIGHT);
         {
             JFXButton launchButton = new JFXButton();
             launchButton.getStyleClass().add("launch-button");
@@ -322,12 +323,22 @@ public final class MainPage extends StackPane implements DecoratorPage {
             launchPane.getChildren().setAll(launchButton, menuButton);
         }
 
-        getChildren().addAll(updatePane, launchPane);
+        HBox bottomControls = new HBox(10, serverStatus, launchPane);
+        bottomControls.setAlignment(Pos.CENTER_RIGHT);
+        bottomControls.setMaxSize(USE_PREF_SIZE, USE_PREF_SIZE);
+        StackPane.setAlignment(bottomControls, Pos.BOTTOM_RIGHT);
+        FXUtils.onChangeAndOperate(currentGameProperty(), serverStatus::setGame);
+        getChildren().addAll(updatePane, bottomControls);
         launchPane.heightProperty().addListener((observable, oldValue, newValue) -> {
             if (remoteAnnouncements != null)
                 StackPane.setMargin(remoteAnnouncements, new Insets(0, 0, newValue.doubleValue() + 16, 0));
         });
 
+    }
+
+    /// Starts or pauses multiplayer status updates as the surrounding home page becomes visible or hidden.
+    void setHomeVisible(boolean visible) {
+        serverStatus.setHomeVisible(visible);
     }
 
     /// Replaces the server announcement card, restoring the upstream channel hint when none is visible.
