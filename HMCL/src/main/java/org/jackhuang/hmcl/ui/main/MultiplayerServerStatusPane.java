@@ -366,7 +366,7 @@ final class MultiplayerServerStatusPane extends HBox {
     /// Shows a file error separately from the connection status and restores the controls on recovery.
     private void setListError(@Nullable ListError error) {
         listError = error;
-        refreshButton.setVisible(error == null);
+        updateRefreshButtonDisabled();
         HBox.setHgrow(status, error == null ? null : Priority.ALWAYS);
         if (error == null) {
             status.setTooltip(null);
@@ -499,7 +499,12 @@ final class MultiplayerServerStatusPane extends HBox {
     private void setRefreshing(boolean value) {
         refreshing = value;
         refreshButton.setGraphic(value ? spinner : refreshIcon);
-        refreshButton.setDisable(value);
+        updateRefreshButtonDisabled();
+    }
+
+    /// Disables manual refresh while a query is running or the server list cannot be used.
+    private void updateRefreshButtonDisabled() {
+        refreshButton.setDisable(refreshing || listError != null);
     }
 
     /// Updates the connection, compact player count and latency bars from the latest response.
