@@ -170,11 +170,11 @@ final class MultiplayerServerStatusPane extends HBox {
         signal.setPickOnBounds(true);
         signal.setVisible(false);
         signal.managedProperty().bind(signal.visibleProperty());
-        for (int height : List.of(2, 3, 4, 6, 8)) {
+        for (int height : List.of(3, 5, 7, 9, 11)) {
             Region bar = new Region();
             bar.getStyleClass().add("multiplayer-server-signal-bar");
-            bar.setMinSize(2, height);
-            bar.setMaxSize(2, height);
+            bar.setMinSize(3, height);
+            bar.setMaxSize(3, height);
             signal.getChildren().add(bar);
         }
         FXUtils.installFastTooltip(signal, signalTooltip);
