@@ -60,7 +60,7 @@ final class RemoteContentTest {
         var original = RemoteContent.parse(json.toString(), "main");
         assertEquals("", original.agreement().introduction());
         var store = new ContentStore(root, "source");
-        ContentFixtures.publishCache(store, new ContentStore.Cache(json.toString(), "", Instant.EPOCH));
+        ContentFixtures.publishCache(store, ContentFixtures.cache(json.toString(), "", Instant.EPOCH));
         store.accept(original);
         json.getAsJsonObject("agreement").addProperty("introduction", "游玩本服务器前，请仔细阅读下方的用户协议。\n阅读完成后请勾选确认。");
         var annotated = RemoteContent.parse(json.toString(), "main");
@@ -150,7 +150,7 @@ final class RemoteContentTest {
         String body = ContentFixtures.basic("main").toString();
         var manifest = RemoteContent.parse(body, "main");
         var store = new ContentStore(root.resolve("A/.launcher"), "source-main");
-        ContentFixtures.publishCache(store, new ContentStore.Cache(body, "", Instant.EPOCH));
+        ContentFixtures.publishCache(store, ContentFixtures.cache(body, "", Instant.EPOCH));
         store.accept(manifest);
         store.remember("notices", "notice-key");
         ContentFixtures.prune(store, Set.of());
@@ -168,7 +168,7 @@ final class RemoteContentTest {
         var second = new ContentStore(root, "source");
         String body = ContentFixtures.basic("main").toString();
         var manifest = RemoteContent.parse(body, "main");
-        ContentFixtures.publishCache(first, new ContentStore.Cache(body, "", Instant.EPOCH));
+        ContentFixtures.publishCache(first, ContentFixtures.cache(body, "", Instant.EPOCH));
         CountDownLatch started = new CountDownLatch(2);
         try (var channel = FileChannel.open(root.resolve("client/content.lock"), StandardOpenOption.WRITE);
              var executor = Executors.newVirtualThreadPerTaskExecutor()) {
@@ -205,16 +205,16 @@ final class RemoteContentTest {
         var second = new ContentStore(root, "source");
         JsonObject json = ContentFixtures.basic("main");
         var original = RemoteContent.parse(json.toString(), "main");
-        ContentFixtures.publishCache(first, new ContentStore.Cache(json.toString(), "", Instant.EPOCH));
+        ContentFixtures.publishCache(first, ContentFixtures.cache(json.toString(), "", Instant.EPOCH));
         first.accept(original);
 
         json.getAsJsonObject("agreement").addProperty("introduction", "Updated introduction");
-        ContentFixtures.publishCache(second, new ContentStore.Cache(json.toString(), "", Instant.now()));
+        ContentFixtures.publishCache(second, ContentFixtures.cache(json.toString(), "", Instant.now()));
         assertTrue(first.acceptedCurrent(original));
 
         json.getAsJsonObject("agreement").addProperty("revision", 2);
         var current = RemoteContent.parse(json.toString(), "main");
-        ContentFixtures.publishCache(second, new ContentStore.Cache(json.toString(), "", Instant.now()));
+        ContentFixtures.publishCache(second, ContentFixtures.cache(json.toString(), "", Instant.now()));
         assertThrows(ContentStore.AgreementChangedException.class, () -> first.acceptedCurrent(original));
         assertFalse(second.acceptedCurrent(current));
         second.accept(current);
@@ -361,8 +361,8 @@ final class RemoteContentTest {
         String latest = ContentFixtures.markdown("main", "# 新公告", new byte[0]).toString();
         var store = new ContentStore(root, "source");
         assertThrows(IllegalArgumentException.class,
-                () -> new ContentStore.Cache(latest, "\"next\"", Instant.EPOCH, Map.of("wrong-id", fallback)));
-        ContentFixtures.publishCache(store, new ContentStore.Cache(latest, "\"next\"", Instant.EPOCH, Map.of("news", fallback)));
+                () -> ContentFixtures.cache(latest, "\"next\"", Instant.EPOCH, Map.of("wrong-id", fallback)));
+        ContentFixtures.publishCache(store, ContentFixtures.cache(latest, "\"next\"", Instant.EPOCH, Map.of("news", fallback)));
         Path state = root.resolve("client/state").resolve(RemoteContent.hash("source"));
         Path sync = state.resolve("sync.json");
         var reopened = new ContentStore(root, "source");
@@ -385,6 +385,8 @@ final class RemoteContentTest {
         assertTrue(damaged.announcementFallbacks().isEmpty());
         assertTrue(damaged.fallbackIndexNeedsRewrite());
         ContentFixtures.publishCache(reopened, damaged.withAnnouncementFallbacks(Map.of()));
+        assertTrue(Files.exists(snapshot));
+        ContentFixtures.prune(reopened, damaged.manifest().needed(Instant.now()));
         assertFalse(Files.exists(snapshot));
     }
 
@@ -399,7 +401,7 @@ final class RemoteContentTest {
         store.install(resource, oldBody.getBytes(StandardCharsets.UTF_8));
         var fallback = RemoteContent.Announcement.capture(old, old.announcements().getFirst());
         String waiting = ContentFixtures.markdown("main", "# Replacement", new byte[0]).toString();
-        ContentFixtures.publishCache(store, new ContentStore.Cache(waiting, "", Instant.EPOCH, Map.of("news", fallback)));
+        ContentFixtures.publishCache(store, ContentFixtures.cache(waiting, "", Instant.EPOCH, Map.of("news", fallback)));
         Path state = root.resolve("client/state").resolve(RemoteContent.hash("source"));
         var initial = JsonParser.parseString(Files.readString(state.resolve("sync.json"))).getAsJsonObject();
         String digest = initial.getAsJsonObject("announcementFallbacks").get("news").getAsString();
@@ -412,16 +414,17 @@ final class RemoteContentTest {
             try (var reader = readerStore.registerUsage()) {
                 assertNotNull(reader);
                 assertEquals(fallback, readerStore.loadCache("main").cache().announcementFallbacks().get("news"));
-                published = store.publishCache(new ContentStore.Cache(replacement, "", Instant.EPOCH), baseline, writer);
+                published = store.publishCache(ContentFixtures.cache(replacement, "", Instant.EPOCH), baseline, writer);
                 assertThrows(ContentStore.CacheChangedException.class, () -> readerStore.publishCache(
-                        new ContentStore.Cache(waiting, "", Instant.EPOCH, Map.of("news", fallback)), baseline, reader));
-                assertThrows(ContentStore.CacheChangedException.class, () -> readerStore.prune(Set.of(), baseline, reader));
-                store.prune(Set.of(), published, writer);
+                        ContentFixtures.cache(waiting, "", Instant.EPOCH, Map.of("news", fallback)), baseline, reader));
+                assertThrows(ContentStore.CacheChangedException.class,
+                        () -> readerStore.maintainCache(null, baseline, reader, Set.of()));
+                assertNull(store.maintainCache(null, published, writer, Set.of()).cleanupFailure());
                 assertTrue(Files.isRegularFile(snapshot));
                 assertEquals(oldBody, readerStore.body(fallback.item(), fallback.files()));
             }
 
-            store.prune(Set.of(), published, writer);
+            assertNull(store.maintainCache(null, published, writer, Set.of()).cleanupFailure());
             assertFalse(Files.exists(snapshot));
             assertFalse(Files.exists(store.file(resource)));
             assertEquals(replacement, java.util.Objects.requireNonNull(store.cache("main")).body());
@@ -453,7 +456,7 @@ final class RemoteContentTest {
                 while (!Files.exists(ready) && peer.isAlive() && System.nanoTime() < deadline)
                     Thread.sleep(20);
                 assertTrue(Files.exists(ready), "The second JVM must hold an instance registration");
-                store.prune(Set.of(), "", writer);
+                assertNull(store.maintainCache(null, "", writer, Set.of()).cleanupFailure());
                 assertTrue(Files.exists(store.file(resource)));
                 peer.getOutputStream().close();
                 assertTrue(peer.waitFor(5, TimeUnit.SECONDS));
@@ -464,7 +467,7 @@ final class RemoteContentTest {
                     peer.waitFor(5, TimeUnit.SECONDS);
                 }
             }
-            store.prune(Set.of(), "", writer);
+            assertNull(store.maintainCache(null, "", writer, Set.of()).cleanupFailure());
             assertFalse(Files.exists(store.file(resource)));
         }
     }
@@ -503,16 +506,17 @@ final class RemoteContentTest {
         notice.addProperty("expiresAt", "2026-10-20T00:00:00Z");
         json.getAsJsonArray("notices").add(notice);
         var store = new ContentStore(root, "source");
-        var cache = new ContentStore.Cache(json.toString(), "\"etag\"", Instant.EPOCH);
+        var cache = ContentFixtures.cache(json.toString(), "\"etag\"", Instant.EPOCH);
         ContentFixtures.publishCache(store, cache);
-        var compacted = ContentStore.compacted(cache, "main", Instant.parse("2026-10-21T00:00:00Z"));
+        var compacted = ContentStore.compacted(cache, Instant.parse("2026-10-21T00:00:00Z"));
         try (var usage = store.registerUsage()) {
             var before = store.loadCache("main");
             store.publishCache(compacted, before.version(), usage);
         }
         assertFalse(compacted.body().contains("expired-secret-marker"));
         assertEquals("\"etag\"", compacted.etag());
-        assertTrue(RemoteContent.parse(compacted.body(), "main").notices().isEmpty());
+        assertTrue(compacted.manifest().notices().isEmpty());
+        assertEquals(RemoteContent.parse(compacted.body(), "main"), compacted.manifest());
         assertFalse(Files.readString(root.resolve("server/manifest.json")).contains("expired-secret-marker"));
     }
 }

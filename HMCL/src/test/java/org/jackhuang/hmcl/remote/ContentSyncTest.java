@@ -42,6 +42,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.FileTime;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.Map;
@@ -106,7 +107,7 @@ final class ContentSyncTest {
         var store = new ContentStore(directory, config.endpoint().toString());
         var manifest = RemoteContent.parse(catalog.toString(), "main");
         var resource = java.util.Objects.requireNonNull(manifest.files().get(bodyPath));
-        ContentFixtures.publishCache(store, new ContentStore.Cache(catalog.toString(), "", Instant.EPOCH));
+        ContentFixtures.publishCache(store, ContentFixtures.cache(catalog.toString(), "", Instant.EPOCH));
         store.install(resource, body);
         Files.writeString(store.file(resource), "# Damaged cached notice");
 
@@ -228,7 +229,7 @@ final class ContentSyncTest {
         var config = config();
         var store = new ContentStore(directory, config.endpoint().toString());
         var cachedManifest = RemoteContent.parse(cached.toString(), "main");
-        ContentFixtures.publishCache(store, new ContentStore.Cache(cached.toString(), "\"cached\"", Instant.EPOCH));
+        ContentFixtures.publishCache(store, ContentFixtures.cache(cached.toString(), "\"cached\"", Instant.EPOCH));
         store.install(java.util.Objects.requireNonNull(cachedManifest.files().get(ContentFixtures.BODY)),
                 BODY.getBytes(StandardCharsets.UTF_8));
         store.install(java.util.Objects.requireNonNull(cachedManifest.files().get(ContentFixtures.IMAGE)), IMAGE);
@@ -273,7 +274,7 @@ final class ContentSyncTest {
             }
             assertEquals(cached.toString(), java.util.Objects.requireNonNull(store.cache("main")).body());
             ContentFixtures.publishCache(new ContentStore(directory, config.endpoint().toString()),
-                    new ContentStore.Cache(latest.toString(), "\"latest\"", Instant.now()));
+                    ContentFixtures.cache(latest.toString(), "\"latest\"", Instant.now()));
             sync.retryFailed();
             var complete = awaitFinal(events, true);
             assertFalse(complete.publicationBlocked());
@@ -313,7 +314,10 @@ final class ContentSyncTest {
         AtomicInteger manifests = new AtomicInteger();
         AtomicInteger bodies = new AtomicInteger();
         AtomicInteger images = new AtomicInteger();
-        String catalog = ContentFixtures.markdown("main", BODY, IMAGE).toString();
+        String optionalLink = "announcements/linked.md";
+        JsonObject response = ContentFixtures.markdown("main", BODY, IMAGE);
+        ContentFixtures.file(response, optionalLink, "# Optional link".getBytes(StandardCharsets.UTF_8));
+        String catalog = response.toString();
         http.createContext("/", exchange -> {
             String path = exchange.getRequestURI().getPath();
             if (path.endsWith("manifest.json")) {
@@ -338,7 +342,10 @@ final class ContentSyncTest {
         var store = new ContentStore(directory.resolve(".launcher"), config.endpoint().toString());
         try (var sync = new ContentSync(config, store, events::add, new long[]{0, 0, 0})) {
             sync.activate();
-            awaitFinal(events, true);
+            var first = java.util.Objects.requireNonNull(awaitFinal(events, true).manifest());
+            assertTrue(first.files().containsKey(optionalLink));
+            var persisted = java.util.Objects.requireNonNull(store.cache("main")).manifest();
+            assertFalse(persisted.files().containsKey(optionalLink));
             sync.pause();
             sync.activate();
             assertNull(events.poll(150, TimeUnit.MILLISECONDS));
@@ -346,12 +353,16 @@ final class ContentSyncTest {
             assertEquals(1, bodies.get());
             assertEquals(1, images.get());
         }
+        Path mirror = directory.resolve(".launcher/server/manifest.json");
+        Files.setLastModifiedTime(mirror, FileTime.from(Instant.EPOCH));
+        FileTime unchanged = Files.getLastModifiedTime(mirror);
         try (var nextProcess = new ContentSync(config, store, events::add, new long[]{0, 0, 0})) {
             nextProcess.activate();
             awaitFinal(events, true);
             assertEquals(2, manifests.get());
             assertEquals(1, bodies.get());
             assertEquals(1, images.get());
+            assertEquals(unchanged, Files.getLastModifiedTime(mirror));
             Files.delete(store.file(RemoteContent.parse(catalog, "main").files().get(ContentFixtures.IMAGE)));
             nextProcess.refresh();
             awaitFinal(events, true);
@@ -539,7 +550,7 @@ final class ContentSyncTest {
         var store = new ContentStore(directory, config.endpoint().toString());
         var manifest = RemoteContent.parse(catalog.toString(), "main");
         var resource = java.util.Objects.requireNonNull(manifest.files().get(bodyPath));
-        ContentFixtures.publishCache(store, new ContentStore.Cache(catalog.toString(), "", Instant.EPOCH));
+        ContentFixtures.publishCache(store, ContentFixtures.cache(catalog.toString(), "", Instant.EPOCH));
         store.install(resource, body.getBytes(StandardCharsets.UTF_8));
         store.accept(manifest);
         Files.writeString(store.file(resource), "# Modified agreement");
@@ -608,7 +619,7 @@ final class ContentSyncTest {
         var originalManifest = RemoteContent.parse(original.toString(), "main");
         var originalFile = java.util.Objects.requireNonNull(originalManifest.files().get(ContentFixtures.BODY));
         var rulesFile = java.util.Objects.requireNonNull(originalManifest.files().get(rulesPath));
-        ContentFixtures.publishCache(store, new ContentStore.Cache(original.toString(), "", Instant.EPOCH));
+        ContentFixtures.publishCache(store, ContentFixtures.cache(original.toString(), "", Instant.EPOCH));
         store.install(originalFile, originalBody.getBytes(StandardCharsets.UTF_8));
         store.install(rulesFile, rules);
         var events = new LinkedBlockingQueue<ContentSync.Result>();
@@ -652,16 +663,25 @@ final class ContentSyncTest {
         }
     }
 
-    /// Repeats only local maintenance after a lock conflict or unreadable ownership index.
+    /// Retries local maintenance after lock contention or an index commit followed by failed pruning.
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
     void retriesCleanupWithoutRepeatingTheManifestRequest(boolean lockBusy) throws Exception {
         HttpServer http = java.util.Objects.requireNonNull(server);
         AtomicInteger requests = new AtomicInteger();
-        String empty = ContentFixtures.basic("main").toString();
+        JsonObject catalog = ContentFixtures.basic("main");
+        if (!lockBusy) {
+            JsonObject expired = new JsonObject();
+            expired.addProperty("id", "expired");
+            expired.addProperty("revision", 1);
+            expired.addProperty("title", "Expired");
+            expired.addProperty("content", "Expired notice");
+            expired.addProperty("expiresAt", "2000-01-01T00:00:00Z");
+            catalog.getAsJsonArray("notices").add(expired);
+        }
         http.createContext("/", exchange -> {
             requests.incrementAndGet();
-            send(exchange, 200, empty.getBytes(StandardCharsets.UTF_8));
+            send(exchange, 200, catalog.toString().getBytes(StandardCharsets.UTF_8));
         });
         http.start();
         var config = config();
@@ -670,7 +690,7 @@ final class ContentSyncTest {
         String original = ContentFixtures.markdown("main", body, new byte[0]).toString();
         var manifest = RemoteContent.parse(original, "main");
         var file = java.util.Objects.requireNonNull(manifest.files().get(ContentFixtures.BODY));
-        ContentFixtures.publishCache(store, new ContentStore.Cache(original, "", Instant.EPOCH));
+        ContentFixtures.publishCache(store, ContentFixtures.cache(original, "", Instant.EPOCH));
         store.install(file, body.getBytes(StandardCharsets.UTF_8));
         var events = new LinkedBlockingQueue<ContentSync.Result>();
         var held = new AtomicReference<@Nullable FileLock>();
@@ -704,12 +724,15 @@ final class ContentSyncTest {
             assertTrue(error.contains(lockBusy ? "Another launcher" : "managed-files.json"));
             assertNull(incomplete.error());
             assertTrue(Files.exists(store.file(file)));
+            var committed = store.loadCache("main");
+            assertTrue(java.util.Objects.requireNonNull(committed.cache()).manifest().notices().isEmpty());
             if (lockBusy)
                 java.util.Objects.requireNonNull(held.get()).release();
             else
                 Files.writeString(inventory, validInventory);
             assertNull(awaitFinal(events, true).cleanupError());
             assertFalse(Files.exists(store.file(file)), "Deferred local cleanup must remove the withdrawn payload");
+            assertEquals(committed.version(), store.loadCache("main").version());
             assertEquals(1, requests.get());
         }
     }
@@ -740,7 +763,7 @@ final class ContentSyncTest {
         var originalManifest = RemoteContent.parse(original, "main");
         var oldFile = java.util.Objects.requireNonNull(originalManifest.files().get(ContentFixtures.BODY));
         var obsolete = new RemoteContent.Resource("announcements/obsolete.txt", RemoteContent.hash("obsolete"), "");
-        ContentFixtures.publishCache(store, new ContentStore.Cache(original, "", Instant.EPOCH));
+        ContentFixtures.publishCache(store, ContentFixtures.cache(original, "", Instant.EPOCH));
         store.install(oldFile, oldBody.getBytes(StandardCharsets.UTF_8));
         store.install(obsolete, "obsolete".getBytes(StandardCharsets.UTF_8));
         Path snapshots = directory.resolve("client/state").resolve(RemoteContent.hash(config.endpoint().toString()))
@@ -807,9 +830,9 @@ final class ContentSyncTest {
         store.install(image, IMAGE);
         if (savedFallback) {
             var fallback = RemoteContent.Announcement.capture(old, old.announcements().getFirst());
-            ContentFixtures.publishCache(store, new ContentStore.Cache(replacement, "", Instant.EPOCH, Map.of("news", fallback)));
+            ContentFixtures.publishCache(store, ContentFixtures.cache(replacement, "", Instant.EPOCH, Map.of("news", fallback)));
         } else {
-            ContentFixtures.publishCache(store, new ContentStore.Cache(original, "", Instant.EPOCH));
+            ContentFixtures.publishCache(store, ContentFixtures.cache(original, "", Instant.EPOCH));
         }
         Files.writeString(store.file(image), "Damaged image");
 
@@ -876,7 +899,7 @@ final class ContentSyncTest {
         var store = new ContentStore(directory, config.endpoint().toString());
         String original = ContentFixtures.basic("main").toString();
         Instant checkedAt = Instant.parse("2026-10-20T00:00:00Z");
-        ContentFixtures.publishCache(store, new ContentStore.Cache(original, "\"v1\"", checkedAt));
+        ContentFixtures.publishCache(store, ContentFixtures.cache(original, "\"v1\"", checkedAt));
         try (var sync = new ContentSync(config, store, events::add, new long[]{0, 0, 0})) {
             sync.activate();
             ContentSync.Result failed = awaitFinal(events, false);
@@ -1009,7 +1032,7 @@ final class ContentSyncTest {
                 assertEquals(Thread.State.BLOCKED, syncWorker.getState());
                 assertTrue(Arrays.stream(syncWorker.getStackTrace())
                         .anyMatch(frame -> frame.getClassName().equals(ContentStore.class.getName())
-                                && frame.getMethodName().equals("prune")));
+                                && frame.getMethodName().equals("maintainCache")));
                 if (pause)
                     controls.submit(sync::pause).get(2, TimeUnit.SECONDS);
                 else

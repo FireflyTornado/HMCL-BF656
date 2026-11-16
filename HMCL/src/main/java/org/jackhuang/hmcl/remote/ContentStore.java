@@ -41,6 +41,7 @@ import java.time.Instant;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -79,7 +80,7 @@ public final class ContentStore {
 
     /// Current server response and the displayable announcement revisions retained during its download.
     @NotNullByDefault
-    public record Cache(String body, String etag, Instant checkedAt,
+    public record Cache(String body, RemoteContent.Manifest manifest, String etag, Instant checkedAt,
                         @Unmodifiable Map<String, RemoteContent.Announcement> announcementFallbacks,
                         boolean fallbackIndexNeedsRewrite) {
         /// Snapshots the fallbacks and requires each key to match the stored announcement ID.
@@ -92,20 +93,19 @@ public final class ContentStore {
             }
         }
 
-        /// Creates a cache response before selecting any announcement fallbacks.
-        public Cache(String body, String etag, Instant checkedAt) {
-            this(body, etag, checkedAt, Map.of());
+        /// Parses a new manifest before selecting announcement fallbacks.
+        static Cache parse(String body, String instanceKey, String etag, Instant checkedAt) throws IOException {
+            return new Cache(body, RemoteContent.parse(body, instanceKey), etag, checkedAt, Map.of(), false);
         }
 
-        /// Creates a snapshot with the fallback revisions selected for the current manifest.
-        public Cache(String body, String etag, Instant checkedAt,
-                     @Unmodifiable Map<String, RemoteContent.Announcement> announcementFallbacks) {
-            this(body, etag, checkedAt, announcementFallbacks, false);
+        /// Reuses the validated response after HTTP 304 while the current fallbacks are selected again.
+        Cache revalidated(Instant now) {
+            return new Cache(body, manifest, etag, now, Map.of(), false);
         }
 
         /// Replaces the fallback set without altering the current manifest or validator.
         Cache withAnnouncementFallbacks(@Unmodifiable Map<String, RemoteContent.Announcement> fallbacks) {
-            return new Cache(body, etag, checkedAt, fallbacks);
+            return new Cache(body, manifest, etag, checkedAt, fallbacks, false);
         }
     }
 
@@ -135,13 +135,13 @@ public final class ContentStore {
         if (disk.version().isEmpty())
             return new CacheState(null, disk.version());
         try {
-            JsonObject json = JsonParser.parseString(disk.text()).getAsJsonObject();
+            JsonObject json = disk.json();
             String body = json.get("body").getAsString();
             RemoteContent.Manifest manifest = RemoteContent.parse(body, instanceKey);
             @Nullable JsonElement index = json.get("announcementFallbacks");
             @Unmodifiable Map<String, RemoteContent.Announcement> fallbacks = readAnnouncementFallbacks(index, manifest);
             boolean rewrite = index != null && (!index.isJsonObject() || index.getAsJsonObject().size() != fallbacks.size());
-            Cache cache = new Cache(body, json.get("etag").getAsString(),
+            Cache cache = new Cache(body, manifest, json.get("etag").getAsString(),
                     Instant.parse(json.get("checkedAt").getAsString()), fallbacks, rewrite);
             return new CacheState(cache, disk.version());
         } catch (IOException | RuntimeException e) {
@@ -151,7 +151,12 @@ public final class ContentStore {
 
     /// One atomic read of the state file. An empty version identifies an absent file.
     @NotNullByDefault
-    private record DiskState(String text, String version) { }
+    private record DiskState(byte @Unmodifiable [] bytes, String version) {
+        /// Decodes the state only for operations that need its contents in addition to its fingerprint.
+        private JsonObject json() {
+            return JsonParser.parseString(new String(bytes, StandardCharsets.UTF_8)).getAsJsonObject();
+        }
+    }
 
     /// Fingerprints the whole state, including fallback-only and compaction changes.
     private DiskState readSyncState() throws IOException {
@@ -159,9 +164,9 @@ public final class ContentStore {
             byte @Unmodifiable [] bytes = input.readNBytes(MAX_STATE_BYTES + 1);
             if (bytes.length > MAX_STATE_BYTES)
                 throw new IOException("Content state is too large");
-            return new DiskState(new String(bytes, StandardCharsets.UTF_8), RemoteContent.digest(bytes));
+            return new DiskState(bytes, RemoteContent.digest(bytes));
         } catch (NoSuchFileException e) {
-            return new DiskState("", "");
+            return new DiskState(new byte[0], "");
         }
     }
 
@@ -186,11 +191,8 @@ public final class ContentStore {
         Map<String, RemoteContent.Announcement> fallbacks = new LinkedHashMap<>();
         for (var item : manifest.announcements()) {
             String id = item.id();
-            @Nullable JsonElement reference = references.get(id);
-            if (reference == null || !reference.isJsonPrimitive() || !reference.getAsJsonPrimitive().isString())
-                continue;
-            String digest = reference.getAsString();
-            if (!digest.matches("[0-9a-f]{64}") || item.expired(now))
+            @Nullable String digest = fallbackDigest(references.get(id));
+            if (digest == null || item.expired(now))
                 continue;
             try {
                 Path path = directory.resolve(digest + ".json");
@@ -213,12 +215,20 @@ public final class ContentStore {
         return Map.copyOf(fallbacks);
     }
 
+    /// Returns the digest of a valid snapshot reference.
+    private static @Nullable String fallbackDigest(@Nullable JsonElement reference) {
+        if (reference == null || !reference.isJsonPrimitive() || !reference.getAsJsonPrimitive().isString())
+            return null;
+        String digest = reference.getAsString();
+        return digest.matches("[0-9a-f]{64}") ? digest : null;
+    }
+
     /// Publishes only if nobody has replaced the source cache since the caller read it.
     synchronized String publishCache(Cache cache, String expectedVersion, Usage usage) throws IOException {
         return withInstanceLock(() -> {
             usage.checkOpen();
             checkCacheVersion(expectedVersion);
-            return saveCache(cache, usage);
+            return saveCache(cache).version();
         });
     }
 
@@ -288,8 +298,11 @@ public final class ContentStore {
         }
     }
 
-    /// Installs immutable snapshots and publishes their index before collecting unreferenced files.
-    private String saveCache(Cache cache, Usage usage) throws IOException {
+    /// Records the committed version and the snapshots its index references.
+    private record SavedCache(String version, @Unmodifiable Set<String> fallbackFiles) { }
+
+    /// Installs immutable snapshots and publishes their index before any later cleanup can remove files.
+    private SavedCache saveCache(Cache cache) throws IOException {
         Files.createDirectories(stateDirectory);
         checkCachePath(stateDirectory);
         JsonObject json = new JsonObject();
@@ -308,10 +321,7 @@ public final class ContentStore {
                         .getBytes(StandardCharsets.UTF_8);
                 String digest = RemoteContent.digest(snapshot);
                 String filename = digest + ".json";
-                Path file = directory.resolve(filename);
-                if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS) || Files.size(file) != snapshot.length
-                        || !Arrays.equals(Files.readAllBytes(file), snapshot))
-                    write(file, snapshot);
+                writeIfChanged(directory.resolve(filename), snapshot);
                 references.addProperty(entry.getKey(), digest);
                 keep.add(filename);
             }
@@ -321,13 +331,26 @@ public final class ContentStore {
         write(stateDirectory.resolve("sync.json"), bytes);
         try {
             ensureServer();
-            write(server.resolve("manifest.json"), cache.body().getBytes(StandardCharsets.UTF_8));
-            if (!hasOtherUsers(usage))
-                pruneFallbackSnapshots(directory, keep);
+            writeIfChanged(server.resolve("manifest.json"), cache.body().getBytes(StandardCharsets.UTF_8));
         } catch (IOException e) {
             org.jackhuang.hmcl.util.logging.Logger.LOG.warning("Cannot update the public content cache", e);
         }
-        return RemoteContent.digest(bytes);
+        return new SavedCache(RemoteContent.digest(bytes), Set.copyOf(keep));
+    }
+
+    /// Avoids replacing an identical snapshot or manifest mirror.
+    private static void writeIfChanged(Path path, byte @Unmodifiable [] bytes) throws IOException {
+        try {
+            if (Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) && Files.size(path) == bytes.length) {
+                try (var input = Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS)) {
+                    if (Arrays.equals(input.readNBytes(bytes.length + 1), bytes))
+                        return;
+                }
+            }
+        } catch (IOException ignored) {
+            // The existing file may be replaceable even when it cannot be read.
+        }
+        write(path, bytes);
     }
 
     /// A launcher keeps this registration open for as long as it can present the instance's cached files.
@@ -425,7 +448,7 @@ public final class ContentStore {
     }
 
     /// Cleans previously published or interrupted snapshots once the replacement index is durable.
-    private void pruneFallbackSnapshots(Path directory, Set<String> keep) throws IOException {
+    private void pruneFallbackSnapshots(Path directory, @Unmodifiable Set<String> keep) throws IOException {
         if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS))
             return;
         checkCachePath(directory);
@@ -488,33 +511,45 @@ public final class ContentStore {
         });
     }
 
-    /// Reclaims files only for the latest persisted source state and while this launcher is the sole user.
-    synchronized void prune(@Unmodifiable Set<RemoteContent.Resource> keep, String expectedVersion, Usage usage)
-            throws IOException {
-        withInstanceLock(() -> {
+    /// Separates a committed index update from any subsequent failure reclaiming files.
+    record Maintenance(String version, @Nullable Exception cleanupFailure) { }
+
+    /// Checks the baseline, writes any updated index and reclaims managed files under the same instance lock.
+    synchronized Maintenance maintainCache(@Nullable Cache replacement, String expectedVersion, Usage usage,
+                                           @Unmodifiable Set<RemoteContent.Resource> keep) throws IOException {
+        return withInstanceLock(() -> {
             usage.checkOpen();
             DiskState state = checkCacheVersion(expectedVersion);
-            if (!hasOtherUsers(usage)) {
-                pruneFiles(keep);
-                if (!state.version().isEmpty())
-                    prunePublishedFallbacks(state.text());
+            @Nullable SavedCache saved = replacement == null ? null : saveCache(replacement);
+            String version = saved == null ? state.version() : saved.version();
+            try {
+                if (!hasOtherUsers(usage)) {
+                    // Resolve the live snapshot set before deleting anything.
+                    @Unmodifiable Set<String> snapshots = saved == null ? publishedFallbacks(state) : saved.fallbackFiles();
+                    pruneFiles(keep);
+                    pruneFallbackSnapshots(fallbackDirectory(), snapshots);
+                }
+            } catch (IOException | RuntimeException e) {
+                return new Maintenance(version, e);
             }
-            return true;
+            return new Maintenance(version, null);
         });
     }
 
-    /// Reclaims obsolete snapshots left behind when cleanup was deferred during publication.
-    private void prunePublishedFallbacks(String text) throws IOException {
-        @Nullable JsonElement index = JsonParser.parseString(text).getAsJsonObject().get("announcementFallbacks");
+    /// Reads the references needed to reclaim snapshots left behind by an earlier publication.
+    private @Unmodifiable Set<String> publishedFallbacks(DiskState state) {
+        if (state.version().isEmpty())
+            return Set.of();
+        @Nullable JsonElement index = state.json().get("announcementFallbacks");
         Set<String> keep = new HashSet<>();
         if (index != null && index.isJsonObject()) {
-            for (var entry : index.getAsJsonObject().entrySet()) {
-                JsonElement value = entry.getValue();
-                if (value.isJsonPrimitive() && value.getAsJsonPrimitive().isString())
-                    keep.add(value.getAsString() + ".json");
+            for (JsonElement value : index.getAsJsonObject().asMap().values()) {
+                @Nullable String digest = fallbackDigest(value);
+                if (digest != null)
+                    keep.add(digest + ".json");
             }
         }
-        pruneFallbackSnapshots(fallbackDirectory(), keep);
+        return Set.copyOf(keep);
     }
 
     /// Removes managed payload objects under the instance lock.
@@ -523,6 +558,7 @@ public final class ContentStore {
         for (var resource : keep)
             names.add(resource.cacheName());
         Set<String> owned = owned();
+        boolean changed = false;
         for (String name : Set.copyOf(owned)) {
             if (!names.contains(name)) {
                 if (!name.matches("[0-9a-f]{64}\\.[a-z0-9]{1,12}"))
@@ -531,41 +567,41 @@ public final class ContentStore {
                 checkOwnedPath(path);
                 Files.deleteIfExists(path);
                 owned.remove(name);
+                changed = true;
             }
         }
-        if (!owned.isEmpty() || Files.exists(client.resolve("managed-files.json")))
+        if (changed)
             saveOwned(owned);
     }
 
     /// Prepares compaction without publishing it, so synchronization can check its cache version first.
-    static Cache compacted(Cache cache, String instanceKey, Instant now) throws IOException {
-        RemoteContent.Manifest manifest = RemoteContent.parse(cache.body(), instanceKey);
-        JsonObject json = JsonParser.parseString(cache.body()).getAsJsonObject();
-        boolean changed = false;
-        for (String category : java.util.List.of("notices", "announcements")) {
-            JsonArray array = json.getAsJsonArray(category);
-            for (int i = array.size() - 1; i >= 0; i--) {
-                JsonObject item = array.get(i).getAsJsonObject();
-                if (item.has("expiresAt") && !item.get("expiresAt").getAsString().isEmpty()
-                        && !now.isBefore(java.time.OffsetDateTime.parse(item.get("expiresAt").getAsString()).toInstant())) {
-                    array.remove(i);
-                    changed = true;
-                }
-            }
-        }
-        Set<String> needed = new HashSet<>();
-        for (RemoteContent.Resource resource : manifest.needed(now))
-            needed.add(resource.path());
-        var iterator = json.getAsJsonObject("files").entrySet().iterator();
-        while (iterator.hasNext()) {
-            if (!needed.contains(iterator.next().getKey())) {
-                iterator.remove();
-                changed = true;
-            }
-        }
-        if (!changed)
+    static Cache compacted(Cache cache, Instant now) {
+        RemoteContent.Manifest manifest = cache.manifest();
+        @Unmodifiable List<RemoteContent.Item> notices = manifest.notices().stream().filter(item -> !item.expired(now)).toList();
+        @Unmodifiable List<RemoteContent.Item> announcements = manifest.announcements().stream()
+                .filter(item -> !item.expired(now)).toList();
+        @Unmodifiable Set<RemoteContent.Resource> needed = manifest.needed(now);
+        if (notices.size() == manifest.notices().size() && announcements.size() == manifest.announcements().size()
+                && needed.size() == manifest.files().size())
             return cache;
-        return new Cache(json.toString(), cache.etag(), cache.checkedAt(), cache.announcementFallbacks());
+        Map<String, RemoteContent.Resource> files = new LinkedHashMap<>();
+        for (RemoteContent.Resource resource : needed)
+            files.put(resource.path(), resource);
+        JsonObject json = JsonParser.parseString(cache.body()).getAsJsonObject();
+        retainItems(json.getAsJsonArray("notices"), notices);
+        retainItems(json.getAsJsonArray("announcements"), announcements);
+        json.getAsJsonObject("files").entrySet().removeIf(entry -> !files.containsKey(entry.getKey()));
+        var compacted = new RemoteContent.Manifest(manifest.instanceKey(), manifest.agreement(), notices, announcements,
+                Map.copyOf(files));
+        return new Cache(json.toString(), compacted, cache.etag(), cache.checkedAt(), cache.announcementFallbacks(), false);
+    }
+
+    /// Removes expired entries while preserving the source JSON for retained items.
+    private static void retainItems(JsonArray items, @Unmodifiable List<RemoteContent.Item> retained) {
+        Set<String> ids = new HashSet<>();
+        for (RemoteContent.Item item : retained)
+            ids.add(item.id());
+        items.asList().removeIf(item -> !ids.contains(item.getAsJsonObject().get("id").getAsString()));
     }
 
     /// Reads a receipt for a specific agreement independently of the current cache.
@@ -654,7 +690,7 @@ public final class ContentStore {
             throw new AgreementChangedException();
         RemoteContent.Manifest current;
         try {
-            String body = JsonParser.parseString(disk.text()).getAsJsonObject().get("body").getAsString();
+            String body = disk.json().get("body").getAsString();
             current = RemoteContent.parse(body, manifest.instanceKey());
         } catch (RuntimeException e) {
             throw new IOException("无法读取当前用户协议", e);
