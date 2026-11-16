@@ -530,9 +530,10 @@ final class ContentSyncTest {
         }
     }
 
-    /// Retries only local cleanup when a lock is taken after the latest manifest is published.
-    @Test
-    void retriesCleanupWithoutRepeatingTheManifestRequest() throws Exception {
+    /// Repeats only local maintenance after a lock conflict or unreadable ownership index.
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void retriesCleanupWithoutRepeatingTheManifestRequest(boolean lockBusy) throws Exception {
         HttpServer http = java.util.Objects.requireNonNull(server);
         AtomicInteger requests = new AtomicInteger();
         String empty = ContentFixtures.basic("main").toString();
@@ -551,12 +552,18 @@ final class ContentSyncTest {
         store.install(file, body.getBytes(StandardCharsets.UTF_8));
         var events = new LinkedBlockingQueue<ContentSync.Result>();
         var held = new AtomicReference<@Nullable FileLock>();
+        AtomicBoolean obstructed = new AtomicBoolean();
         Path lockPath = directory.resolve("client/content.lock");
+        Path inventory = directory.resolve("client/managed-files.json");
+        String validInventory = Files.readString(inventory);
         try (var channel = FileChannel.open(lockPath, StandardOpenOption.WRITE);
              var sync = new ContentSync(config, store, result -> {
-                 if (result.pending() && !result.cached() && held.get() == null) {
+                 if (result.pending() && !result.cached() && obstructed.compareAndSet(false, true)) {
                      try {
-                         held.set(channel.lock());
+                         if (lockBusy)
+                             held.set(channel.lock());
+                         else
+                             Files.writeString(inventory, "{invalid");
                      } catch (IOException e) {
                          throw new java.io.UncheckedIOException(e);
                      }
@@ -564,14 +571,94 @@ final class ContentSyncTest {
                  events.add(result);
              }, new long[0])) {
             sync.activate();
-            awaitFinal(events, true);
+            ContentSync.Result incomplete;
+            do {
+                incomplete = java.util.Objects.requireNonNull(events.poll(5, TimeUnit.SECONDS));
+            } while (incomplete.pending());
+            assertTrue(incomplete.contentSynced());
+            assertFalse(incomplete.success());
+            String error = java.util.Objects.requireNonNull(incomplete.cleanupError());
+            assertTrue(error.startsWith("清理缓存文件失败："));
+            assertTrue(error.contains(lockBusy ? "Another launcher" : "managed-files.json"));
+            assertNull(incomplete.error());
             assertTrue(Files.exists(store.file(file)));
-            java.util.Objects.requireNonNull(held.get()).release();
-            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-            while (Files.exists(store.file(file)) && System.nanoTime() < deadline)
-                Thread.sleep(20);
+            if (lockBusy)
+                java.util.Objects.requireNonNull(held.get()).release();
+            else
+                Files.writeString(inventory, validInventory);
+            assertNull(awaitFinal(events, true).cleanupError());
             assertFalse(Files.exists(store.file(file)), "Deferred local cleanup must remove the withdrawn payload");
             assertEquals(1, requests.get());
+        }
+    }
+
+    /// Retries a failed snapshot write before reclaiming files, even after network retries are exhausted.
+    @Test
+    void retriesDirtyCachePersistenceBeforePruning() throws Exception {
+        HttpServer http = java.util.Objects.requireNonNull(server);
+        String oldBody = "# Old announcement";
+        String original = ContentFixtures.markdown("main", oldBody, new byte[0]).toString();
+        JsonObject updated = ContentFixtures.markdown("main", "# Pending announcement", new byte[0]);
+        JsonObject notice = new JsonObject();
+        notice.addProperty("id", "expired");
+        notice.addProperty("revision", 1);
+        notice.addProperty("title", "Expired notice");
+        notice.addProperty("content", "Expired notice");
+        notice.addProperty("expiresAt", "2000-01-01T00:00:00Z");
+        updated.getAsJsonArray("notices").add(notice);
+        AtomicInteger requests = new AtomicInteger();
+        http.createContext("/", exchange -> {
+            requests.incrementAndGet();
+            boolean manifest = exchange.getRequestURI().getPath().endsWith("manifest.json");
+            send(exchange, manifest ? 200 : 503, manifest ? updated.toString().getBytes(StandardCharsets.UTF_8) : new byte[0]);
+        });
+        http.start();
+        var config = config();
+        var store = new ContentStore(directory, config.endpoint().toString());
+        var originalManifest = RemoteContent.parse(original, "main");
+        var oldFile = java.util.Objects.requireNonNull(originalManifest.files().get(ContentFixtures.BODY));
+        var obsolete = new RemoteContent.Resource("announcements/obsolete.txt", RemoteContent.hash("obsolete"), "");
+        store.cache(new ContentStore.Cache(original, "", Instant.EPOCH));
+        store.install(oldFile, oldBody.getBytes(StandardCharsets.UTF_8));
+        store.install(obsolete, "obsolete".getBytes(StandardCharsets.UTF_8));
+        Path snapshots = directory.resolve("client/state").resolve(RemoteContent.hash(config.endpoint().toString()))
+                .resolve("announcement-fallbacks");
+        Path backup = directory.resolve("snapshot-backup");
+        var blocked = new AtomicReference<@Nullable Path>();
+        var events = new LinkedBlockingQueue<ContentSync.Result>();
+        try (var sync = new ContentSync(config, store, result -> {
+            if (result.pending() && !result.cached() && blocked.get() == null) {
+                try (var paths = Files.list(snapshots)) {
+                    Path snapshot = paths.findFirst().orElseThrow();
+                    Files.move(snapshot, backup);
+                    Files.createDirectory(snapshot);
+                    Files.createFile(snapshot.resolve("block"));
+                    blocked.set(snapshot);
+                } catch (IOException e) {
+                    throw new java.io.UncheckedIOException(e);
+                }
+            }
+            events.add(result);
+        }, new long[0])) {
+            sync.activate();
+            var failed = awaitFinal(events, false);
+            assertTrue(java.util.Objects.requireNonNull(failed.cleanupError()).startsWith("保存缓存索引失败："));
+            assertTrue(Files.exists(store.file(obsolete)), "Pruning must wait until the cache write succeeds");
+            assertTrue(java.util.Objects.requireNonNull(store.cache("main")).body().contains("Expired notice"));
+            Path snapshot = java.util.Objects.requireNonNull(blocked.get());
+            Files.delete(snapshot.resolve("block"));
+            Files.delete(snapshot);
+            Files.move(backup, snapshot);
+
+            var recovered = awaitFinal(events, false);
+            assertNull(recovered.cleanupError());
+            assertEquals(failed.error(), recovered.error());
+            assertFalse(Files.exists(store.file(obsolete)));
+            assertTrue(Files.exists(store.file(oldFile)));
+            var persisted = java.util.Objects.requireNonNull(store.cache("main"));
+            assertFalse(persisted.body().contains("Expired notice"));
+            assertTrue(persisted.announcementFallbacks().containsKey("news"));
+            assertEquals(2, requests.get());
         }
     }
 

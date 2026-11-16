@@ -47,7 +47,7 @@ import java.util.function.Consumer;
 public final class ContentSync implements AutoCloseable {
     /// Retry delays following each failed cycle; pause/resume preserves the remaining budget.
     private static final long @Unmodifiable [] RETRY_SECONDS = {15, 60, 180};
-    /// Delays for retrying local cleanup after a brief file-lock conflict.
+    /// Delays between bounded retries of failed local cache maintenance.
     private static final long @Unmodifiable [] CLEANUP_RETRY_SECONDS = {1, 2, 4};
     /// Instance-scoped settings and server endpoint.
     private final Config config;
@@ -95,6 +95,10 @@ public final class ContentSync implements AutoCloseable {
     private @Nullable ScheduledFuture<?> retry;
     /// Scheduled local cleanup, independent of the network retry budget.
     private @Nullable ScheduledFuture<?> cleanupRetry;
+    /// Most recent local maintenance failure, cleared after successful maintenance.
+    private @Nullable String cleanupError;
+    /// Last result delivered by the worker, used to update just the local maintenance status.
+    private @Nullable Result lastResult;
     /// Active connection is disconnected on selection changes rather than waiting for its read timeout.
     private volatile @Nullable HttpURLConnection connection;
 
@@ -141,21 +145,32 @@ public final class ContentSync implements AutoCloseable {
                          @Unmodifiable Map<String, RemoteContent.Announcement> announcementFallbacks,
                          @Unmodifiable Set<String> readyAnnouncements,
                          boolean cached, boolean pending,
-                         boolean success, @Nullable Instant checkedAt, @Nullable String error, boolean exhausted,
-                         boolean publicationBlocked) {
+                         boolean contentSynced, @Nullable Instant checkedAt, @Nullable String error, boolean exhausted,
+                         boolean publicationBlocked, @Nullable String cleanupError) {
         /// Detaches the presentation state from the mutable verification run.
         public Result {
             announcementFallbacks = Map.copyOf(announcementFallbacks);
             readyAnnouncements = Set.copyOf(readyAnnouncements);
         }
 
-        /// Creates a result without a blocked publication.
+        /// Creates a result without pending cache errors.
         public Result(@Nullable RemoteContent.Manifest manifest,
                       @Unmodifiable Map<String, RemoteContent.Announcement> announcementFallbacks,
                       @Unmodifiable Set<String> readyAnnouncements, boolean cached, boolean pending,
                       boolean success, @Nullable Instant checkedAt, @Nullable String error, boolean exhausted) {
             this(manifest, announcementFallbacks, readyAnnouncements, cached, pending, success, checkedAt, error,
-                    exhausted, false);
+                    exhausted, false, null);
+        }
+
+        /// Whether both content synchronization and local maintenance succeeded.
+        public boolean success() {
+            return contentSynced && cleanupError == null;
+        }
+
+        /// Records a local maintenance result while preserving the current content and its network status.
+        private Result withCleanupError(@Nullable String error) {
+            return new Result(manifest, announcementFallbacks, readyAnnouncements, cached, pending, contentSynced,
+                    checkedAt, this.error, exhausted, publicationBlocked, error);
         }
 
         /// Returns the manifest once its agreement can be used for a launch decision.
@@ -233,18 +248,24 @@ public final class ContentSync implements AutoCloseable {
 
     /// Runs cleanup and restarts synchronization if another launcher changed the cache baseline.
     private void pruneOnWorker(int attempt) {
-        if (!cleanup(new Verification(), attempt)) {
-            synchronized (this) {
-                if (active && !running && !worker.isShutdown()) {
+        CleanupOutcome outcome = cleanup(new Verification(), attempt);
+        synchronized (this) {
+            if (worker.isShutdown())
+                return;
+            if (outcome == CleanupOutcome.CACHE_CHANGED) {
+                if (active && !running) {
                     success = false;
                     failures = 0;
                     activate();
                 }
+            } else if (lastResult != null && !java.util.Objects.equals(lastResult.cleanupError(), cleanupError)) {
+                lastResult = lastResult.withCleanupError(cleanupError);
+                listener.accept(lastResult);
             }
         }
     }
 
-    /// Queues at most one delayed local cleanup while another process holds the cache lock.
+    /// Queues at most one delayed local cleanup after a maintenance failure.
     private synchronized void retryCleanup(int attempt) {
         if (worker.isShutdown() || cleanupRetry != null)
             return;
@@ -353,7 +374,7 @@ public final class ContentSync implements AutoCloseable {
                 return;
             running = false;
             success = errors.isEmpty();
-            if (!cleanup(verification, 0)) {
+            if (cleanup(verification, 0) == CleanupOutcome.CACHE_CHANGED) {
                 success = false;
                 errors.append("Another launcher updated the content cache during synchronization");
             }
@@ -523,15 +544,26 @@ public final class ContentSync implements AutoCloseable {
         }
     }
 
+    /// Whether local maintenance succeeded, needs a local retry, or found a competing publication.
+    private enum CleanupOutcome {
+        /// Maintenance completed or there is no eligible cache to maintain.
+        COMPLETE,
+        /// Maintenance failed locally and uses its own retry budget.
+        FAILED,
+        /// The persisted cache version changed, requiring synchronization from the new baseline.
+        CACHE_CHANGED
+    }
+
     /// Retains current resources and files still owned by an available fallback revision.
-    private boolean cleanup(Verification verification, int attempt) {
+    private CleanupOutcome cleanup(Verification verification, int attempt) {
         if (publicationBlocked)
-            return true;
+            return CleanupOutcome.COMPLETE;
+        String operation = "保存缓存索引";
         try {
             @Nullable RemoteContent.Manifest current = manifest;
             @Nullable ContentStore.Usage registered = usage;
             if (current == null || registered == null)
-                return true;
+                return CleanupOutcome.COMPLETE;
             Instant now = Instant.now();
             Set<RemoteContent.Resource> keep = new HashSet<>(current.needed(now));
             if (cache != null) {
@@ -567,10 +599,14 @@ public final class ContentSync implements AutoCloseable {
                     }
                 }
             }
+            operation = "清理缓存文件";
             store.prune(Set.copyOf(keep), cacheVersion, registered);
+            cleanupError = null;
             cancelCleanupRetry();
         } catch (ContentStore.CacheChangedException e) {
             cancelCleanupRetry();
+            cleanupError = null;
+            lastResult = null;
             clearCacheState();
             verification.clear();
             try {
@@ -578,16 +614,16 @@ public final class ContentSync implements AutoCloseable {
             } catch (IOException failure) {
                 org.jackhuang.hmcl.util.logging.Logger.LOG.warning("Cannot reload the instance content cache", failure);
             }
-            return false;
-        } catch (ContentStore.CacheBusyException e) {
+            return CleanupOutcome.CACHE_CHANGED;
+        } catch (IOException | RuntimeException e) {
+            cleanupError = operation + "失败：" + (e.getMessage() == null ? e.toString() : e.getMessage());
             if (attempt < CLEANUP_RETRY_SECONDS.length)
                 retryCleanup(attempt);
             else
-                org.jackhuang.hmcl.util.logging.Logger.LOG.warning("Cannot prune instance content", e);
-        } catch (IOException | RuntimeException e) {
-            org.jackhuang.hmcl.util.logging.Logger.LOG.warning("Cannot prune instance content", e);
+                org.jackhuang.hmcl.util.logging.Logger.LOG.warning(cleanupError, e);
+            return CleanupOutcome.FAILED;
         }
-        return true;
+        return CleanupOutcome.COMPLETE;
     }
 
     /// Delivers ordered snapshots; cancellation checks prevent old selection generations from updating the UI.
@@ -605,9 +641,11 @@ public final class ContentSync implements AutoCloseable {
         }
         @Unmodifiable Map<String, RemoteContent.Announcement> fallbacks = current == null || cache == null ? Map.of()
                 : selectAnnouncementFallbacks(current, null, now, verification);
-        if (!worker.isShutdown() && generation == token)
-            listener.accept(new Result(current, fallbacks, ready, !checked, pending, success,
-                    cache == null ? null : cache.checkedAt(), error, failures > retrySeconds.length, publicationBlocked));
+        if (!worker.isShutdown() && generation == token) {
+            lastResult = new Result(current, fallbacks, ready, !checked, pending, success,
+                    cache == null ? null : cache.checkedAt(), error, failures > retrySeconds.length, publicationBlocked, cleanupError);
+            listener.accept(lastResult);
+        }
     }
 
     /// Conditional manifest request is the only network work when all referenced files are unchanged.

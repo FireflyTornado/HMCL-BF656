@@ -628,7 +628,7 @@ public final class RemoteContentController {
             return;
         }
         @Nullable ContentSync.Result result = owner.result;
-        boolean loading = result == null || (!result.success() && !result.exhausted());
+        boolean loading = result == null || (!result.contentSynced() && !result.exhausted());
         if (result == null || result.manifest() == null) {
             renderAnnouncementSlot(null, loading);
             return;
@@ -863,8 +863,14 @@ public final class RemoteContentController {
                 body.getChildren().add(new Label("内容标识：" + Objects.requireNonNull(owner.config).instanceKey()));
                 @Nullable ContentSync.Result result = owner.result;
                 String status = result == null ? "尚未同步" : result.success() ? "同步成功"
+                        : result.contentSynced() ? "内容已同步"
                         : result.pending() ? "正在同步正文或图片" : "同步失败，" + (result.exhausted() ? "自动重试已结束" : "将有限重试");
                 body.getChildren().add(new Label(status));
+                if (result != null && result.cleanupError() != null) {
+                    Label cleanup = new Label(result.cleanupError());
+                    cleanup.setWrapText(true);
+                    body.getChildren().add(cleanup);
+                }
                 if (result != null && result.manifest() != null) {
                     RemoteContent.Manifest manifest = result.manifest();
                     body.getChildren().add(new Label("上次检查：" + time(result.checkedAt())));

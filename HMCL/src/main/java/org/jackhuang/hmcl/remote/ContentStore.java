@@ -416,21 +416,17 @@ public final class ContentStore {
     }
 
     /// Cleans previously published or interrupted snapshots once the replacement index is durable.
-    private void pruneFallbackSnapshots(Path directory, Set<String> keep) {
+    private void pruneFallbackSnapshots(Path directory, Set<String> keep) throws IOException {
         if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS))
             return;
-        try {
-            checkCachePath(directory);
-            try (var files = Files.newDirectoryStream(directory, "*.json")) {
-                for (Path file : files) {
-                    String name = file.getFileName().toString();
-                    if (name.matches("[0-9a-f]{64}\\.json") && !keep.contains(name)
-                            && Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS))
-                        Files.deleteIfExists(file);
-                }
+        checkCachePath(directory);
+        try (var files = Files.newDirectoryStream(directory, "*.json")) {
+            for (Path file : files) {
+                String name = file.getFileName().toString();
+                if (name.matches("[0-9a-f]{64}\\.json") && !keep.contains(name)
+                        && Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS))
+                    Files.deleteIfExists(file);
             }
-        } catch (IOException e) {
-            org.jackhuang.hmcl.util.logging.Logger.LOG.warning("Cannot prune announcement fallback snapshots", e);
         }
     }
 
@@ -508,7 +504,7 @@ public final class ContentStore {
     }
 
     /// Reclaims obsolete snapshots left behind when cleanup was deferred during publication.
-    private void prunePublishedFallbacks(String text) {
+    private void prunePublishedFallbacks(String text) throws IOException {
         @Nullable JsonElement index = JsonParser.parseString(text).getAsJsonObject().get("announcementFallbacks");
         Set<String> keep = new HashSet<>();
         if (index != null && index.isJsonObject()) {
