@@ -31,6 +31,8 @@ import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -62,8 +64,19 @@ final class ContentSyncTest {
     private @Nullable HttpServer server;
     /// Shared fixture Markdown bytes.
     private static final String BODY = "# 公告\n\n![示例图片](assets/banner.png)";
-    /// Hash-verified fixture image payload; visual decoding is covered by the desktop smoke test.
-    private static final byte @Unmodifiable [] IMAGE = "fixture-image".getBytes(StandardCharsets.UTF_8);
+    /// Valid PNG payload used by the ordinary synchronization scenarios.
+    private static final byte @Unmodifiable [] IMAGE = fixtureImage();
+
+    /// Builds a small real image for the background decode checks.
+    private static byte @Unmodifiable [] fixtureImage() {
+        try {
+            var bytes = new ByteArrayOutputStream();
+            javax.imageio.ImageIO.write(new BufferedImage(2, 2, BufferedImage.TYPE_INT_RGB), "png", bytes);
+            return bytes.toByteArray();
+        } catch (IOException e) {
+            throw new AssertionError(e);
+        }
+    }
 
     /// Starts a loopback listener without internet access.
     @BeforeEach
@@ -458,12 +471,65 @@ final class ContentSyncTest {
         }
     }
 
-    /// Keeps the old revision through invalid Markdown and restart, then replaces it after a corrected manifest.
+    /// Blocks a corrupt cached agreement until its verified payload becomes available again.
     @Test
-    void invalidReplacementDocumentKeepsFallbackUntilCorrected() throws Exception {
+    void agreementIsUnavailableWhileItsCachedBodyIsCorrupt() throws Exception {
+        HttpServer http = java.util.Objects.requireNonNull(server);
+        String body = "# Original agreement";
+        String bodyPath = "agreement/terms.md";
+        JsonObject catalog = ContentFixtures.basic("main");
+        JsonObject agreement = catalog.getAsJsonObject("agreement");
+        agreement.remove("content");
+        agreement.addProperty("contentFile", bodyPath);
+        ContentFixtures.file(catalog, bodyPath, body.getBytes(StandardCharsets.UTF_8));
+        AtomicBoolean bodyAvailable = new AtomicBoolean();
+        http.createContext("/", exchange -> {
+            if (exchange.getRequestURI().getPath().endsWith("manifest.json")) {
+                send(exchange, 200, catalog.toString().getBytes(StandardCharsets.UTF_8));
+            } else {
+                send(exchange, bodyAvailable.get() ? 200 : 503, body.getBytes(StandardCharsets.UTF_8));
+            }
+        });
+        http.start();
+        var config = config();
+        var store = new ContentStore(directory, config.endpoint().toString());
+        var manifest = RemoteContent.parse(catalog.toString(), "main");
+        var resource = java.util.Objects.requireNonNull(manifest.files().get(bodyPath));
+        store.cache(new ContentStore.Cache(catalog.toString(), "", Instant.EPOCH));
+        store.install(resource, body.getBytes(StandardCharsets.UTF_8));
+        store.accept(manifest);
+        Files.writeString(store.file(resource), "# Modified agreement");
+        assertTrue(store.accepted(manifest));
+        assertThrows(IOException.class, () ->
+                ContentDocuments.validate(directory, manifest, manifest.agreement(), store, config.endpoint(), true));
+
+        var events = new LinkedBlockingQueue<ContentSync.Result>();
+        try (var sync = new ContentSync(config, store, events::add, new long[0])) {
+            sync.activate();
+            assertTrue(java.util.Objects.requireNonNull(events.poll(5, TimeUnit.SECONDS)).cached());
+            var checked = java.util.Objects.requireNonNull(events.poll(5, TimeUnit.SECONDS));
+            assertTrue(checked.pending());
+            assertFalse(checked.cached());
+            assertFalse(checked.agreementReady());
+            assertNull(checked.agreementManifest());
+            assertNull(awaitFinal(events, false).agreementManifest());
+
+            bodyAvailable.set(true);
+            sync.retryFailed();
+            var recovered = awaitFinal(events, true);
+            assertEquals(manifest, recovered.agreementManifest());
+            ContentDocuments.validate(directory, manifest, manifest.agreement(), store, config.endpoint(), true);
+            assertTrue(store.accepted(manifest));
+        }
+    }
+
+    /// Keeps the old revision through invalid image references or bytes and switches after correction.
+    @ParameterizedTest
+    @ValueSource(strings = {"undeclared.png", "unsupported.txt", "broken.png"})
+    void invalidReplacementDocumentKeepsFallbackUntilCorrected(String invalidImage) throws Exception {
         HttpServer http = java.util.Objects.requireNonNull(server);
         String originalBody = "# Last usable announcement\n\n[Rules](rules.txt)";
-        String invalidBody = "# Invalid update\n\n![Missing image](undeclared.png)";
+        String invalidBody = "# Invalid update\n\n![Invalid image](" + invalidImage + ")";
         String correctedBody = "# Corrected update";
         JsonObject original = ContentFixtures.markdown("main", originalBody, new byte[0]);
         String rulesPath = "announcements/rules.txt";
@@ -471,12 +537,24 @@ final class ContentSyncTest {
         ContentFixtures.file(original, rulesPath, rules);
         JsonObject invalid = ContentFixtures.markdown("main", invalidBody, new byte[0]);
         JsonObject corrected = ContentFixtures.markdown("main", correctedBody, new byte[0]);
-        invalid.getAsJsonArray("announcements").get(0).getAsJsonObject().addProperty("revision", 2);
+        JsonObject invalidItem = invalid.getAsJsonArray("announcements").get(0).getAsJsonObject();
+        invalidItem.addProperty("revision", 2);
+        byte @Unmodifiable [] invalidBytes = "not an image".getBytes(StandardCharsets.UTF_8);
+        if (!invalidImage.equals("undeclared.png")) {
+            String imagePath = "announcements/" + invalidImage;
+            invalidItem.getAsJsonArray("resources").add(imagePath);
+            ContentFixtures.file(invalid, imagePath, invalidBytes);
+        }
         corrected.getAsJsonArray("announcements").get(0).getAsJsonObject().addProperty("revision", 3);
         AtomicBoolean fixed = new AtomicBoolean();
         http.createContext("/", exchange -> {
             boolean useCorrection = fixed.get();
-            String content = exchange.getRequestURI().getPath().endsWith("manifest.json")
+            String path = exchange.getRequestURI().getPath();
+            if (path.endsWith("/" + invalidImage)) {
+                send(exchange, 200, invalidBytes);
+                return;
+            }
+            String content = path.endsWith("manifest.json")
                     ? (useCorrection ? corrected : invalid).toString() : (useCorrection ? correctedBody : invalidBody);
             send(exchange, 200, content.getBytes(StandardCharsets.UTF_8));
         });
@@ -494,7 +572,7 @@ final class ContentSyncTest {
             sync.activate();
             var failed = awaitFinal(events, false);
             assertFalse(failed.readyAnnouncements().contains("news"));
-            assertTrue(java.util.Objects.requireNonNull(failed.error()).contains("undeclared.png"));
+            assertTrue(java.util.Objects.requireNonNull(failed.error()).contains(invalidImage));
             assertEquals(1, java.util.Objects.requireNonNull(failed.announcementFallbacks().get("news")).item().revision());
             assertTrue(store.verified(originalFile));
         }

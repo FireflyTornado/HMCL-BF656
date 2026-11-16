@@ -192,8 +192,12 @@ public final class RemoteContentSmoke {
         });
         AtomicInteger launchedA = new AtomicInteger();
         AtomicInteger launchedB = new AtomicInteger();
-        double imageProtocolHeight = onFx(() -> {
+        onFx(() -> {
             RemoteContentController.beforeLaunch(gameA, launchedA::incrementAndGet);
+            return true;
+        });
+        await(() -> hasButton(decorator.getRoot(), "同意"));
+        double imageProtocolHeight = onFx(() -> {
             require(launchedA.get() == 0, "First launch must await consent");
             require(findButton(decorator.getRoot(), "同意").isDisabled(), "Agreement must start unchecked");
             findButton(decorator.getRoot(), "同意").fire();
@@ -216,6 +220,10 @@ public final class RemoteContentSmoke {
             findButton(decorator.getRoot(), "不同意").fire();
             require(launchedA.get() == 0, "Refusal must cancel without launching");
             RemoteContentController.beforeLaunch(gameA, launchedA::incrementAndGet);
+            return true;
+        });
+        await(() -> hasButton(decorator.getRoot(), "同意"));
+        onFx(() -> {
             consent(decorator.getRoot()).setSelected(true);
             JsonObject updatedIntroduction = a.deepCopy();
             updatedIntroduction.getAsJsonObject("agreement").addProperty("introduction", "请阅读协议全文，再确认是否同意。");
@@ -230,7 +238,10 @@ public final class RemoteContentSmoke {
         await(() -> launchedA.get() == 1);
         onFx(() -> {
             RemoteContentController.beforeLaunch(gameA, launchedA::incrementAndGet);
-            require(launchedA.get() == 2, "Accepted protocol must continue immediately");
+            return true;
+        });
+        await(() -> launchedA.get() == 2);
+        onFx(() -> {
             snapshot(scene, output.resolve("instance-markdown.png"));
             a.getAsJsonObject("agreement").addProperty("revision", 2);
             RemoteContentController.showInformation(gameA);
@@ -242,6 +253,10 @@ public final class RemoteContentSmoke {
         onFx(() -> {
             require(decorator.getRoot().lookup("#bf656-instance-agreement") == null, "A protocol update must wait for the next game launch");
             RemoteContentController.beforeLaunch(gameA, launchedA::incrementAndGet);
+            return true;
+        });
+        await(() -> hasButton(decorator.getRoot(), "同意"));
+        onFx(() -> {
             require(hasButton(decorator.getRoot(), "同意"), "Updated protocol must require fresh consent");
             require(!consent(decorator.getRoot()).isSelected(), "Updated protocol must reset acknowledgement");
             snapshot(scene, output.resolve("instance-updated-agreement.png"));
@@ -258,6 +273,10 @@ public final class RemoteContentSmoke {
             require(decorator.getRoot().lookup("#bf656-instance-agreement") == null, "Old confirmation must be removed");
             repo.setSelectedInstance(gameB);
             RemoteContentController.beforeLaunch(gameB, launchedB::incrementAndGet);
+            return true;
+        });
+        await(() -> hasButton(decorator.getRoot(), "同意"));
+        onFx(() -> {
             require(!consent(decorator.getRoot()).isSelected(), "Another instance must start with unchecked acknowledgement");
             consent(decorator.getRoot()).setSelected(true);
             findButton(decorator.getRoot(), "同意").fire();
@@ -690,6 +709,10 @@ public final class RemoteContentSmoke {
             require(!hasButton(informationPane(scene), "服务器公告") && !hasButton(informationPane(scene), "第二条独立公告"), "Announcement links must be removed");
             snapshot(scene, output.resolve("server-information-B.png"));
             findButton(informationPane(scene), "查看用户协议").fire();
+            return true;
+        });
+        await(() -> scene.getRoot().lookup("#bf656-document") != null);
+        onFx(() -> {
             snapshot(scene, output.resolve("server-information-B-protocol.png"));
             Node document = java.util.Objects.requireNonNull(scene.getRoot().lookup("#bf656-document"));
             require(hasLabel(document, "实例 B 的独立协议") && hasLabel(document, "这是 B 的协议说明。"), "Read-only protocol must belong to B while A stays selected");

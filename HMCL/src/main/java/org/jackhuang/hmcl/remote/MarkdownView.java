@@ -39,8 +39,6 @@ import org.commonmark.ext.gfm.tables.TableCell;
 import org.commonmark.ext.gfm.tables.TableRow;
 import org.commonmark.node.*;
 import org.jackhuang.hmcl.ui.FXUtils;
-import org.jackhuang.hmcl.ui.image.ImageLoader;
-import org.jackhuang.hmcl.ui.image.ImageUtils;
 import org.jetbrains.annotations.NotNullByDefault;
 import org.jetbrains.annotations.Nullable;
 import org.jetbrains.annotations.Unmodifiable;
@@ -48,11 +46,9 @@ import org.jetbrains.annotations.Unmodifiable;
 import java.awt.Desktop;
 import java.io.IOException;
 import java.net.URI;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -217,19 +213,11 @@ public final class MarkdownView extends VBox {
             @Nullable RemoteContent.Resource resource = ContentDocuments.resource(files, item, endpoint, node.getDestination());
             if (resource == null || !item.files().contains(resource.path()))
                 throw new IOException("图片未列入此条内容的 resources");
-            Path path = store.file(resource);
             CompletableFuture.supplyAsync(() -> {
-                try (var input = Files.newInputStream(path)) {
-                    String extension = resource.path().substring(resource.path().lastIndexOf('.') + 1).toLowerCase(Locale.ROOT);
-                    ImageLoader loader = switch (extension) {
-                        case "webp" -> ImageUtils.WEBP;
-                        case "apng" -> ImageUtils.APNG;
-                        case "png", "jpg", "jpeg", "gif", "bmp" -> ImageUtils.DEFAULT;
-                        default -> throw new IOException("不支持的图片格式：" + extension);
-                    };
-                    return loader.load(input, 1400, 0, true, true);
-                } catch (Exception e) {
-                    throw new java.util.concurrent.CompletionException(e);
+                try {
+                    return ContentDocuments.loadImage(resource, store);
+                } catch (IOException e) {
+                    throw new CompletionException(e);
                 }
             }).whenComplete((@Nullable Image loaded, @Nullable Throwable failure) -> Platform.runLater(() -> {
                 if (failure != null || loaded == null) {

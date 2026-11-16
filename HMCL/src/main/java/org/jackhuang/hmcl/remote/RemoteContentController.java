@@ -63,6 +63,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.function.Consumer;
 import java.util.stream.Stream;
 
@@ -205,6 +206,8 @@ public final class RemoteContentController {
         final long selectionEpoch;
         /// Request-owned protocol dialog, if needed.
         @Nullable AgreementPane pane;
+        /// Prevents overlapping background checks for the same launch request.
+        boolean checkingAgreement;
 
         /// Captures target and selection identity.
         LaunchRequest(Session session, Runnable action) {
@@ -320,28 +323,59 @@ public final class RemoteContentController {
 
     /// Reuses consent only for the latest known protocol, after the initial online check has completed or failed.
     private void checkLaunch(LaunchRequest request) {
-        if (!valid(request))
+        if (!valid(request) || (request.pane != null && request.pane.saving))
             return;
         Session owner = request.session;
         @Nullable ContentSync.Result result = owner.result;
         @Nullable RemoteContent.Manifest manifest = result == null ? null : result.agreementManifest();
-        String problem = owner.error == null ? "正在检查此实例的用户协议…" : owner.error;
-        if (owner.store != null && owner.config != null && manifest != null) {
-            try {
-                ContentDocuments.validate(owner.root, manifest, manifest.agreement(), owner.store, owner.config.endpoint(), true);
-                if (owner.store.accepted(manifest)) {
-                    resume(request);
-                    return;
-                }
-                agreement(request, manifest, null);
-                return;
-            } catch (IOException | RuntimeException e) {
-                problem = e.getMessage() == null ? e.toString() : e.getMessage();
-            }
-        } else if (result != null && result.error() != null) {
-            problem = result.error();
+        if (manifest == null) {
+            String problem = owner.error == null ? "正在检查此实例的用户协议…" : owner.error;
+            if (result != null && result.error() != null)
+                problem = result.error();
+            else if (result != null && !result.pending() && !result.agreementReady())
+                problem = "协议正文或关联资源暂不可用";
+            agreement(request, null, problem);
+            return;
         }
-        agreement(request, null, problem);
+        if (request.checkingAgreement)
+            return;
+
+        request.checkingAgreement = true;
+        CompletableFuture.supplyAsync(() -> {
+            try {
+                validateAgreement(owner, manifest);
+                return Objects.requireNonNull(owner.store).accepted(manifest);
+            } catch (IOException e) {
+                throw new CompletionException(e);
+            }
+        }).whenComplete((@Nullable Boolean accepted, @Nullable Throwable failure) -> Platform.runLater(() -> {
+            request.checkingAgreement = false;
+            if (!valid(request) || (request.pane != null && request.pane.saving))
+                return;
+            @Nullable ContentSync.Result latest = owner.result;
+            @Nullable RemoteContent.Manifest latestManifest = latest == null ? null : latest.agreementManifest();
+            if (latestManifest != manifest || (failure != null && latest != result)) {
+                checkLaunch(request);
+            } else if (failure != null) {
+                agreement(request, null, agreementFailure(failure));
+            } else if (Boolean.TRUE.equals(accepted)) {
+                resume(request);
+            } else {
+                agreement(request, manifest, null);
+            }
+        }));
+    }
+
+    /// Checks the exact protocol's cached files and required links before it is shown or used.
+    private static void validateAgreement(Session owner, RemoteContent.Manifest manifest) throws IOException {
+        ContentDocuments.validate(owner.root, manifest, manifest.agreement(), Objects.requireNonNull(owner.store),
+                Objects.requireNonNull(owner.config).endpoint(), true);
+    }
+
+    /// Unwraps a background validation error for display.
+    private static String agreementFailure(Throwable failure) {
+        Throwable cause = failure.getCause() == null ? failure : failure.getCause();
+        return cause.getMessage() == null ? cause.toString() : cause.getMessage();
     }
 
     /// Updates one protocol dialog rather than stacking dialogs during download progress.
@@ -487,15 +521,19 @@ public final class RemoteContentController {
             return;
         Session owner = request.session;
         ContentStore store = owner.store;
-        ContentSync.Config config = owner.config;
         @Nullable AgreementPane pane = request.pane;
         if (pane == null || !pane.confirmed(manifest))
             return;
+        @Nullable RemoteContent.Manifest currentAgreement = owner.result == null ? null : owner.result.agreementManifest();
+        if (currentAgreement == null || !currentAgreement.key(currentAgreement.agreement()).equals(manifest.key(manifest.agreement()))) {
+            checkLaunch(request);
+            return;
+        }
         pane.saving = true;
         pane.setDisable(true);
         CompletableFuture.runAsync(() -> {
             try {
-                ContentDocuments.validate(owner.root, manifest, manifest.agreement(), store, config.endpoint(), true);
+                validateAgreement(owner, manifest);
                 store.accept(manifest);
                 Platform.runLater(() -> {
                     if (pane != null) {
@@ -874,8 +912,8 @@ public final class RemoteContentController {
                 if (result != null && result.manifest() != null) {
                     RemoteContent.Manifest manifest = result.manifest();
                     body.getChildren().add(new Label("上次检查：" + time(result.checkedAt())));
-                    JFXButton protocol = button("查看用户协议", () -> document(owner, manifest, manifest.agreement()));
-                    protocol.setDisable(owner.store == null || !owner.store.ready(manifest, manifest.agreement()));
+                    JFXButton protocol = button("查看用户协议", () -> viewAgreement(this, owner, manifest));
+                    protocol.setDisable(!result.agreementReady());
                     body.getChildren().add(protocol);
                 }
             }
@@ -904,6 +942,25 @@ public final class RemoteContentController {
             informationPanes.remove(this);
             pauseUnused(owner);
         }
+    }
+
+    /// Checks a management panel's protocol before opening its read-only document.
+    private void viewAgreement(InformationPane pane, Session owner, RemoteContent.Manifest manifest) {
+        CompletableFuture.runAsync(() -> {
+            try {
+                validateAgreement(owner, manifest);
+            } catch (IOException e) {
+                throw new CompletionException(e);
+            }
+        }).whenComplete((@Nullable Void ignored, @Nullable Throwable failure) -> Platform.runLater(() -> {
+            if (closed || !informationPanes.contains(pane) || pane.owner != owner || sessions.get(owner.root) != owner
+                    || !present(owner, manifest, manifest.agreement(), RemoteContent.Kind.AGREEMENT))
+                return;
+            if (failure != null)
+                Controllers.dialog(agreementFailure(failure), "协议资源不可用");
+            else
+                document(owner, manifest, manifest.agreement());
+        }));
     }
 
     /// Opens a read-only full document without changing receipts or dismissals.

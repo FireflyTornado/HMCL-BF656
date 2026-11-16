@@ -146,7 +146,7 @@ public final class ContentSync implements AutoCloseable {
                          @Unmodifiable Set<String> readyAnnouncements,
                          boolean cached, boolean pending,
                          boolean contentSynced, @Nullable Instant checkedAt, @Nullable String error, boolean exhausted,
-                         boolean publicationBlocked, @Nullable String cleanupError) {
+                         boolean publicationBlocked, @Nullable String cleanupError, boolean agreementReady) {
         /// Detaches the presentation state from the mutable verification run.
         public Result {
             announcementFallbacks = Map.copyOf(announcementFallbacks);
@@ -159,7 +159,7 @@ public final class ContentSync implements AutoCloseable {
                       @Unmodifiable Set<String> readyAnnouncements, boolean cached, boolean pending,
                       boolean success, @Nullable Instant checkedAt, @Nullable String error, boolean exhausted) {
             this(manifest, announcementFallbacks, readyAnnouncements, cached, pending, success, checkedAt, error,
-                    exhausted, false, null);
+                    exhausted, false, null, false);
         }
 
         /// Whether both content synchronization and local maintenance succeeded.
@@ -170,12 +170,12 @@ public final class ContentSync implements AutoCloseable {
         /// Records a local maintenance result while preserving the current content and its network status.
         private Result withCleanupError(@Nullable String error) {
             return new Result(manifest, announcementFallbacks, readyAnnouncements, cached, pending, contentSynced,
-                    checkedAt, this.error, exhausted, publicationBlocked, error);
+                    checkedAt, this.error, exhausted, publicationBlocked, error, agreementReady);
         }
 
         /// Returns the manifest once its agreement can be used for a launch decision.
         @Nullable RemoteContent.Manifest agreementManifest() {
-            return publicationBlocked || (cached && pending) ? null : manifest;
+            return !agreementReady || publicationBlocked || (cached && pending) ? null : manifest;
         }
     }
 
@@ -466,6 +466,12 @@ public final class ContentSync implements AutoCloseable {
             resources.put(resource.cacheName(), true);
         }
 
+        /// Checks all declared agreement files before exposing the protocol to the launch flow.
+        private boolean agreementReady(RemoteContent.Manifest manifest) {
+            return manifest.agreement().files().stream()
+                    .allMatch(path -> resource(java.util.Objects.requireNonNull(manifest.files().get(path))));
+        }
+
         /// Considers a revision ready only after validating its payloads and document.
         private AnnouncementCheck announcement(RemoteContent.Announcement announcement) {
             if (!announcement.files().values().stream().allMatch(this::resource))
@@ -643,7 +649,8 @@ public final class ContentSync implements AutoCloseable {
                 : selectAnnouncementFallbacks(current, null, now, verification);
         if (!worker.isShutdown() && generation == token) {
             lastResult = new Result(current, fallbacks, ready, !checked, pending, success,
-                    cache == null ? null : cache.checkedAt(), error, failures > retrySeconds.length, publicationBlocked, cleanupError);
+                    cache == null ? null : cache.checkedAt(), error, failures > retrySeconds.length, publicationBlocked,
+                    cleanupError, current != null && verification.agreementReady(current));
             listener.accept(lastResult);
         }
     }
