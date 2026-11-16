@@ -312,42 +312,49 @@ public final class MarkdownView extends VBox {
         link.setWrapText(true);
         link.setStyle("-fx-font-size: 14px; -fx-padding: 0;");
         link.setOnAction(event -> {
-            try {
-                URI target = ContentDocuments.link(root, linkFiles, item, store, endpoint, destination);
-                if (!"file".equalsIgnoreCase(target.getScheme())) {
-                    FXUtils.openLink(target.toASCIIString());
-                    return;
+            link.setDisable(true);
+            CompletableFuture.runAsync(() -> {
+                try {
+                    openLinkInBackground(destination);
+                } catch (IOException e) {
+                    throw new CompletionException(e);
                 }
-                // Pass the decoded Unicode file path to the file-opening API, never to a URL command line.
-                Path file = Path.of(target);
-                link.setDisable(true);
-                CompletableFuture.runAsync(() -> {
-                    try {
-                        if (!Desktop.isDesktopSupported() || !Desktop.getDesktop().isSupported(Desktop.Action.OPEN))
-                            throw new IOException("系统不支持打开本地文档，请检查默认应用");
-                        Desktop.getDesktop().open(file.toFile());
-                    } catch (IOException | RuntimeException e) {
-                        throw new CompletionException(e);
-                    }
-                }).whenComplete((@Nullable Void ignored, @Nullable Throwable failure) -> Platform.runLater(() -> {
-                    link.setDisable(false);
-                    if (failure != null) {
-                        Throwable cause = failure.getCause() == null ? failure : failure.getCause();
-                        org.jackhuang.hmcl.util.logging.Logger.LOG.warning("Cannot open instance document " + file, cause);
-                        error.accept("无法打开本地文档：" + cause.getMessage());
-                        @Nullable Path folder = file.getParent();
-                        if (folder != null) {
-                            documentFolder.setOnAction(action -> FXUtils.openFolder(folder));
-                            documentFolder.setVisible(true);
-                            documentFolder.setManaged(true);
-                        }
-                    }
-                }));
-            } catch (IOException | RuntimeException e) {
-                error.accept(e.getMessage() == null ? e.toString() : e.getMessage());
-            }
+            }).whenComplete((@Nullable Void ignored, @Nullable Throwable failure) -> Platform.runLater(() -> {
+                link.setDisable(false);
+                if (failure != null) {
+                    Throwable cause = failure.getCause() == null ? failure : failure.getCause();
+                    error.accept(cause.getMessage() == null ? cause.toString() : cause.getMessage());
+                }
+            }));
         });
         return link;
+    }
+
+    /// Verifies the link target and opens it without blocking the JavaFX thread.
+    private void openLinkInBackground(String destination) throws IOException {
+        URI target = ContentDocuments.link(root, linkFiles, item, store, endpoint, destination);
+        if (!"file".equalsIgnoreCase(target.getScheme())) {
+            FXUtils.openLink(target.toASCIIString());
+            return;
+        }
+
+        Path file = Path.of(target);
+        try {
+            if (!Desktop.isDesktopSupported() || !Desktop.getDesktop().isSupported(Desktop.Action.OPEN))
+                throw new IOException("系统不支持打开本地文档，请检查默认应用");
+            Desktop.getDesktop().open(file.toFile());
+        } catch (IOException | RuntimeException e) {
+            org.jackhuang.hmcl.util.logging.Logger.LOG.warning("Cannot open instance document " + file, e);
+            @Nullable Path folder = file.getParent();
+            if (folder != null) {
+                Platform.runLater(() -> {
+                    documentFolder.setOnAction(action -> FXUtils.openFolder(folder));
+                    documentFolder.setVisible(true);
+                    documentFolder.setManaged(true);
+                });
+            }
+            throw new IOException("无法打开本地文档：" + e.getMessage(), e);
+        }
     }
 
     /// Creates a flow that can shrink within a card or dialog.

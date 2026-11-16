@@ -512,6 +512,12 @@ final class ContentSyncTest {
                     fallback.item(), reopened, config.endpoint(), "rules.txt"));
             var failed = awaitFinal(events, false);
             assertFalse(failed.readyAnnouncements().contains("news"));
+            Files.writeString(reopened.file(rulesFile), "Damaged rules");
+            IOException corrupt = assertThrows(IOException.class, () -> ContentDocuments.link(directory, fallback.linkIndex(),
+                    fallback.item(), reopened, config.endpoint(), "rules.txt"));
+            assertTrue(corrupt.getMessage().contains("缓存文档校验失败"));
+            assertThrows(IOException.class, () -> ContentDocuments.link(directory, originalManifest,
+                    originalManifest.announcements().getFirst(), reopened, config.endpoint(), "rules.txt"));
             fixed.set(true);
             sync.retryFailed();
             var ready = awaitFinal(events, true);

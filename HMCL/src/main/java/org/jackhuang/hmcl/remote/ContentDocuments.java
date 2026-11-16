@@ -84,9 +84,15 @@ public final class ContentDocuments {
         return link(root, manifest.files(), item, store, endpoint, destination);
     }
 
-    /// Resolves a clickable link against the document revision's file index.
+    /// Resolves a clickable link and verifies the bytes of any cached document before opening it.
     static URI link(Path root, @Unmodifiable Map<String, RemoteContent.Resource> files, RemoteContent.Item item,
                     ContentStore store, URI endpoint, String destination) throws IOException {
+        return resolveLink(root, files, item, store, endpoint, destination, true);
+    }
+
+    /// Applies the link policy, checking cached contents when the user opens a document.
+    private static URI resolveLink(Path root, @Unmodifiable Map<String, RemoteContent.Resource> files, RemoteContent.Item item,
+                                   ContentStore store, URI endpoint, String destination, boolean verifyCached) throws IOException {
         if (item.contentFile().isEmpty() || destination.startsWith("client/"))
             return ContentLinks.resolve(root, destination);
         @Nullable RemoteContent.Resource resource = resource(files, item, endpoint, destination);
@@ -97,6 +103,8 @@ public final class ContentDocuments {
             String extension = resource.path().substring(resource.path().lastIndexOf('.') + 1).toLowerCase(java.util.Locale.ROOT);
             if (!List.of("md", "html", "htm", "pdf", "txt", "png", "jpg", "jpeg", "gif", "webp", "bmp", "apng").contains(extension))
                 throw new IOException("不支持打开此文档类型");
+            if (verifyCached && !store.verified(resource))
+                throw new IOException("缓存文档校验失败，暂不可用：" + destination);
             return file.toUri();
         }
         try {
@@ -179,7 +187,7 @@ public final class ContentDocuments {
                 public void visit(Link node) {
                     if (agreementRoot != null) {
                         try {
-                            link(agreementRoot, files, item, store, endpoint, node.getDestination());
+                            resolveLink(agreementRoot, files, item, store, endpoint, node.getDestination(), false);
                         } catch (IOException e) {
                             throw new DocumentException(e);
                         }
