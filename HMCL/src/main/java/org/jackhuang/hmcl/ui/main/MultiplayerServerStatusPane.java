@@ -43,6 +43,7 @@ import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
+import javafx.scene.text.Text;
 import javafx.stage.Stage;
 import javafx.util.Duration;
 import org.jackhuang.hmcl.game.HMCLGameInstance;
@@ -92,6 +93,8 @@ final class MultiplayerServerStatusPane extends HBox {
     private final MenuButton selector = new MenuButton();
     /// Displays the latest connection state beside the status dot.
     private final Label status = new Label();
+    /// Measures the complete list error message using the status label's font.
+    private final Text listErrorRuler = new Text();
     /// Displays the reported player counts in compact server-list format.
     private final Label players = new Label();
     /// Holds the latency bars and the connection-failure overlay in the same position.
@@ -173,6 +176,11 @@ final class MultiplayerServerStatusPane extends HBox {
         dot.setMaxSize(7, 7);
         status.getStyleClass().add("multiplayer-server-message");
         status.setMinWidth(0);
+        status.setMaxWidth(Double.MAX_VALUE);
+        status.widthProperty().addListener(observable -> updateListErrorText());
+        status.fontProperty().addListener(observable -> updateListErrorText());
+        status.insetsProperty().addListener(observable -> updateListErrorText());
+        status.labelPaddingProperty().addListener(observable -> updateListErrorText());
 
         players.getStyleClass().addAll("multiplayer-server-message", "multiplayer-server-players");
         players.visibleProperty().bind(players.textProperty().isNotEmpty());
@@ -358,14 +366,39 @@ final class MultiplayerServerStatusPane extends HBox {
     /// Shows a file error separately from the connection status and restores the controls on recovery.
     private void setListError(@Nullable ListError error) {
         listError = error;
-        refreshButton.setVisible(error == null);
-        @Nullable String hint = error == ListError.UNREADABLE ? i18n("bf656.server_status.list_unreadable") : null;
-        status.setTooltip(hint == null ? null : new Tooltip(hint));
-        status.setAccessibleText(hint);
-        if (error != null) {
+        updateRefreshButtonDisabled();
+        HBox.setHgrow(status, error == null ? null : Priority.ALWAYS);
+        if (error == null) {
+            status.setTooltip(null);
+            status.setAccessibleText(null);
+        } else {
             name.setText(i18n("bf656.server_status.title"));
-            status.setText(i18n(error.messageKey));
+            updateListErrorText();
             setVisible(true);
+        }
+    }
+
+    /// Shows a tooltip only when the complete list error message does not fit on the status line.
+    private void updateListErrorText() {
+        @Nullable ListError error = listError;
+        if (error == null)
+            return;
+
+        String shortMessage = i18n(error.messageKey);
+        String fullMessage = error == ListError.UNREADABLE ? i18n("bf656.server_status.list_unreadable") : shortMessage;
+        listErrorRuler.setFont(status.getFont());
+        listErrorRuler.setText(fullMessage);
+        double availableWidth = status.getWidth() - status.snappedLeftInset() - status.snappedRightInset()
+                - status.getLabelPadding().getLeft() - status.getLabelPadding().getRight();
+        boolean fits = listErrorRuler.getLayoutBounds().getWidth() <= availableWidth;
+        status.setText(fits ? fullMessage : shortMessage);
+        status.setAccessibleText(fullMessage);
+
+        @Nullable Tooltip tooltip = status.getTooltip();
+        if (fits || status.getWidth() == 0) {
+            status.setTooltip(null);
+        } else if (tooltip == null || !fullMessage.equals(tooltip.getText())) {
+            status.setTooltip(new Tooltip(fullMessage));
         }
     }
 
@@ -466,7 +499,12 @@ final class MultiplayerServerStatusPane extends HBox {
     private void setRefreshing(boolean value) {
         refreshing = value;
         refreshButton.setGraphic(value ? spinner : refreshIcon);
-        refreshButton.setDisable(value);
+        updateRefreshButtonDisabled();
+    }
+
+    /// Disables manual refresh while a query is running or the server list cannot be used.
+    private void updateRefreshButtonDisabled() {
+        refreshButton.setDisable(refreshing || listError != null);
     }
 
     /// Updates the connection, compact player count and latency bars from the latest response.
