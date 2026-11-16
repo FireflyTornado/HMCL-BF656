@@ -25,15 +25,22 @@ import org.commonmark.node.Image;
 import org.commonmark.node.Link;
 import org.commonmark.node.Node;
 import org.commonmark.parser.Parser;
+import org.jackhuang.hmcl.ui.image.ImageLoader;
+import org.jackhuang.hmcl.ui.image.ImageUtils;
 import org.jetbrains.annotations.NotNullByDefault;
 import org.jetbrains.annotations.Nullable;
+import org.jetbrains.annotations.Unmodifiable;
 
 import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
 
 /// Shared Markdown parsing and deterministic link-to-index resolution for rendering and prelaunch checks.
 @NotNullByDefault
@@ -53,11 +60,17 @@ public final class ContentDocuments {
     /// Resolves a Markdown-relative resource or an explicitly indexed absolute image URL.
     public static @Nullable RemoteContent.Resource resource(RemoteContent.Manifest manifest, RemoteContent.Item item,
                                                             URI endpoint, String destination) throws IOException {
+        return resource(manifest.files(), item, endpoint, destination);
+    }
+
+    /// Resolves a reference using the index for the document revision being rendered.
+    static @Nullable RemoteContent.Resource resource(@Unmodifiable Map<String, RemoteContent.Resource> files,
+                                                     RemoteContent.Item item, URI endpoint, String destination) throws IOException {
         try {
             URI reference = URI.create(destination.replace(" ", "%20"));
             URI document = endpoint.resolve(new URI(null, null, item.contentFile(), null));
             URI absolute = document.resolve(reference).normalize();
-            for (var resource : manifest.files().values()) {
+            for (var resource : files.values()) {
                 URI target = resource.url().isEmpty()
                         ? endpoint.resolve(new URI(null, null, resource.path(), null)) : URI.create(resource.url());
                 if (withoutFragment(target).equals(withoutFragment(absolute)))
@@ -72,9 +85,15 @@ public final class ContentDocuments {
     /// Converts links into cached public documents, explicit instance-local documents or external web pages.
     public static URI link(Path root, RemoteContent.Manifest manifest, RemoteContent.Item item,
                            ContentStore store, URI endpoint, String destination) throws IOException {
+        return link(root, manifest.files(), item, store, endpoint, destination);
+    }
+
+    /// Resolves a clickable link and verifies the bytes of any cached document before opening it.
+    static URI link(Path root, @Unmodifiable Map<String, RemoteContent.Resource> files, RemoteContent.Item item,
+                    ContentStore store, URI endpoint, String destination) throws IOException {
         if (item.contentFile().isEmpty() || destination.startsWith("client/"))
             return ContentLinks.resolve(root, destination);
-        @Nullable RemoteContent.Resource resource = resource(manifest, item, endpoint, destination);
+        @Nullable RemoteContent.Resource resource = resource(files, item, endpoint, destination);
         if (resource != null) {
             Path file = store.file(resource);
             if (!Files.isRegularFile(file))
@@ -82,6 +101,8 @@ public final class ContentDocuments {
             String extension = resource.path().substring(resource.path().lastIndexOf('.') + 1).toLowerCase(java.util.Locale.ROOT);
             if (!List.of("md", "html", "htm", "pdf", "txt", "png", "jpg", "jpeg", "gif", "webp", "bmp", "apng").contains(extension))
                 throw new IOException("不支持打开此文档类型");
+            if (!store.verified(resource))
+                throw new IOException("缓存文档校验失败，暂不可用：" + destination);
             return file.toUri();
         }
         try {
@@ -101,21 +122,131 @@ public final class ContentDocuments {
                                 ContentStore store, URI endpoint, boolean agreement) throws IOException {
         if (!store.ready(manifest, item))
             throw new IOException("正文或关联资源尚未下载完成");
+        if (agreement) {
+            for (String path : item.files()) {
+                RemoteContent.Resource resource = java.util.Objects.requireNonNull(manifest.files().get(path));
+                if (!store.verified(resource))
+                    throw new IOException("协议缓存文件校验失败，暂不可用：" + path);
+            }
+        }
+        validateDocument(manifest.files(), item, store, endpoint, agreement ? root : null, null);
+    }
+
+    /// Validates cached Markdown and its images after the declared payloads have passed digest checks.
+    static void validateCachedDocument(RemoteContent.Item item, @Unmodifiable Map<String, RemoteContent.Resource> files,
+                                       ContentStore store, URI endpoint, ImageChecks images) throws IOException {
+        validateDocument(files, item, store, endpoint, null, images);
+    }
+
+    /// Decodes one verified cached image without retaining its pixels.
+    @FunctionalInterface
+    interface ImageDecoder {
+        /// Rejects an image that cannot be decoded.
+        void decode(RemoteContent.Resource resource) throws IOException;
+    }
+
+    /// Remembers image decode outcomes by content and extension for one background attempt.
+    static final class ImageChecks {
+        /// Decoder shared with the view.
+        private final ImageDecoder decoder;
+        /// Successful decodes have an empty failure.
+        private final Map<String, Optional<IOException>> results = new HashMap<>();
+
+        /// Uses the given decoder for cache misses.
+        ImageChecks(ImageDecoder decoder) {
+            this.decoder = decoder;
+        }
+
+        /// Reuses the first decode outcome for these bytes and this image format.
+        void verify(RemoteContent.Resource resource) throws IOException {
+            Optional<IOException> failure = results.computeIfAbsent(resource.cacheName(), ignored -> {
+                try {
+                    decoder.decode(resource);
+                    return Optional.empty();
+                } catch (IOException e) {
+                    return Optional.of(e);
+                }
+            });
+            if (failure.isPresent())
+                throw failure.get();
+        }
+
+        /// Rechecks the file after reinstalling its bytes.
+        void installed(RemoteContent.Resource resource) {
+            results.remove(resource.cacheName());
+        }
+
+        /// Discards results obtained before a competing publication.
+        void clear() {
+            results.clear();
+        }
+    }
+
+    /// Loads an indexed Markdown image using the same format rules for verification and rendering.
+    static javafx.scene.image.Image loadImage(RemoteContent.Resource resource, ContentStore store) throws IOException {
+        String path = resource.path();
+        String extension = path.substring(path.lastIndexOf('.') + 1).toLowerCase(Locale.ROOT);
+        ImageLoader loader = switch (extension) {
+            case "webp" -> ImageUtils.WEBP;
+            case "apng" -> ImageUtils.APNG;
+            case "png", "jpg", "jpeg", "gif", "bmp" -> ImageUtils.DEFAULT;
+            default -> throw new IOException("不支持的图片格式：" + path);
+        };
+        try (var input = Files.newInputStream(store.file(resource))) {
+            return loader.load(input, 1400, 0, true, true);
+        } catch (Exception e) {
+            throw new IOException("图片无法解码：" + path, e);
+        }
+    }
+
+    /// Captures the extra indexed documents that this Markdown revision actually links to.
+    static @Unmodifiable Map<String, RemoteContent.Resource> linkedFiles(RemoteContent.Announcement announcement,
+            RemoteContent.Manifest manifest, ContentStore store, URI endpoint) throws IOException {
+        RemoteContent.Item item = announcement.item();
+        if (item.contentFile().isEmpty())
+            return Map.of();
+        Map<String, RemoteContent.Resource> linked = new HashMap<>();
+        parse(store.body(item, announcement.files())).accept(new AbstractVisitor() {
+            /// Records optional cached-document targets without affecting announcement readiness.
+            @Override
+            public void visit(Link node) {
+                String destination = node.getDestination();
+                if (!destination.startsWith("client/")) {
+                    try {
+                        @Nullable RemoteContent.Resource target = resource(manifest, item, endpoint, destination);
+                        if (target != null && !announcement.files().containsKey(target.path()))
+                            linked.put(target.path(), target);
+                    } catch (IOException ignored) {
+                        // The renderer reports invalid optional links when followed.
+                    }
+                }
+                visitChildren(node);
+            }
+        });
+        return Map.copyOf(linked);
+    }
+
+    /// Validates a revision's Markdown images and any required agreement links.
+    private static void validateDocument(@Unmodifiable Map<String, RemoteContent.Resource> files, RemoteContent.Item item,
+                                         ContentStore store, URI endpoint, @Nullable Path agreementRoot,
+                                         @Nullable ImageChecks images) throws IOException {
         if (item.contentFile().isEmpty()) {
-            if (agreement)
-                ContentLinks.validateAgreement(root, item);
+            if (agreementRoot != null)
+                ContentLinks.validateAgreement(agreementRoot, item);
             return;
         }
-        Node document = parse(store.body(manifest, item));
+        Node document = parse(store.body(item, files));
         try {
             document.accept(new AbstractVisitor() {
                 /// Requires all images to have indexed, hash-verified local payloads.
                 @Override
                 public void visit(Image image) {
                     try {
-                        @Nullable RemoteContent.Resource resource = resource(manifest, item, endpoint, image.getDestination());
+                        @Nullable RemoteContent.Resource resource = resource(files, item, endpoint, image.getDestination());
                         if (resource == null || !item.files().contains(resource.path()) || !Files.isRegularFile(store.file(resource)))
                             throw new IOException("图片未列入 resources 或尚未下载：" + image.getDestination());
+                        if (images != null)
+                            images.verify(resource);
                     } catch (IOException e) {
                         throw new DocumentException(e);
                     }
@@ -124,9 +255,9 @@ public final class ContentDocuments {
                 /// Required agreement links must resolve before consent can be recorded.
                 @Override
                 public void visit(Link node) {
-                    if (agreement) {
+                    if (agreementRoot != null) {
                         try {
-                            link(root, manifest, item, store, endpoint, node.getDestination());
+                            link(agreementRoot, files, item, store, endpoint, node.getDestination());
                         } catch (IOException e) {
                             throw new DocumentException(e);
                         }

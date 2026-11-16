@@ -628,6 +628,11 @@
     -fx-cursor: hand;
 }
 
+.multiplayer-server-refresh:disabled {
+    -fx-background-color: transparent;
+    -fx-cursor: default;
+}
+
 .multiplayer-server-refresh .svg {
     -fx-fill: -monet-on-surface-variant;
 }
@@ -1232,6 +1237,11 @@
     -fx-padding: 8px;
 
     -fx-effect: dropshadow(gaussian, rgba(0, 0, 0, 0.26), 10, 0.12, -1, 2);
+}
+
+.card.remote-announcement-loading {
+    -fx-background-color: -monet-surface-container-low-transparent-80, rgba(0, 0, 0, 0.09);
+    -fx-background-radius: 4, 4;
 }
 
 .card-no-padding {

@@ -17,6 +17,7 @@
  */
 package org.jackhuang.hmcl.remote;
 
+import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -38,6 +39,7 @@ import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /// Immutable instance-specific version-two manifests, content identities and resource ownership.
@@ -75,6 +77,11 @@ public final class RemoteContent {
                        @Unmodifiable List<String> resources, String publishedAt,
                        @Nullable Instant startsAt, @Nullable Instant expiresAt,
                        int priority, boolean pinned, String repeat) {
+        /// Keeps the required resource list stable for the lifetime of the item.
+        public Item {
+            resources = List.copyOf(resources);
+        }
+
         /// Whether the item should currently be presented.
         public boolean active(Instant now) {
             return (startsAt == null || !now.isBefore(startsAt)) && !expired(now);
@@ -94,6 +101,56 @@ public final class RemoteContent {
         }
     }
 
+    /// One announcement and the file index used to read, render and identify its revision.
+    @NotNullByDefault
+    public record Announcement(Item item, @Unmodifiable Map<String, Resource> files,
+                               @Unmodifiable Map<String, Resource> linkedFiles) {
+        /// Snapshots the required files and additional hyperlink targets for this revision.
+        public Announcement {
+            files = Map.copyOf(files);
+            linkedFiles = Map.copyOf(linkedFiles);
+            @Unmodifiable Set<String> required = item.files();
+            for (String path : required) {
+                @Nullable Resource resource = files.get(path);
+                if (resource == null)
+                    throw new IllegalArgumentException("Announcement file missing from index: " + path);
+                if (!path.equals(resource.path()))
+                    throw new IllegalArgumentException("Announcement descriptor path does not match its key: " + path);
+            }
+            if (files.size() != required.size())
+                throw new IllegalArgumentException("Announcement file index contains undeclared files");
+            for (var entry : linkedFiles.entrySet()) {
+                String path = entry.getKey();
+                if (files.containsKey(path) || !path.equals(entry.getValue().path()))
+                    throw new IllegalArgumentException("Invalid announcement link descriptor: " + path);
+            }
+        }
+
+        /// Creates a revision before resolving any additional hyperlink targets.
+        public Announcement(Item item, @Unmodifiable Map<String, Resource> files) {
+            this(item, files, Map.of());
+        }
+
+        /// Returns the files available when opening a hyperlink from this revision.
+        @Unmodifiable Map<String, Resource> linkIndex() {
+            if (linkedFiles.isEmpty())
+                return files;
+            Map<String, Resource> index = new LinkedHashMap<>(files);
+            index.putAll(linkedFiles);
+            return Map.copyOf(index);
+        }
+
+        /// Identifies this revision from its metadata and file digests.
+        public String key() {
+            return itemKey(item, files);
+        }
+
+        /// Copies the descriptors declared by this announcement for rendering or persistent fallback.
+        static Announcement capture(Manifest manifest, Item item) {
+            return new Announcement(item, manifest.itemFiles(item));
+        }
+    }
+
     /// A complete instance catalog; one conditional request checks all three content types.
     @NotNullByDefault
     public record Manifest(String instanceKey, Item agreement, @Unmodifiable List<Item> notices,
@@ -105,6 +162,14 @@ public final class RemoteContent {
                 case NOTICES -> notices;
                 case ANNOUNCEMENTS -> announcements;
             };
+        }
+
+        /// Returns the exact descriptors declared by one item.
+        @Unmodifiable Map<String, Resource> itemFiles(Item item) {
+            Map<String, Resource> descriptors = new LinkedHashMap<>();
+            for (String path : item.files())
+                descriptors.put(path, Objects.requireNonNull(files.get(path)));
+            return Map.copyOf(descriptors);
         }
 
         /// All current and future files, excluding expired notices and announcements.
@@ -123,12 +188,17 @@ public final class RemoteContent {
 
         /// Body/resource changes invalidate receipts; presentation-only introductions keep existing consent unless revision changes.
         public String key(Item item) {
-            StringBuilder identity = new StringBuilder(item.id()).append('\n').append(item.revision())
-                    .append('\n').append(item.title()).append('\n').append(item.content());
-            item.files().stream().sorted().forEach(path -> identity.append('\n').append(path)
-                    .append(':').append(files.get(path).sha256()));
-            return hash(identity.toString());
+            return itemKey(item, files);
         }
+    }
+
+    /// Computes a revision key using the exact file digests for one item.
+    private static String itemKey(Item item, @Unmodifiable Map<String, Resource> files) {
+        StringBuilder identity = new StringBuilder(item.id()).append('\n').append(item.revision())
+                .append('\n').append(item.title()).append('\n').append(item.content());
+        item.files().stream().sorted().forEach(path -> identity.append('\n').append(path)
+                .append(':').append(files.get(path).sha256()));
+        return hash(identity.toString());
     }
 
     /// Parses and validates an instance-bound manifest before it can replace known-good metadata.
@@ -140,24 +210,11 @@ public final class RemoteContent {
             String key = required(root, "instanceKey", 64);
             if (!key.matches("[A-Za-z0-9][A-Za-z0-9._-]{0,63}") || !key.equals(expectedInstanceKey))
                 throw new IllegalArgumentException("Manifest instanceKey does not match client configuration");
-            Map<String, Resource> files = new LinkedHashMap<>();
-            for (var entry : root.getAsJsonObject("files").entrySet()) {
-                String path = logicalPath(entry.getKey());
-                JsonObject descriptor = entry.getValue().getAsJsonObject();
-                String digest = required(descriptor, "sha256", 64).toLowerCase(java.util.Locale.ROOT);
-                if (!digest.matches("[0-9a-f]{64}"))
-                    throw new IllegalArgumentException("Invalid SHA-256: " + path);
-                String url = string(descriptor, "url", "");
-                if (!url.isEmpty())
-                    validateHttp(URI.create(url));
-                if (files.size() >= 500)
-                    throw new IllegalArgumentException("Too many managed files");
-                files.put(path, new Resource(path, digest, url));
-            }
+            @Unmodifiable Map<String, Resource> files = files(root.getAsJsonObject("files"));
             Item agreement = item(root.getAsJsonObject("agreement"), true);
             @Unmodifiable List<Item> notices = items(root, "notices");
             @Unmodifiable List<Item> announcements = items(root, "announcements");
-            Manifest manifest = new Manifest(key, agreement, notices, announcements, Map.copyOf(files));
+            Manifest manifest = new Manifest(key, agreement, notices, announcements, files);
             for (Kind kind : Kind.values()) {
                 for (Item item : manifest.items(kind)) {
                     for (String path : item.files()) {
@@ -170,6 +227,79 @@ public final class RemoteContent {
         } catch (RuntimeException e) {
             throw new IOException("Invalid manifest.json: " + e.getMessage(), e);
         }
+    }
+
+    /// Reads and validates the resource descriptors shared by public manifests and local snapshots.
+    private static @Unmodifiable Map<String, Resource> files(JsonObject index) {
+        Map<String, Resource> files = new LinkedHashMap<>();
+        for (var entry : index.entrySet()) {
+            String path = logicalPath(entry.getKey());
+            JsonObject descriptor = entry.getValue().getAsJsonObject();
+            String digest = required(descriptor, "sha256", 64).toLowerCase(java.util.Locale.ROOT);
+            if (!digest.matches("[0-9a-f]{64}"))
+                throw new IllegalArgumentException("Invalid SHA-256: " + path);
+            String url = string(descriptor, "url", "");
+            if (!url.isEmpty())
+                validateHttp(URI.create(url));
+            if (files.size() >= 500)
+                throw new IllegalArgumentException("Too many managed files");
+            files.put(path, new Resource(path, digest, url));
+        }
+        return Map.copyOf(files);
+    }
+
+    /// Validates one persisted announcement with its own exact resource index.
+    static Announcement readAnnouncement(JsonObject json) throws IOException {
+        Item item = item(json.getAsJsonObject("item"), false);
+        @Unmodifiable Map<String, Resource> files = files(json.getAsJsonObject("files"));
+        @Unmodifiable Map<String, Resource> links = json.has("linkedFiles") ? files(json.getAsJsonObject("linkedFiles")) : Map.of();
+        try {
+            return new Announcement(item, files, links);
+        } catch (IllegalArgumentException e) {
+            throw new IOException("Cached announcement file index does not match the item", e);
+        }
+    }
+
+    /// Encodes a local fallback without storing any agreement or notice metadata from its source manifest.
+    static JsonObject writeAnnouncement(Announcement announcement) {
+        Item item = announcement.item();
+        JsonObject fields = new JsonObject();
+        fields.addProperty("id", item.id());
+        fields.addProperty("revision", item.revision());
+        fields.addProperty("title", item.title());
+        fields.addProperty("content", item.content());
+        fields.addProperty("contentFile", item.contentFile());
+        JsonArray resources = new JsonArray();
+        item.resources().forEach(resources::add);
+        fields.add("resources", resources);
+        fields.addProperty("publishedAt", item.publishedAt());
+        if (item.startsAt() != null)
+            fields.addProperty("startsAt", item.startsAt().toString());
+        if (item.expiresAt() != null)
+            fields.addProperty("expiresAt", item.expiresAt().toString());
+        fields.addProperty("priority", item.priority());
+        fields.addProperty("pinned", item.pinned());
+        fields.addProperty("repeat", item.repeat());
+
+        JsonObject json = new JsonObject();
+        json.add("item", fields);
+        json.add("files", writeFiles(announcement.files()));
+        if (!announcement.linkedFiles().isEmpty())
+            json.add("linkedFiles", writeFiles(announcement.linkedFiles()));
+        return json;
+    }
+
+    /// Encodes resource descriptors in a deterministic order for digest-addressed snapshots.
+    private static JsonObject writeFiles(@Unmodifiable Map<String, Resource> files) {
+        JsonObject index = new JsonObject();
+        for (var entry : files.entrySet().stream().sorted(Map.Entry.comparingByKey()).toList()) {
+            Resource resource = entry.getValue();
+            JsonObject descriptor = new JsonObject();
+            descriptor.addProperty("sha256", resource.sha256());
+            descriptor.addProperty("url", resource.url());
+            index.add(entry.getKey(), descriptor);
+        }
+        return index;
     }
 
     /// Parses a bounded list and rejects duplicate IDs within the content type.

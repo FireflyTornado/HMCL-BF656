@@ -55,6 +55,7 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -62,6 +63,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.function.Consumer;
 import java.util.stream.Stream;
 
@@ -79,8 +81,12 @@ public final class RemoteContentController {
     private final Set<InformationPane> informationPanes = new HashSet<>();
     /// Session currently projected onto the homepage.
     private @Nullable Session current;
-    /// Reused while the selected instance has no announcement ready to display.
-    private @Nullable StackPane announcementLoading;
+    /// Holds the scrollable feed and its loading overlay.
+    private final StackPane announcementSlot = new StackPane();
+    /// Reused while the selected instance still has announcement work pending.
+    private @Nullable HBox announcementLoading;
+    /// Current feed, retained across loading and metadata updates.
+    private @Nullable AnnouncementFeed announcementFeed;
     /// Selection changes invalidate pending launches.
     private long epoch;
     /// One captured launch awaiting network data or user consent.
@@ -94,6 +100,7 @@ public final class RemoteContentController {
 
     /// Binds existing HMCL instance selection without requiring global protocol acceptance.
     private RemoteContentController() {
+        announcementSlot.setPickOnBounds(false);
         GameDirectoryManager.selectedInstanceProperty().addListener(listener);
         select(GameDirectoryManager.getSelectedInstance());
     }
@@ -201,6 +208,10 @@ public final class RemoteContentController {
         final long selectionEpoch;
         /// Request-owned protocol dialog, if needed.
         @Nullable AgreementPane pane;
+        /// Prevents overlapping background checks for the same launch request.
+        boolean checkingAgreement;
+        /// Snapshot rejected by the disk version check while synchronization catches up.
+        @Nullable RemoteContent.Manifest rejectedAgreement;
 
         /// Captures target and selection identity.
         LaunchRequest(Session session, Runnable action) {
@@ -316,28 +327,75 @@ public final class RemoteContentController {
 
     /// Reuses consent only for the latest known protocol, after the initial online check has completed or failed.
     private void checkLaunch(LaunchRequest request) {
-        if (!valid(request))
+        if (!valid(request) || (request.pane != null && request.pane.saving))
             return;
         Session owner = request.session;
         @Nullable ContentSync.Result result = owner.result;
-        @Nullable RemoteContent.Manifest manifest = result == null ? null : result.manifest();
-        String problem = owner.error == null ? "正在检查此实例的用户协议…" : owner.error;
-        if (owner.store != null && owner.config != null && manifest != null && !(result.cached() && result.pending())) {
-            try {
-                ContentDocuments.validate(owner.root, manifest, manifest.agreement(), owner.store, owner.config.endpoint(), true);
-                if (owner.store.accepted(manifest)) {
-                    resume(request);
-                    return;
-                }
-                agreement(request, manifest, null);
-                return;
-            } catch (IOException | RuntimeException e) {
-                problem = e.getMessage() == null ? e.toString() : e.getMessage();
-            }
-        } else if (result != null && result.error() != null) {
-            problem = result.error();
+        @Nullable RemoteContent.Manifest manifest = result == null ? null : result.agreementManifest();
+        if (manifest == null) {
+            String problem = owner.error == null ? "正在检查此实例的用户协议…" : owner.error;
+            if (result != null && result.error() != null)
+                problem = result.error();
+            else if (result != null && !result.pending() && !result.agreementReady())
+                problem = "协议正文或关联资源暂不可用";
+            agreement(request, null, problem);
+            return;
         }
-        agreement(request, null, problem);
+        if (manifest == request.rejectedAgreement)
+            return;
+        if (request.checkingAgreement)
+            return;
+
+        request.checkingAgreement = true;
+        CompletableFuture.supplyAsync(() -> {
+            try {
+                validateAgreement(owner, manifest);
+                return Objects.requireNonNull(owner.store).acceptedCurrent(manifest);
+            } catch (IOException e) {
+                throw new CompletionException(e);
+            }
+        }).whenComplete((@Nullable Boolean accepted, @Nullable Throwable failure) -> Platform.runLater(() -> {
+            request.checkingAgreement = false;
+            if (!valid(request) || (request.pane != null && request.pane.saving))
+                return;
+            @Nullable ContentSync.Result latest = owner.result;
+            @Nullable RemoteContent.Manifest latestManifest = latest == null ? null : latest.agreementManifest();
+            if (latestManifest != manifest) {
+                checkLaunch(request);
+            } else if (failure != null && failure.getCause() instanceof ContentStore.AgreementChangedException) {
+                refreshChangedAgreement(request, manifest);
+            } else if (failure != null && latest != result) {
+                checkLaunch(request);
+            } else if (failure != null) {
+                agreement(request, null, agreementFailure(failure));
+            } else if (Boolean.TRUE.equals(accepted)) {
+                resume(request);
+            } else {
+                agreement(request, manifest, null);
+            }
+        }));
+    }
+
+    /// Discards an outdated protocol prompt and asks synchronization to adopt the disk cache.
+    private void refreshChangedAgreement(LaunchRequest request, RemoteContent.Manifest rejected) {
+        if (!valid(request))
+            return;
+        request.rejectedAgreement = rejected;
+        agreement(request, null, "用户协议已变更，正在重新检查…");
+        if (request.session.sync != null)
+            request.session.sync.refresh();
+    }
+
+    /// Checks the exact protocol's cached files and required links before it is shown or used.
+    private static void validateAgreement(Session owner, RemoteContent.Manifest manifest) throws IOException {
+        ContentDocuments.validate(owner.root, manifest, manifest.agreement(), Objects.requireNonNull(owner.store),
+                Objects.requireNonNull(owner.config).endpoint(), true);
+    }
+
+    /// Unwraps a background validation error for display.
+    private static String agreementFailure(Throwable failure) {
+        Throwable cause = failure.getCause() == null ? failure : failure.getCause();
+        return cause.getMessage() == null ? cause.toString() : cause.getMessage();
     }
 
     /// Updates one protocol dialog rather than stacking dialogs during download progress.
@@ -483,27 +541,37 @@ public final class RemoteContentController {
             return;
         Session owner = request.session;
         ContentStore store = owner.store;
-        ContentSync.Config config = owner.config;
         @Nullable AgreementPane pane = request.pane;
         if (pane == null || !pane.confirmed(manifest))
             return;
+        @Nullable RemoteContent.Manifest currentAgreement = owner.result == null ? null : owner.result.agreementManifest();
+        if (currentAgreement == null || !currentAgreement.key(currentAgreement.agreement()).equals(manifest.key(manifest.agreement()))) {
+            checkLaunch(request);
+            return;
+        }
         pane.saving = true;
         pane.setDisable(true);
         CompletableFuture.runAsync(() -> {
             try {
-                ContentDocuments.validate(owner.root, manifest, manifest.agreement(), store, config.endpoint(), true);
+                validateAgreement(owner, manifest);
                 store.accept(manifest);
                 Platform.runLater(() -> {
                     if (pane != null) {
                         pane.saving = false;
                         pane.setDisable(false);
                     }
-                    @Nullable ContentSync.Result latest = owner.result;
-                    if (valid(request) && latest != null && latest.manifest() != null
-                            && latest.manifest().key(latest.manifest().agreement()).equals(manifest.key(manifest.agreement())))
+                    @Nullable RemoteContent.Manifest latest = owner.result == null ? null : owner.result.agreementManifest();
+                    if (valid(request) && latest != null
+                            && latest.key(latest.agreement()).equals(manifest.key(manifest.agreement())))
                         resume(request);
                     else if (valid(request))
                         checkLaunch(request);
+                });
+            } catch (ContentStore.AgreementChangedException e) {
+                Platform.runLater(() -> {
+                    pane.saving = false;
+                    pane.setDisable(false);
+                    refreshChangedAgreement(request, manifest);
                 });
             } catch (IOException | RuntimeException e) {
                 Platform.runLater(() -> {
@@ -551,7 +619,7 @@ public final class RemoteContentController {
         RemoteContent.Manifest manifest = result.manifest();
         for (RemoteContent.Item item : manifest.notices()) {
             String key = manifest.key(item);
-            if (!item.active(Instant.now()) || !store.ready(manifest, item) || owner.notices.contains(key)
+            if (!item.active(Instant.now()) || !result.readyNotices().contains(item.id()) || owner.notices.contains(key)
                     || (!item.repeat().equals("each_start") && store.remembered("notices", key)))
                 continue;
             owner.notices.add(key);
@@ -566,6 +634,7 @@ public final class RemoteContentController {
     private boolean present(Session owner, RemoteContent.Manifest snapshot, RemoteContent.Item item, RemoteContent.Kind kind) {
         @Nullable ContentSync.Result result = owner.result;
         return result != null && result.manifest() != null && item.active(Instant.now())
+                && (kind != RemoteContent.Kind.NOTICES || result.readyNotices().contains(item.id()))
                 && result.manifest().items(kind).stream().anyMatch(next -> result.manifest().key(next).equals(snapshot.key(item)));
     }
 
@@ -598,10 +667,7 @@ public final class RemoteContentController {
         /// Obsolete or deselected notices close normally so the global dialog queue keeps advancing.
         @Override
         public void onDialogShown() {
-            @Nullable ContentSync.Result latest = owner.result;
-            boolean present = latest != null && latest.manifest() != null && latest.manifest().notices().stream()
-                    .anyMatch(next -> latest.manifest().key(next).equals(manifest.key(item)));
-            if (owner.quiet || current != owner || !item.active(Instant.now()) || !present || pending != null)
+            if (owner.quiet || current != owner || pending != null || !present(owner, manifest, item, RemoteContent.Kind.NOTICES))
                 Platform.runLater(() -> DialogUtils.close(this));
         }
 
@@ -616,70 +682,125 @@ public final class RemoteContentController {
         }
     }
 
-    /// Projects the selected instance's ready announcements or its current loading state.
+    /// Projects ready revisions in current manifest order and indicates any pending announcement work.
     private void render() {
         @Nullable Session owner = current;
         if (owner == null || owner.store == null) {
-            renderAnnouncementPlaceholder(false);
+            announcementFeed = null;
+            renderAnnouncementSlot(null, false);
             return;
         }
-        ContentStore store = owner.store;
         @Nullable ContentSync.Result result = owner.result;
-        boolean loading = result == null || (!result.success() && !result.exhausted());
+        boolean loading = result == null || (!result.contentSynced() && !result.exhausted());
         if (result == null || result.manifest() == null) {
-            renderAnnouncementPlaceholder(loading);
+            announcementFeed = null;
+            renderAnnouncementSlot(null, loading);
             return;
         }
         RemoteContent.Manifest manifest = result.manifest();
         Instant now = Instant.now();
-        @Unmodifiable List<RemoteContent.Item> active = manifest.announcements().stream()
-                .filter(item -> item.active(now)).toList();
-        @Unmodifiable List<RemoteContent.Item> visible = active.stream()
-                .filter(item -> store.ready(manifest, item)).toList();
-        if (!visible.isEmpty()) {
-            renderAnnouncementFeed(owner, result, manifest, visible);
-            return;
-        }
-        @Nullable RemoteContent.Manifest previous = result.previousManifest();
-        if (previous != null && !active.isEmpty()) {
-            // A replacement may still be downloading. Keep only ready revisions that the server still lists as active.
-            @Unmodifiable List<RemoteContent.Item> cached = previous.announcements().stream()
-                    .filter(item -> item.active(now) && active.stream().anyMatch(next -> next.id().equals(item.id()))
-                            && store.ready(previous, item)).toList();
-            if (!cached.isEmpty()) {
-                renderAnnouncementFeed(owner, result, previous, cached);
-                return;
+        boolean pendingAnnouncements = false;
+        List<RemoteContent.Announcement> visible = new ArrayList<>();
+        Map<String, @Unmodifiable Map<String, RemoteContent.Resource>> links = new HashMap<>();
+        for (RemoteContent.Item item : manifest.announcements()) {
+            if (item.expired(now))
+                continue;
+            boolean active = item.active(now);
+            if (active && result.readyAnnouncements().contains(item.id())) {
+                visible.add(RemoteContent.Announcement.capture(manifest, item));
+                links.put(item.id(), manifest.files());
+            } else {
+                pendingAnnouncements |= active;
+                @Nullable RemoteContent.Announcement cached = result.announcementFallbacks().get(item.id());
+                if (cached != null && cached.item().active(now)) {
+                    visible.add(new RemoteContent.Announcement(cached.item(), cached.files()));
+                    links.put(item.id(), cached.linkIndex());
+                }
             }
         }
-        renderAnnouncementPlaceholder(loading && (result.cached() || !active.isEmpty()));
+        @Nullable AnnouncementFeed feed = announcementFeed;
+        if (visible.isEmpty()) {
+            feed = null;
+        } else {
+            if (feed == null || feed.owner != owner || !feed.visible.equals(visible))
+                feed = new AnnouncementFeed(owner, List.copyOf(visible));
+            feed.update(result, Map.copyOf(links));
+        }
+        announcementFeed = feed;
+        renderAnnouncementSlot(feed == null ? null : feed.pane, loading && pendingAnnouncements);
     }
 
-    /// Centers the compact status card within the mouse-transparent announcement slot.
-    private void renderAnnouncementPlaceholder(boolean loading) {
+    /// Overlays a noninteractive loading card in the feed's lower-right corner.
+    private void renderAnnouncementSlot(@Nullable ScrollPane feed, boolean loading) {
         if (loading && announcementLoading == null) {
             JFXSpinner spinner = new JFXSpinner();
             spinner.setRadius(8);
             spinner.setFocusTraversable(false);
             HBox card = new HBox(8, spinner, new Label(i18n("message.loading")));
             card.setId("bf656-announcement-loading");
-            card.getStyleClass().add("card");
+            card.getStyleClass().addAll("card", "remote-announcement-loading");
             card.setAlignment(Pos.CENTER_LEFT);
             card.setMaxSize(Region.USE_PREF_SIZE, Region.USE_PREF_SIZE);
-            StackPane placeholder = new StackPane(card);
-            placeholder.setMouseTransparent(true);
-            announcementLoading = placeholder;
+            card.setMouseTransparent(true);
+            StackPane.setAlignment(card, Pos.BOTTOM_RIGHT);
+            StackPane.setMargin(card, new Insets(0, 14, 8, 0));
+            announcementLoading = card;
         }
-        Controllers.getRootPage().getMainPage().setRemoteAnnouncements(loading ? announcementLoading : null);
+        @Nullable HBox overlay = loading ? announcementLoading : null;
+        var children = announcementSlot.getChildren();
+        children.removeIf(node -> node != feed && node != overlay);
+        if (feed != null && !children.contains(feed))
+            children.addFirst(feed);
+        if (overlay != null && !children.contains(overlay))
+            children.add(overlay);
+        Controllers.getRootPage().getMainPage().setRemoteAnnouncements(children.isEmpty() ? null : announcementSlot);
     }
 
-    /// Builds the existing scrollable feed from the manifest that owns the displayed files.
-    private void renderAnnouncementFeed(Session owner, ContentSync.Result result, RemoteContent.Manifest manifest,
-                                        @Unmodifiable List<RemoteContent.Item> visible) {
-        VBox entries = new VBox(14);
+    /// Owns one ordered set of announcement cards and its independently updated metadata.
+    private final class AnnouncementFeed {
+        /// Session supplying the resources and owning the feed's UI state.
+        private final Session owner;
+        /// Displayed item revisions and body resources in presentation order.
+        private final @Unmodifiable List<RemoteContent.Announcement> visible;
+        /// Scrollable cards retained for updates to loading, links and cache status.
+        private final ScrollPane pane;
+        /// Card container, with the offline status appended only while needed.
+        private final VBox entries = new VBox(14);
+        /// Offline status shown beneath the cards.
+        private final Label offlineStatus = new Label();
+        /// Current hyperlink targets for each visible announcement, accessed on JavaFX.
+        private @Unmodifiable Map<String, @Unmodifiable Map<String, RemoteContent.Resource>> links = Map.of();
+
+        /// Creates cards for one session and ordered set of displayed revisions.
+        private AnnouncementFeed(Session owner, @Unmodifiable List<RemoteContent.Announcement> visible) {
+            this.owner = owner;
+            this.visible = visible;
+            pane = createAnnouncementPane(this);
+        }
+
+        /// Updates metadata without rebuilding any Markdown or card nodes.
+        private void update(ContentSync.Result result,
+                            @Unmodifiable Map<String, @Unmodifiable Map<String, RemoteContent.Resource>> links) {
+            this.links = links;
+            if (result.cached()) {
+                offlineStatus.setText("离线缓存 · 上次同步 " + time(result.checkedAt()));
+                if (!entries.getChildren().contains(offlineStatus))
+                    entries.getChildren().add(offlineStatus);
+            } else {
+                entries.getChildren().remove(offlineStatus);
+            }
+        }
+    }
+
+    /// Builds the scrollable cards for a changed announcement feed.
+    private ScrollPane createAnnouncementPane(AnnouncementFeed feed) {
+        Session owner = feed.owner;
+        VBox entries = feed.entries;
         entries.setMinWidth(0);
         entries.setPadding(new Insets(4, 10, 10, 4));
-        for (RemoteContent.Item item : visible) {
-            String key = manifest.key(item);
+        for (RemoteContent.Announcement announcement : feed.visible) {
+            RemoteContent.Item item = announcement.item();
+            String key = announcement.key();
             Label title = heading((item.pinned() ? "[置顶] " : "") + item.title());
             title.setMaxWidth(Double.MAX_VALUE);
             HBox.setHgrow(title, Priority.ALWAYS);
@@ -689,7 +810,9 @@ public final class RemoteContentController {
             VBox body = new VBox(10);
             if (!item.publishedAt().isEmpty())
                 body.getChildren().add(new Label(item.publishedAt()));
-            body.getChildren().addAll(view(owner, manifest, item, text -> {
+            body.getChildren().addAll(new MarkdownView(owner.root, announcement.files(),
+                    () -> feed.links.getOrDefault(item.id(), announcement.files()), item,
+                    Objects.requireNonNull(owner.store), Objects.requireNonNull(owner.config).endpoint(), text -> {
                 error.setText(text);
                 error.setManaged(true);
             }), error);
@@ -722,17 +845,15 @@ public final class RemoteContentController {
             card.setMaxWidth(Double.MAX_VALUE);
             entries.getChildren().add(card);
         }
-        if (result.cached() && manifest == result.manifest())
-            entries.getChildren().add(new Label("离线缓存 · 上次同步 " + time(result.checkedAt())));
-        ScrollPane feed = new ScrollPane(entries);
-        feed.setId("bf656-announcement-feed");
-        feed.setFitToWidth(true);
-        feed.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
-        feed.setMinSize(0, 0);
-        feed.setMaxSize(Double.MAX_VALUE, Double.MAX_VALUE);
-        feed.setVvalue(owner.announcementPosition);
-        feed.vvalueProperty().addListener((observable, oldValue, newValue) -> owner.announcementPosition = newValue.doubleValue());
-        Controllers.getRootPage().getMainPage().setRemoteAnnouncements(feed);
+        ScrollPane pane = new ScrollPane(entries);
+        pane.setId("bf656-announcement-feed");
+        pane.setFitToWidth(true);
+        pane.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
+        pane.setMinSize(0, 0);
+        pane.setMaxSize(Double.MAX_VALUE, Double.MAX_VALUE);
+        pane.setVvalue(owner.announcementPosition);
+        pane.vvalueProperty().addListener((observable, oldValue, newValue) -> owner.announcementPosition = newValue.doubleValue());
+        return pane;
     }
 
     /// Schedules only local publication/expiry updates, including cleanup for previously loaded inactive instances.
@@ -747,8 +868,9 @@ public final class RemoteContentController {
                 continue;
             for (RemoteContent.Kind kind : RemoteContent.Kind.values()) {
                 @Unmodifiable List<RemoteContent.Item> items = result.manifest().items(kind);
-                if (owner == current && kind == RemoteContent.Kind.ANNOUNCEMENTS && result.previousManifest() != null)
-                    items = Stream.concat(items.stream(), result.previousManifest().announcements().stream()).toList();
+                if (owner == current && kind == RemoteContent.Kind.ANNOUNCEMENTS)
+                    items = Stream.concat(items.stream(), result.announcementFallbacks().values().stream()
+                            .map(RemoteContent.Announcement::item)).toList();
                 for (RemoteContent.Item item : items) {
                     @Nullable Instant start = item.startsAt();
                     @Nullable Instant expiry = item.expiresAt();
@@ -848,13 +970,19 @@ public final class RemoteContentController {
                 body.getChildren().add(new Label("内容标识：" + Objects.requireNonNull(owner.config).instanceKey()));
                 @Nullable ContentSync.Result result = owner.result;
                 String status = result == null ? "尚未同步" : result.success() ? "同步成功"
+                        : result.contentSynced() ? "内容已同步"
                         : result.pending() ? "正在同步正文或图片" : "同步失败，" + (result.exhausted() ? "自动重试已结束" : "将有限重试");
                 body.getChildren().add(new Label(status));
+                if (result != null && result.cleanupError() != null) {
+                    Label cleanup = new Label(result.cleanupError());
+                    cleanup.setWrapText(true);
+                    body.getChildren().add(cleanup);
+                }
                 if (result != null && result.manifest() != null) {
                     RemoteContent.Manifest manifest = result.manifest();
                     body.getChildren().add(new Label("上次检查：" + time(result.checkedAt())));
-                    JFXButton protocol = button("查看用户协议", () -> document(owner, manifest, manifest.agreement()));
-                    protocol.setDisable(owner.store == null || !owner.store.ready(manifest, manifest.agreement()));
+                    JFXButton protocol = button("查看用户协议", () -> viewAgreement(this, owner, manifest));
+                    protocol.setDisable(!result.agreementReady());
                     body.getChildren().add(protocol);
                 }
             }
@@ -883,6 +1011,25 @@ public final class RemoteContentController {
             informationPanes.remove(this);
             pauseUnused(owner);
         }
+    }
+
+    /// Checks a management panel's protocol before opening its read-only document.
+    private void viewAgreement(InformationPane pane, Session owner, RemoteContent.Manifest manifest) {
+        CompletableFuture.runAsync(() -> {
+            try {
+                validateAgreement(owner, manifest);
+            } catch (IOException e) {
+                throw new CompletionException(e);
+            }
+        }).whenComplete((@Nullable Void ignored, @Nullable Throwable failure) -> Platform.runLater(() -> {
+            if (closed || !informationPanes.contains(pane) || pane.owner != owner || sessions.get(owner.root) != owner
+                    || !present(owner, manifest, manifest.agreement(), RemoteContent.Kind.AGREEMENT))
+                return;
+            if (failure != null)
+                Controllers.dialog(agreementFailure(failure), "协议资源不可用");
+            else
+                document(owner, manifest, manifest.agreement());
+        }));
     }
 
     /// Opens a read-only full document without changing receipts or dismissals.

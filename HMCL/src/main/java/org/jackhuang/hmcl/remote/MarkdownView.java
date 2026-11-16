@@ -39,30 +39,31 @@ import org.commonmark.ext.gfm.tables.TableCell;
 import org.commonmark.ext.gfm.tables.TableRow;
 import org.commonmark.node.*;
 import org.jackhuang.hmcl.ui.FXUtils;
-import org.jackhuang.hmcl.ui.image.ImageLoader;
-import org.jackhuang.hmcl.ui.image.ImageUtils;
 import org.jetbrains.annotations.NotNullByDefault;
 import org.jetbrains.annotations.Nullable;
+import org.jetbrains.annotations.Unmodifiable;
 
 import java.awt.Desktop;
 import java.io.IOException;
 import java.net.URI;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 /// Native JavaFX Markdown view with themed typography, tables, links and cached responsive images.
 @NotNullByDefault
 public final class MarkdownView extends VBox {
     /// Instance root for explicitly local links such as `client/documents/terms.html`.
     private final Path root;
-    /// Current item and indexed resources used for relative Markdown URL resolution.
-    private final RemoteContent.Manifest manifest;
+    /// Indexed resources for the exact document revision being rendered.
+    private final @Unmodifiable Map<String, RemoteContent.Resource> files;
+    /// Supplies the latest index when a link is clicked on the JavaFX thread.
+    private final Supplier<@Unmodifiable Map<String, RemoteContent.Resource>> linkFiles;
     /// Item whose body is displayed.
     private final RemoteContent.Item item;
     /// Content-addressed local downloads.
@@ -77,9 +78,17 @@ public final class MarkdownView extends VBox {
     /// Builds a complete document; parsing and rendering never execute embedded HTML.
     public MarkdownView(Path root, RemoteContent.Manifest manifest, RemoteContent.Item item,
                         ContentStore store, URI endpoint, Consumer<String> error) {
+        this(root, manifest.files(), manifest::files, item, store, endpoint, error);
+    }
+
+    /// Builds a document with its own body and image index and the available hyperlink targets.
+    MarkdownView(Path root, @Unmodifiable Map<String, RemoteContent.Resource> files,
+                 Supplier<@Unmodifiable Map<String, RemoteContent.Resource>> linkFiles, RemoteContent.Item item,
+                 ContentStore store, URI endpoint, Consumer<String> error) {
         super(10);
         this.root = root;
-        this.manifest = manifest;
+        this.files = files;
+        this.linkFiles = linkFiles;
         this.item = item;
         this.store = store;
         this.endpoint = endpoint;
@@ -89,7 +98,7 @@ public final class MarkdownView extends VBox {
         setFillWidth(true);
         setMinWidth(0);
         try {
-            String body = store.body(manifest, item);
+            String body = store.body(item, files);
             if (item.contentFile().isEmpty())
                 getChildren().add(richText(body));
             else
@@ -202,22 +211,14 @@ public final class MarkdownView extends VBox {
         box.setMinWidth(0);
         box.prefWidthProperty().bind(Bindings.max(80, parent.widthProperty().subtract(10)));
         try {
-            @Nullable RemoteContent.Resource resource = ContentDocuments.resource(manifest, item, endpoint, node.getDestination());
+            @Nullable RemoteContent.Resource resource = ContentDocuments.resource(files, item, endpoint, node.getDestination());
             if (resource == null || !item.files().contains(resource.path()))
                 throw new IOException("图片未列入此条内容的 resources");
-            Path path = store.file(resource);
             CompletableFuture.supplyAsync(() -> {
-                try (var input = Files.newInputStream(path)) {
-                    String extension = resource.path().substring(resource.path().lastIndexOf('.') + 1).toLowerCase(Locale.ROOT);
-                    ImageLoader loader = switch (extension) {
-                        case "webp" -> ImageUtils.WEBP;
-                        case "apng" -> ImageUtils.APNG;
-                        case "png", "jpg", "jpeg", "gif", "bmp" -> ImageUtils.DEFAULT;
-                        default -> throw new IOException("不支持的图片格式：" + extension);
-                    };
-                    return loader.load(input, 1400, 0, true, true);
-                } catch (Exception e) {
-                    throw new java.util.concurrent.CompletionException(e);
+                try {
+                    return ContentDocuments.loadImage(resource, store);
+                } catch (IOException e) {
+                    throw new CompletionException(e);
                 }
             }).whenComplete((@Nullable Image loaded, @Nullable Throwable failure) -> Platform.runLater(() -> {
                 if (failure != null || loaded == null) {
@@ -300,42 +301,51 @@ public final class MarkdownView extends VBox {
         link.setWrapText(true);
         link.setStyle("-fx-font-size: 14px; -fx-padding: 0;");
         link.setOnAction(event -> {
-            try {
-                URI target = ContentDocuments.link(root, manifest, item, store, endpoint, destination);
-                if (!"file".equalsIgnoreCase(target.getScheme())) {
-                    FXUtils.openLink(target.toASCIIString());
-                    return;
+            @Unmodifiable Map<String, RemoteContent.Resource> targets = linkFiles.get();
+            link.setDisable(true);
+            CompletableFuture.runAsync(() -> {
+                try {
+                    openLinkInBackground(destination, targets);
+                } catch (IOException e) {
+                    throw new CompletionException(e);
                 }
-                // Pass the decoded Unicode file path to the file-opening API, never to a URL command line.
-                Path file = Path.of(target);
-                link.setDisable(true);
-                CompletableFuture.runAsync(() -> {
-                    try {
-                        if (!Desktop.isDesktopSupported() || !Desktop.getDesktop().isSupported(Desktop.Action.OPEN))
-                            throw new IOException("系统不支持打开本地文档，请检查默认应用");
-                        Desktop.getDesktop().open(file.toFile());
-                    } catch (IOException | RuntimeException e) {
-                        throw new CompletionException(e);
-                    }
-                }).whenComplete((@Nullable Void ignored, @Nullable Throwable failure) -> Platform.runLater(() -> {
-                    link.setDisable(false);
-                    if (failure != null) {
-                        Throwable cause = failure.getCause() == null ? failure : failure.getCause();
-                        org.jackhuang.hmcl.util.logging.Logger.LOG.warning("Cannot open instance document " + file, cause);
-                        error.accept("无法打开本地文档：" + cause.getMessage());
-                        @Nullable Path folder = file.getParent();
-                        if (folder != null) {
-                            documentFolder.setOnAction(action -> FXUtils.openFolder(folder));
-                            documentFolder.setVisible(true);
-                            documentFolder.setManaged(true);
-                        }
-                    }
-                }));
-            } catch (IOException | RuntimeException e) {
-                error.accept(e.getMessage() == null ? e.toString() : e.getMessage());
-            }
+            }).whenComplete((@Nullable Void ignored, @Nullable Throwable failure) -> Platform.runLater(() -> {
+                link.setDisable(false);
+                if (failure != null) {
+                    Throwable cause = failure.getCause() == null ? failure : failure.getCause();
+                    error.accept(cause.getMessage() == null ? cause.toString() : cause.getMessage());
+                }
+            }));
         });
         return link;
+    }
+
+    /// Verifies the link target and opens it without blocking the JavaFX thread.
+    private void openLinkInBackground(String destination, @Unmodifiable Map<String, RemoteContent.Resource> targets)
+            throws IOException {
+        URI target = ContentDocuments.link(root, targets, item, store, endpoint, destination);
+        if (!"file".equalsIgnoreCase(target.getScheme())) {
+            FXUtils.openLink(target.toASCIIString());
+            return;
+        }
+
+        Path file = Path.of(target);
+        try {
+            if (!Desktop.isDesktopSupported() || !Desktop.getDesktop().isSupported(Desktop.Action.OPEN))
+                throw new IOException("系统不支持打开本地文档，请检查默认应用");
+            Desktop.getDesktop().open(file.toFile());
+        } catch (IOException | RuntimeException e) {
+            org.jackhuang.hmcl.util.logging.Logger.LOG.warning("Cannot open instance document " + file, e);
+            @Nullable Path folder = file.getParent();
+            if (folder != null) {
+                Platform.runLater(() -> {
+                    documentFolder.setOnAction(action -> FXUtils.openFolder(folder));
+                    documentFolder.setVisible(true);
+                    documentFolder.setManaged(true);
+                });
+            }
+            throw new IOException("无法打开本地文档：" + e.getMessage(), e);
+        }
     }
 
     /// Creates a flow that can shrink within a card or dialog.

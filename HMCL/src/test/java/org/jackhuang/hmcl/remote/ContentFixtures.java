@@ -20,8 +20,13 @@ package org.jackhuang.hmcl.remote;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import org.jetbrains.annotations.NotNullByDefault;
+import org.jetbrains.annotations.Unmodifiable;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.util.Map;
+import java.util.Set;
 
 /// Small public-manifest fixtures shared by HTTP and desktop integration tests.
 @NotNullByDefault
@@ -33,6 +38,33 @@ final class ContentFixtures {
 
     /// Prevents construction.
     private ContentFixtures() { }
+
+    /// Parses a cache fixture bound to the main instance.
+    static ContentStore.Cache cache(String body, String etag, Instant checkedAt) throws IOException {
+        return ContentStore.Cache.parse(body, "main", etag, checkedAt);
+    }
+
+    /// Parses a cache fixture with retained announcement revisions.
+    static ContentStore.Cache cache(String body, String etag, Instant checkedAt,
+                                   @Unmodifiable Map<String, RemoteContent.Announcement> fallbacks) throws IOException {
+        return cache(body, etag, checkedAt).withAnnouncementFallbacks(fallbacks);
+    }
+
+    /// Publishes the main instance fixture against the current cache version.
+    static void publishCache(ContentStore store, ContentStore.Cache cache) throws IOException {
+        try (var usage = store.registerUsage()) {
+            store.publishCache(cache, store.loadCache("main").version(), usage);
+        }
+    }
+
+    /// Prunes fixtures using the same usage registration and version check as synchronization.
+    static void prune(ContentStore store, @Unmodifiable Set<RemoteContent.Resource> keep) throws Exception {
+        try (var usage = store.registerUsage()) {
+            var maintenance = store.maintainCache(null, store.loadCache("main").version(), usage, keep);
+            if (maintenance.cleanupFailure() != null)
+                throw maintenance.cleanupFailure();
+        }
+    }
 
     /// Builds an instance-bound manifest with no optional content.
     static JsonObject basic(String key) {
