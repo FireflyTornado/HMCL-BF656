@@ -426,6 +426,10 @@ public final class RemoteContentSmoke {
         second.addProperty("contentFile", secondPath);
         ContentFixtures.file(replacement, secondPath, secondBody);
         RemoteContent.Manifest missing = RemoteContent.parse(replacement.toString(), "a");
+        JsonObject scheduledReplacement = replacement.deepCopy();
+        scheduledReplacement.getAsJsonArray("announcements").get(0).getAsJsonObject()
+                .addProperty("startsAt", Instant.now().plusSeconds(3_600).toString());
+        RemoteContent.Manifest futureReplacement = RemoteContent.parse(scheduledReplacement.toString(), "a");
         replacement.add("announcements", new JsonArray());
         RemoteContent.Manifest empty = RemoteContent.parse(replacement.toString(), "a");
         var receive = RemoteContentController.class.getDeclaredMethod("receive", session.getClass(), ContentSync.Result.class);
@@ -453,6 +457,14 @@ public final class RemoteContentSmoke {
                     false, true, false, null, null, false));
             verifyAnnouncementTitles(root, "新版公告 A", "新版公告 B");
             require(root.lookup("#bf656-announcement-loading") == null, "Hide the card once the active announcements are ready");
+            receive.invoke(controller, session, new ContentSync.Result(missing, fallbacks, Set.of("news", "second-news"),
+                    true, true, false, null, null, false));
+            require(root.lookup("#bf656-announcement-feed") != null && root.lookup("#bf656-announcement-loading") == null,
+                    "Revalidating a complete cached feed must not show the loading card");
+            receive.invoke(controller, session, new ContentSync.Result(futureReplacement, fallbacks, Set.of("news", "second-news"),
+                    false, true, false, null, null, false));
+            verifyAnnouncementTitles(root, "服务器公告", "新版公告 B");
+            require(root.lookup("#bf656-announcement-loading") == null, "An active fallback must stay visible until the replacement starts");
             JsonObject pending = catalog("a", "# Another replacement", image);
             RemoteContent.Manifest waiting = RemoteContent.parse(pending.toString(), "a");
             JsonObject scheduled = RemoteContent.writeAnnouncement(firstCached);
@@ -475,6 +487,9 @@ public final class RemoteContentSmoke {
             receive.invoke(controller, session, new ContentSync.Result(empty, fallbacks, Set.of(), false, true, false, null, null, false));
             require(root.lookup("#bf656-announcement-feed") == null && root.lookup("#bf656-announcement-loading") == null,
                     "A fresh empty manifest must remove withdrawn announcements and hide the loading card");
+            receive.invoke(controller, session, new ContentSync.Result(empty, true, true, false, null, null, false));
+            require(root.lookup("#bf656-announcement-feed") == null && root.lookup("#bf656-announcement-loading") == null,
+                    "Revalidating an empty cached manifest must not show the loading card");
         } finally {
             receive.invoke(controller, session, ready);
         }

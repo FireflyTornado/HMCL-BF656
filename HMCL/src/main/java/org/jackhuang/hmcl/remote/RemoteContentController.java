@@ -635,15 +635,16 @@ public final class RemoteContentController {
         }
         RemoteContent.Manifest manifest = result.manifest();
         Instant now = Instant.now();
-        boolean pendingAnnouncements = result.cached();
+        boolean pendingAnnouncements = false;
         List<RemoteContent.Announcement> visible = new ArrayList<>();
         for (RemoteContent.Item item : manifest.announcements()) {
-            if (!item.active(now))
+            if (item.expired(now))
                 continue;
-            if (result.readyAnnouncements().contains(item.id())) {
+            boolean active = item.active(now);
+            if (active && result.readyAnnouncements().contains(item.id())) {
                 visible.add(RemoteContent.Announcement.capture(manifest, item));
             } else {
-                pendingAnnouncements = true;
+                pendingAnnouncements |= active;
                 @Nullable RemoteContent.Announcement cached = result.announcementFallbacks().get(item.id());
                 if (cached != null && cached.item().active(now))
                     visible.add(cached);
@@ -699,9 +700,9 @@ public final class RemoteContentController {
             if (!item.publishedAt().isEmpty())
                 body.getChildren().add(new Label(item.publishedAt()));
             // Ready announcements can link to other documents listed in the current manifest.
-            @Unmodifiable Map<String, RemoteContent.Resource> files = result.readyAnnouncements().contains(item.id())
-                    ? manifest.files() : announcement.files();
-            body.getChildren().addAll(new MarkdownView(owner.root, files, item,
+            @Unmodifiable Map<String, RemoteContent.Resource> linkFiles =
+                    announcement.equals(result.announcementFallbacks().get(item.id())) ? announcement.files() : manifest.files();
+            body.getChildren().addAll(new MarkdownView(owner.root, announcement.files(), linkFiles, item,
                     Objects.requireNonNull(owner.store), Objects.requireNonNull(owner.config).endpoint(), text -> {
                 error.setText(text);
                 error.setManaged(true);

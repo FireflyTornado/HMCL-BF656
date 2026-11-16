@@ -115,19 +115,30 @@ public final class ContentDocuments {
                                 ContentStore store, URI endpoint, boolean agreement) throws IOException {
         if (!store.ready(manifest, item))
             throw new IOException("正文或关联资源尚未下载完成");
+        validateDocument(manifest.files(), item, store, endpoint, agreement ? root : null);
+    }
+
+    /// Validates an announcement's document after its exact payloads have passed digest checks.
+    static void validateAnnouncement(RemoteContent.Announcement announcement, ContentStore store, URI endpoint) throws IOException {
+        validateDocument(announcement.files(), announcement.item(), store, endpoint, null);
+    }
+
+    /// Validates a revision's Markdown images and any required agreement links.
+    private static void validateDocument(@Unmodifiable Map<String, RemoteContent.Resource> files, RemoteContent.Item item,
+                                         ContentStore store, URI endpoint, @Nullable Path agreementRoot) throws IOException {
         if (item.contentFile().isEmpty()) {
-            if (agreement)
-                ContentLinks.validateAgreement(root, item);
+            if (agreementRoot != null)
+                ContentLinks.validateAgreement(agreementRoot, item);
             return;
         }
-        Node document = parse(store.body(manifest, item));
+        Node document = parse(store.body(item, files));
         try {
             document.accept(new AbstractVisitor() {
                 /// Requires all images to have indexed, hash-verified local payloads.
                 @Override
                 public void visit(Image image) {
                     try {
-                        @Nullable RemoteContent.Resource resource = resource(manifest, item, endpoint, image.getDestination());
+                        @Nullable RemoteContent.Resource resource = resource(files, item, endpoint, image.getDestination());
                         if (resource == null || !item.files().contains(resource.path()) || !Files.isRegularFile(store.file(resource)))
                             throw new IOException("图片未列入 resources 或尚未下载：" + image.getDestination());
                     } catch (IOException e) {
@@ -138,9 +149,9 @@ public final class ContentDocuments {
                 /// Required agreement links must resolve before consent can be recorded.
                 @Override
                 public void visit(Link node) {
-                    if (agreement) {
+                    if (agreementRoot != null) {
                         try {
-                            link(root, manifest, item, store, endpoint, node.getDestination());
+                            link(agreementRoot, files, item, store, endpoint, node.getDestination());
                         } catch (IOException e) {
                             throw new DocumentException(e);
                         }

@@ -65,6 +65,8 @@ public final class MarkdownView extends VBox {
     private final Path root;
     /// Indexed resources for the exact document revision being rendered.
     private final @Unmodifiable Map<String, RemoteContent.Resource> files;
+    /// Index used to resolve links to other documents.
+    private final @Unmodifiable Map<String, RemoteContent.Resource> linkFiles;
     /// Item whose body is displayed.
     private final RemoteContent.Item item;
     /// Content-addressed local downloads.
@@ -79,15 +81,17 @@ public final class MarkdownView extends VBox {
     /// Builds a complete document; parsing and rendering never execute embedded HTML.
     public MarkdownView(Path root, RemoteContent.Manifest manifest, RemoteContent.Item item,
                         ContentStore store, URI endpoint, Consumer<String> error) {
-        this(root, manifest.files(), item, store, endpoint, error);
+        this(root, manifest.files(), manifest.files(), item, store, endpoint, error);
     }
 
-    /// Builds a document with only the resource index needed to resolve its body, images and links.
-    MarkdownView(Path root, @Unmodifiable Map<String, RemoteContent.Resource> files, RemoteContent.Item item,
+    /// Builds a document with its own body and image index and the available hyperlink targets.
+    MarkdownView(Path root, @Unmodifiable Map<String, RemoteContent.Resource> files,
+                 @Unmodifiable Map<String, RemoteContent.Resource> linkFiles, RemoteContent.Item item,
                  ContentStore store, URI endpoint, Consumer<String> error) {
         super(10);
         this.root = root;
         this.files = files;
+        this.linkFiles = linkFiles;
         this.item = item;
         this.store = store;
         this.endpoint = endpoint;
@@ -309,7 +313,7 @@ public final class MarkdownView extends VBox {
         link.setStyle("-fx-font-size: 14px; -fx-padding: 0;");
         link.setOnAction(event -> {
             try {
-                URI target = ContentDocuments.link(root, files, item, store, endpoint, destination);
+                URI target = ContentDocuments.link(root, linkFiles, item, store, endpoint, destination);
                 if (!"file".equalsIgnoreCase(target.getScheme())) {
                     FXUtils.openLink(target.toASCIIString());
                     return;

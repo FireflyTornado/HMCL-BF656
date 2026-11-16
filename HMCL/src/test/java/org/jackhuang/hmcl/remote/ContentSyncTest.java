@@ -400,13 +400,16 @@ final class ContentSyncTest {
     }
 
     /// Retains a verified future announcement through cleanup and restart while its replacement is unavailable.
-    @Test
-    void retainsScheduledFallbackBeforePublication() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void retainsScheduledFallbackBeforePublication(boolean replacementReady) throws Exception {
         HttpServer http = java.util.Objects.requireNonNull(server);
         Instant start = Instant.now().plusSeconds(3_600);
+        Instant originalStart = replacementReady ? Instant.now().minusSeconds(60) : start;
+        String replacementBody = "# New scheduled revision";
         JsonObject original = ContentFixtures.markdown("main", BODY, IMAGE);
-        original.getAsJsonArray("announcements").get(0).getAsJsonObject().addProperty("startsAt", start.toString());
-        JsonObject replacement = ContentFixtures.markdown("main", "# New scheduled revision", new byte[0]);
+        original.getAsJsonArray("announcements").get(0).getAsJsonObject().addProperty("startsAt", originalStart.toString());
+        JsonObject replacement = ContentFixtures.markdown("main", replacementBody, new byte[0]);
         JsonObject next = replacement.getAsJsonArray("announcements").get(0).getAsJsonObject();
         next.addProperty("revision", 2);
         next.addProperty("startsAt", start.toString());
@@ -417,7 +420,8 @@ final class ContentSyncTest {
                 send(exchange, 200, catalog.get().getBytes(StandardCharsets.UTF_8));
             } else if (path.endsWith("news.md")) {
                 boolean isOriginal = catalog.get().equals(original.toString());
-                send(exchange, isOriginal ? 200 : 503, BODY.getBytes(StandardCharsets.UTF_8));
+                String body = isOriginal ? BODY : replacementBody;
+                send(exchange, isOriginal || replacementReady ? 200 : 503, body.getBytes(StandardCharsets.UTF_8));
             } else {
                 send(exchange, 200, IMAGE);
             }
@@ -431,12 +435,12 @@ final class ContentSyncTest {
             assertTrue(awaitFinal(events, true).readyAnnouncements().contains("news"));
             catalog.set(replacement.toString());
             sync.refresh();
-            ContentSync.Result waiting = awaitFinal(events, false);
-            assertFalse(waiting.readyAnnouncements().contains("news"));
+            ContentSync.Result waiting = awaitFinal(events, replacementReady);
+            assertEquals(replacementReady, waiting.readyAnnouncements().contains("news"));
             var fallback = waiting.announcementFallbacks().get("news");
             assertNotNull(fallback);
-            assertEquals(start, fallback.item().startsAt());
-            assertFalse(fallback.item().active(start.minusNanos(1)));
+            assertEquals(originalStart, fallback.item().startsAt());
+            assertEquals(replacementReady, fallback.item().active(start.minusNanos(1)));
             assertTrue(fallback.item().active(start));
             assertTrue(store.verified(fallback.files().get(ContentFixtures.BODY)));
         }
@@ -450,6 +454,62 @@ final class ContentSyncTest {
             assertNotNull(fallback);
             assertEquals(1, fallback.item().revision());
             assertTrue(fallback.item().active(start));
+        }
+    }
+
+    /// Keeps the old revision through invalid Markdown and restart, then replaces it after a corrected manifest.
+    @Test
+    void invalidReplacementDocumentKeepsFallbackUntilCorrected() throws Exception {
+        HttpServer http = java.util.Objects.requireNonNull(server);
+        String originalBody = "# Last usable announcement";
+        String invalidBody = "# Invalid update\n\n![Missing image](undeclared.png)";
+        String correctedBody = "# Corrected update";
+        JsonObject original = ContentFixtures.markdown("main", originalBody, new byte[0]);
+        JsonObject invalid = ContentFixtures.markdown("main", invalidBody, new byte[0]);
+        JsonObject corrected = ContentFixtures.markdown("main", correctedBody, new byte[0]);
+        invalid.getAsJsonArray("announcements").get(0).getAsJsonObject().addProperty("revision", 2);
+        corrected.getAsJsonArray("announcements").get(0).getAsJsonObject().addProperty("revision", 3);
+        AtomicBoolean fixed = new AtomicBoolean();
+        http.createContext("/", exchange -> {
+            boolean useCorrection = fixed.get();
+            String content = exchange.getRequestURI().getPath().endsWith("manifest.json")
+                    ? (useCorrection ? corrected : invalid).toString() : (useCorrection ? correctedBody : invalidBody);
+            send(exchange, 200, content.getBytes(StandardCharsets.UTF_8));
+        });
+        http.start();
+        var config = config();
+        var store = new ContentStore(directory, config.endpoint().toString());
+        var originalManifest = RemoteContent.parse(original.toString(), "main");
+        var originalFile = java.util.Objects.requireNonNull(originalManifest.files().get(ContentFixtures.BODY));
+        store.cache(new ContentStore.Cache(original.toString(), "", Instant.EPOCH));
+        store.install(originalFile, originalBody.getBytes(StandardCharsets.UTF_8));
+        var events = new LinkedBlockingQueue<ContentSync.Result>();
+        try (var sync = new ContentSync(config, store, events::add, new long[0])) {
+            sync.activate();
+            var failed = awaitFinal(events, false);
+            assertFalse(failed.readyAnnouncements().contains("news"));
+            assertTrue(java.util.Objects.requireNonNull(failed.error()).contains("undeclared.png"));
+            assertEquals(1, java.util.Objects.requireNonNull(failed.announcementFallbacks().get("news")).item().revision());
+            assertTrue(store.verified(originalFile));
+        }
+
+        var reopened = new ContentStore(directory, config.endpoint().toString());
+        try (var sync = new ContentSync(config, reopened, events::add, new long[0])) {
+            sync.activate();
+            var restored = java.util.Objects.requireNonNull(events.poll(5, TimeUnit.SECONDS));
+            assertTrue(restored.cached());
+            assertFalse(restored.readyAnnouncements().contains("news"));
+            assertEquals(1, java.util.Objects.requireNonNull(restored.announcementFallbacks().get("news")).item().revision());
+            var failed = awaitFinal(events, false);
+            assertFalse(failed.readyAnnouncements().contains("news"));
+            fixed.set(true);
+            sync.retryFailed();
+            var ready = awaitFinal(events, true);
+            assertTrue(ready.readyAnnouncements().contains("news"));
+            assertEquals(3, java.util.Objects.requireNonNull(ready.manifest()).announcements().getFirst().revision());
+            assertTrue(ready.announcementFallbacks().isEmpty());
+            assertTrue(java.util.Objects.requireNonNull(reopened.cache("main")).announcementFallbacks().isEmpty());
+            assertFalse(Files.exists(reopened.file(originalFile)));
         }
     }
 
