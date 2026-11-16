@@ -208,6 +208,8 @@ public final class RemoteContentController {
         @Nullable AgreementPane pane;
         /// Prevents overlapping background checks for the same launch request.
         boolean checkingAgreement;
+        /// Snapshot rejected by the disk version check while synchronization catches up.
+        @Nullable RemoteContent.Manifest rejectedAgreement;
 
         /// Captures target and selection identity.
         LaunchRequest(Session session, Runnable action) {
@@ -337,6 +339,8 @@ public final class RemoteContentController {
             agreement(request, null, problem);
             return;
         }
+        if (manifest == request.rejectedAgreement)
+            return;
         if (request.checkingAgreement)
             return;
 
@@ -344,7 +348,7 @@ public final class RemoteContentController {
         CompletableFuture.supplyAsync(() -> {
             try {
                 validateAgreement(owner, manifest);
-                return Objects.requireNonNull(owner.store).accepted(manifest);
+                return Objects.requireNonNull(owner.store).acceptedCurrent(manifest);
             } catch (IOException e) {
                 throw new CompletionException(e);
             }
@@ -354,7 +358,11 @@ public final class RemoteContentController {
                 return;
             @Nullable ContentSync.Result latest = owner.result;
             @Nullable RemoteContent.Manifest latestManifest = latest == null ? null : latest.agreementManifest();
-            if (latestManifest != manifest || (failure != null && latest != result)) {
+            if (latestManifest != manifest) {
+                checkLaunch(request);
+            } else if (failure != null && failure.getCause() instanceof ContentStore.AgreementChangedException) {
+                refreshChangedAgreement(request, manifest);
+            } else if (failure != null && latest != result) {
                 checkLaunch(request);
             } else if (failure != null) {
                 agreement(request, null, agreementFailure(failure));
@@ -364,6 +372,16 @@ public final class RemoteContentController {
                 agreement(request, manifest, null);
             }
         }));
+    }
+
+    /// Discards an outdated protocol prompt and asks synchronization to adopt the disk cache.
+    private void refreshChangedAgreement(LaunchRequest request, RemoteContent.Manifest rejected) {
+        if (!valid(request))
+            return;
+        request.rejectedAgreement = rejected;
+        agreement(request, null, "用户协议已变更，正在重新检查…");
+        if (request.session.sync != null)
+            request.session.sync.refresh();
     }
 
     /// Checks the exact protocol's cached files and required links before it is shown or used.
@@ -546,6 +564,12 @@ public final class RemoteContentController {
                         resume(request);
                     else if (valid(request))
                         checkLaunch(request);
+                });
+            } catch (ContentStore.AgreementChangedException e) {
+                Platform.runLater(() -> {
+                    pane.saving = false;
+                    pane.setDisable(false);
+                    refreshChangedAgreement(request, manifest);
                 });
             } catch (IOException | RuntimeException e) {
                 Platform.runLater(() -> {

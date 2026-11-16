@@ -53,6 +53,8 @@ public final class ContentStore {
     static final int MAX_PAYLOAD_BYTES = 16_777_216;
     /// Bounds local metadata reads and writes, including the escaped current manifest.
     private static final int MAX_STATE_BYTES = 12_582_912;
+    /// Bounded delays while another launcher holds the lock needed for a receipt operation.
+    private static final long @Unmodifiable [] RECEIPT_RETRY_MILLIS = {100, 300, 900};
     /// Serializes local writers before taking the instance lock shared across launcher processes.
     private static final Object CACHE_WRITE_LOCK = new Object();
     /// Avoids opening a second channel to a locally locked registration.
@@ -210,11 +212,6 @@ public final class ContentStore {
         return Map.copyOf(fallbacks);
     }
 
-    /// Saves validated metadata before payload downloads, so a known new agreement cannot revert to old consent.
-    public synchronized void cache(Cache cache) throws IOException {
-        withInstanceLock(() -> saveCache(cache, null));
-    }
-
     /// Publishes only if nobody has replaced the source cache since the caller read it.
     synchronized String publishCache(Cache cache, String expectedVersion, Usage usage) throws IOException {
         return withInstanceLock(() -> {
@@ -239,6 +236,15 @@ public final class ContentStore {
         /// Describes temporary contention for the instance cache.
         private CacheBusyException() {
             super("Another launcher is saving this instance's content cache");
+        }
+    }
+
+    /// Rejects a protocol decision based on an agreement that is no longer the current cached version.
+    @NotNullByDefault
+    static final class AgreementChangedException extends IOException {
+        /// Describes an outdated protocol decision.
+        private AgreementChangedException() {
+            super("此实例的用户协议已变更，请重新检查");
         }
     }
 
@@ -281,7 +287,7 @@ public final class ContentStore {
     }
 
     /// Installs immutable snapshots and publishes their index before collecting unreferenced files.
-    private String saveCache(Cache cache, @Nullable Usage usage) throws IOException {
+    private String saveCache(Cache cache, Usage usage) throws IOException {
         Files.createDirectories(stateDirectory);
         checkCachePath(stateDirectory);
         JsonObject json = new JsonObject();
@@ -380,14 +386,14 @@ public final class ContentStore {
     }
 
     /// Checks for live users and removes registrations left unlocked by closed or crashed launchers.
-    private boolean hasOtherUsers(@Nullable Usage own) throws IOException {
+    private boolean hasOtherUsers(Usage own) throws IOException {
         Path directory = usageDirectory();
         if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS))
             return false;
         checkCachePath(directory);
         try (var paths = Files.newDirectoryStream(directory.toRealPath(), "session-*.lock")) {
             for (Path path : paths) {
-                if ((own != null && path.equals(own.path)) || !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS))
+                if (path.equals(own.path) || !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS))
                     continue;
                 if (LOCAL_USERS.contains(path))
                     return true;
@@ -479,15 +485,6 @@ public final class ContentStore {
         });
     }
 
-    /// Deletes only previously managed objects no longer needed by active/future content or a pending replacement.
-    public synchronized void prune(@Unmodifiable Set<RemoteContent.Resource> keep) throws IOException {
-        withInstanceLock(() -> {
-            if (!hasOtherUsers(null))
-                pruneFiles(keep);
-            return true;
-        });
-    }
-
     /// Reclaims files only for the latest persisted source state and while this launcher is the sole user.
     synchronized void prune(@Unmodifiable Set<RemoteContent.Resource> keep, String expectedVersion, Usage usage)
             throws IOException {
@@ -537,14 +534,6 @@ public final class ContentStore {
             saveOwned(owned);
     }
 
-    /// Removes expired inline bodies and unused file descriptors while retaining the HTTP validator for revalidation.
-    public synchronized Cache compact(Cache cache, String instanceKey, Instant now) throws IOException {
-        Cache compacted = compacted(cache, instanceKey, now);
-        if (compacted != cache)
-            cache(compacted);
-        return compacted;
-    }
-
     /// Prepares compaction without publishing it, so synchronization can check its cache version first.
     static Cache compacted(Cache cache, String instanceKey, Instant now) throws IOException {
         RemoteContent.Manifest manifest = RemoteContent.parse(cache.body(), instanceKey);
@@ -576,24 +565,32 @@ public final class ContentStore {
         return new Cache(json.toString(), cache.etag(), cache.checkedAt(), cache.announcementFallbacks());
     }
 
-    /// Whether this exact agreement, including its indexed document/image digests, was accepted.
-    public synchronized boolean accepted(RemoteContent.Manifest manifest) {
+    /// Reads a receipt for a specific agreement independently of the current cache.
+    boolean accepted(RemoteContent.Manifest manifest) {
         try {
-            JsonObject state = receipts();
-            return state.has("agreementKey") && manifest.key(manifest.agreement()).equals(state.get("agreementKey").getAsString());
+            return hasAgreementReceipt(manifest.key(manifest.agreement()));
         } catch (IOException | RuntimeException e) {
             return false;
         }
     }
 
+    /// Checks a launch receipt against the current persisted agreement while cache writers are excluded.
+    boolean acceptedCurrent(RemoteContent.Manifest manifest) throws IOException {
+        return withReceiptLock(() -> hasAgreementReceipt(checkCurrentAgreement(manifest)));
+    }
+
     /// Durably records consent before any game launch continuation is allowed to run.
-    public synchronized void accept(RemoteContent.Manifest manifest) throws IOException {
-        JsonObject state = receipts();
-        state.addProperty("agreementKey", manifest.key(manifest.agreement()));
-        state.addProperty("agreementId", manifest.agreement().id());
-        state.addProperty("agreementRevision", manifest.agreement().revision());
-        state.addProperty("acceptedAt", Instant.now().toString());
-        write(stateDirectory.resolve("receipts.json"), state.toString().getBytes(StandardCharsets.UTF_8));
+    public void accept(RemoteContent.Manifest manifest) throws IOException {
+        withReceiptLock(() -> {
+            String key = checkCurrentAgreement(manifest);
+            JsonObject state = receipts();
+            state.addProperty("agreementKey", key);
+            state.addProperty("agreementId", manifest.agreement().id());
+            state.addProperty("agreementRevision", manifest.agreement().revision());
+            state.addProperty("acceptedAt", Instant.now().toString());
+            saveReceipts(state);
+            return true;
+        });
     }
 
     /// Whether a content revision was previously acknowledged or dismissed in this instance/source.
@@ -613,16 +610,68 @@ public final class ContentStore {
     }
 
     /// Saves bounded receipt history without deleting the current agreement receipt during payload cleanup.
-    public synchronized void remember(String category, String key) throws IOException {
-        JsonObject state = receipts();
-        JsonArray previous = state.has(category) ? state.getAsJsonArray(category) : new JsonArray();
-        JsonArray next = new JsonArray();
-        for (int i = Math.max(0, previous.size() - 499); i < previous.size(); i++) {
-            if (!key.equals(previous.get(i).getAsString()))
-                next.add(previous.get(i));
+    public void remember(String category, String key) throws IOException {
+        withReceiptLock(() -> {
+            JsonObject state = receipts();
+            JsonArray previous = state.has(category) ? state.getAsJsonArray(category) : new JsonArray();
+            JsonArray next = new JsonArray();
+            for (int i = Math.max(0, previous.size() - 499); i < previous.size(); i++) {
+                if (!key.equals(previous.get(i).getAsString()))
+                    next.add(previous.get(i));
+            }
+            next.add(key);
+            state.add(category, next);
+            saveReceipts(state);
+            return true;
+        });
+    }
+
+    /// Retries receipt access without holding the instance lock during the delay.
+    private <T> T withReceiptLock(LockedOperation<T> operation) throws IOException {
+        for (int attempt = 0; ; attempt++) {
+            try {
+                return withInstanceLock(operation);
+            } catch (CacheBusyException e) {
+                if (attempt >= RECEIPT_RETRY_MILLIS.length)
+                    throw e;
+                try {
+                    Thread.sleep(RECEIPT_RETRY_MILLIS[attempt]);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Interrupted while waiting for the content receipt lock", interrupted);
+                }
+            }
         }
-        next.add(key);
-        state.add(category, next);
+    }
+
+    /// Compares the agreement key under the instance lock, allowing unrelated manifest updates.
+    private String checkCurrentAgreement(RemoteContent.Manifest manifest) throws IOException {
+        DiskState disk = readSyncState();
+        if (disk.version().isEmpty())
+            throw new AgreementChangedException();
+        RemoteContent.Manifest current;
+        try {
+            String body = JsonParser.parseString(disk.text()).getAsJsonObject().get("body").getAsString();
+            current = RemoteContent.parse(body, manifest.instanceKey());
+        } catch (RuntimeException e) {
+            throw new IOException("无法读取当前用户协议", e);
+        }
+        String key = manifest.key(manifest.agreement());
+        if (!key.equals(current.key(current.agreement())))
+            throw new AgreementChangedException();
+        return key;
+    }
+
+    /// Checks the stored receipt for the given agreement key.
+    private boolean hasAgreementReceipt(String key) throws IOException {
+        JsonObject state = receipts();
+        return state.has("agreementKey") && key.equals(state.get("agreementKey").getAsString());
+    }
+
+    /// Atomically replaces the receipt file while the caller holds the instance lock.
+    private void saveReceipts(JsonObject state) throws IOException {
+        Files.createDirectories(stateDirectory);
+        checkCachePath(stateDirectory);
         write(stateDirectory.resolve("receipts.json"), state.toString().getBytes(StandardCharsets.UTF_8));
     }
 

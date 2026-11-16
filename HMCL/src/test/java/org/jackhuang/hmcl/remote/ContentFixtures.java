@@ -20,8 +20,11 @@ package org.jackhuang.hmcl.remote;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import org.jetbrains.annotations.NotNullByDefault;
+import org.jetbrains.annotations.Unmodifiable;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.Set;
 
 /// Small public-manifest fixtures shared by HTTP and desktop integration tests.
 @NotNullByDefault
@@ -33,6 +36,20 @@ final class ContentFixtures {
 
     /// Prevents construction.
     private ContentFixtures() { }
+
+    /// Publishes the main instance fixture against the current cache version.
+    static void publishCache(ContentStore store, ContentStore.Cache cache) throws IOException {
+        try (var usage = store.registerUsage()) {
+            store.publishCache(cache, store.loadCache("main").version(), usage);
+        }
+    }
+
+    /// Prunes fixtures using the same usage registration and version check as synchronization.
+    static void prune(ContentStore store, @Unmodifiable Set<RemoteContent.Resource> keep) throws IOException {
+        try (var usage = store.registerUsage()) {
+            store.prune(keep, store.loadCache("main").version(), usage);
+        }
+    }
 
     /// Builds an instance-bound manifest with no optional content.
     static JsonObject basic(String key) {
