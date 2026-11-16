@@ -480,14 +480,17 @@ public final class RemoteContentSmoke {
             require(root.lookup("#bf656-announcement-feed") != null && root.lookup("#bf656-announcement-loading") != null,
                     "A scheduled fallback must appear once active while the replacement is still loading");
 
-            receive.invoke(controller, session, new ContentSync.Result(waiting, false, false, false, null, null, false));
+            receive.invoke(controller, session, new ContentSync.Result(waiting, Map.of(), Set.of(),
+                    false, false, false, null, null, false));
             require(root.lookup("#bf656-announcement-loading") != null, "A scheduled retry must keep the loading card");
-            receive.invoke(controller, session, new ContentSync.Result(waiting, false, false, false, null, null, true));
+            receive.invoke(controller, session, new ContentSync.Result(waiting, Map.of(), Set.of(),
+                    false, false, false, null, null, true));
             require(root.lookup("#bf656-announcement-loading") == null, "Exhausting retries must remove the loading card");
             receive.invoke(controller, session, new ContentSync.Result(empty, fallbacks, Set.of(), false, true, false, null, null, false));
             require(root.lookup("#bf656-announcement-feed") == null && root.lookup("#bf656-announcement-loading") == null,
                     "A fresh empty manifest must remove withdrawn announcements and hide the loading card");
-            receive.invoke(controller, session, new ContentSync.Result(empty, true, true, false, null, null, false));
+            receive.invoke(controller, session, new ContentSync.Result(empty, Map.of(), Set.of(),
+                    true, true, false, null, null, false));
             require(root.lookup("#bf656-announcement-feed") == null && root.lookup("#bf656-announcement-loading") == null,
                     "Revalidating an empty cached manifest must not show the loading card");
         } finally {

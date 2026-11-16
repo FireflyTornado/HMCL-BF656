@@ -140,49 +140,6 @@ final class RemoteContentTest {
         assertTrue(failure.getMessage().contains(ContentFixtures.IMAGE));
     }
 
-    /// Imports valid legacy cache data into separate storage and leaves subsequent old writes and cleanup isolated.
-    @Test
-    void isolatesNewCacheFromLegacyWritersAndCleanup() throws Exception {
-        String source = "legacy-source";
-        String body = "# Cached before upgrade";
-        String catalog = ContentFixtures.markdown("main", body, new byte[0]).toString();
-        var manifest = RemoteContent.parse(catalog, "main");
-        var file = java.util.Objects.requireNonNull(manifest.files().get(ContentFixtures.BODY));
-        Path oldState = root.resolve("client/state").resolve(RemoteContent.hash(source));
-        Files.createDirectories(oldState);
-        JsonObject oldMetadata = new JsonObject();
-        oldMetadata.addProperty("body", catalog);
-        oldMetadata.addProperty("etag", "legacy-etag");
-        oldMetadata.addProperty("checkedAt", Instant.EPOCH.toString());
-        Path oldSync = oldState.resolve("sync.json");
-        Files.writeString(oldSync, oldMetadata.toString());
-        JsonObject receipt = new JsonObject();
-        receipt.addProperty("agreementKey", manifest.key(manifest.agreement()));
-        Files.writeString(oldState.resolve("receipts.json"), receipt.toString());
-        Path oldFile = root.resolve("server/files").resolve(file.cacheName());
-        Files.createDirectories(oldFile.getParent());
-        Files.writeString(oldFile, body);
-        var store = new ContentStore(root, source);
-        try (var usage = store.registerUsage()) {
-            store.importLegacyCache("main", usage);
-        }
-        assertEquals("legacy-etag", java.util.Objects.requireNonNull(store.cache("main")).etag());
-        assertTrue(store.verified(file));
-        assertTrue(store.accepted(manifest));
-        assertEquals(body, Files.readString(oldFile));
-        assertEquals(oldMetadata.toString(), Files.readString(oldSync));
-
-        Files.delete(oldFile);
-        Files.writeString(oldSync, "{}");
-        assertTrue(store.verified(file));
-        assertEquals(catalog, java.util.Objects.requireNonNull(store.cache("main")).body());
-        Files.writeString(oldFile, body);
-        store.prune(Set.of());
-        assertFalse(Files.exists(store.file(file)));
-        assertEquals(body, Files.readString(oldFile));
-        assertEquals("{}", Files.readString(oldSync));
-    }
-
     /// Receipts belong to an instance directory and server source, and survive payload garbage collection.
     @Test
     void isolatesAndPersistsReceipts() throws Exception {
@@ -339,7 +296,7 @@ final class RemoteContentTest {
         assertThrows(IllegalArgumentException.class,
                 () -> new ContentStore.Cache(latest, "\"next\"", Instant.EPOCH, Map.of("wrong-id", fallback)));
         store.cache(new ContentStore.Cache(latest, "\"next\"", Instant.EPOCH, Map.of("news", fallback)));
-        Path state = root.resolve("client/content-cache-v2/state").resolve(RemoteContent.hash("source"));
+        Path state = root.resolve("client/state").resolve(RemoteContent.hash("source"));
         Path sync = state.resolve("sync.json");
         var reopened = new ContentStore(root, "source");
 
@@ -376,7 +333,7 @@ final class RemoteContentTest {
         var fallback = RemoteContent.Announcement.capture(old, old.announcements().getFirst());
         String waiting = ContentFixtures.markdown("main", "# Replacement", new byte[0]).toString();
         store.cache(new ContentStore.Cache(waiting, "", Instant.EPOCH, Map.of("news", fallback)));
-        Path state = root.resolve("client/content-cache-v2/state").resolve(RemoteContent.hash("source"));
+        Path state = root.resolve("client/state").resolve(RemoteContent.hash("source"));
         var initial = JsonParser.parseString(Files.readString(state.resolve("sync.json"))).getAsJsonObject();
         String digest = initial.getAsJsonObject("announcementFallbacks").get("news").getAsString();
         Path snapshot = state.resolve("announcement-fallbacks").resolve(digest + ".json");
@@ -451,7 +408,7 @@ final class RemoteContentTest {
         /// Holds the registration until the parent closes its input pipe.
         public static void main(String @Unmodifiable [] args) throws Exception {
             if (Boolean.parseBoolean(args[2])) {
-                Path path = Path.of(args[0]).resolve("client/content-cache-v2/content-users/session-peer.lock");
+                Path path = Path.of(args[0]).resolve("client/content-users/session-peer.lock");
                 try (var channel = FileChannel.open(path, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
                      var lock = channel.lock()) {
                     Files.createFile(Path.of(args[1]));
@@ -485,6 +442,6 @@ final class RemoteContentTest {
         assertFalse(compacted.body().contains("expired-secret-marker"));
         assertEquals("\"etag\"", compacted.etag());
         assertTrue(RemoteContent.parse(compacted.body(), "main").notices().isEmpty());
-        assertFalse(Files.readString(root.resolve("client/content-cache-v2/server/manifest.json")).contains("expired-secret-marker"));
+        assertFalse(Files.readString(root.resolve("server/manifest.json")).contains("expired-secret-marker"));
     }
 }

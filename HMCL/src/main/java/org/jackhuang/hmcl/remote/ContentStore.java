@@ -59,23 +59,19 @@ public final class ContentStore {
     private static final Set<Path> LOCAL_USERS = new HashSet<>();
     /// This instance's `.launcher` directory.
     private final Path root;
-    /// Separates managed files and metadata from launchers using the previous cache layout.
-    private final Path cacheDirectory;
-    /// Source-specific receipt and HTTP state directory for this cache format.
+    /// Instance-side state, file ownership and cache coordination.
+    private final Path client;
+    /// Source-specific receipt and HTTP state directory.
     private final Path stateDirectory;
-    /// Previous source-specific state, read only when seeding this cache.
-    private final Path legacyStateDirectory;
-    /// Downloaded content owned by this cache format.
+    /// Public downloaded content beneath the instance's launcher directory.
     private final Path server;
 
     /// Creates storage for one instance and one server content source.
     public ContentStore(Path launcherDirectory, String source) {
         root = launcherDirectory.toAbsolutePath().normalize();
-        cacheDirectory = root.resolve("client/content-cache-v2");
-        server = cacheDirectory.resolve("server");
-        String sourceKey = RemoteContent.hash(source);
-        stateDirectory = cacheDirectory.resolve("state").resolve(sourceKey);
-        legacyStateDirectory = root.resolve("client/state").resolve(sourceKey);
+        client = root.resolve("client");
+        server = root.resolve("server");
+        stateDirectory = client.resolve("state").resolve(RemoteContent.hash(source));
     }
 
     /// Current server response and the displayable announcement revisions retained during its download.
@@ -126,47 +122,6 @@ public final class ContentStore {
     /// Reads the authoritative state and its fingerprint in one pass.
     synchronized CacheState loadCache(String instanceKey) throws IOException {
         return Objects.requireNonNull(loadChangedCache(instanceKey, null));
-    }
-
-    /// Seeds an empty cache from verified legacy data without writing to the legacy directories.
-    synchronized void importLegacyCache(String instanceKey, Usage usage) throws IOException {
-        Path legacySync = legacyStateDirectory.resolve("sync.json");
-        if (!Files.isRegularFile(legacySync, LinkOption.NOFOLLOW_LINKS) || !readSyncState().version().isEmpty())
-            return;
-        Cache old;
-        RemoteContent.Manifest manifest;
-        try {
-            checkCachePath(legacyStateDirectory);
-            JsonObject json = read(legacySync);
-            String body = json.get("body").getAsString();
-            manifest = RemoteContent.parse(body, instanceKey);
-            old = new Cache(body, json.get("etag").getAsString(), Instant.parse(json.get("checkedAt").getAsString()));
-        } catch (IOException | RuntimeException e) {
-            return;
-        }
-        Path legacyFiles = root.resolve("server/files");
-        if (Files.isDirectory(legacyFiles, LinkOption.NOFOLLOW_LINKS)) {
-            checkCachePath(legacyFiles);
-            for (RemoteContent.Resource resource : manifest.needed(Instant.now())) {
-                Path file = legacyFiles.resolve(resource.cacheName());
-                if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS))
-                    continue;
-                try (var input = Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS)) {
-                    byte @Unmodifiable [] bytes = input.readNBytes(MAX_PAYLOAD_BYTES + 1);
-                    if (bytes.length <= MAX_PAYLOAD_BYTES && RemoteContent.digest(bytes).equals(resource.sha256()))
-                        install(resource, bytes, usage);
-                } catch (CacheBusyException e) {
-                    throw e;
-                } catch (IOException ignored) {
-                    // The legacy launcher may have reclaimed this file; the next sync can download it.
-                }
-            }
-        }
-        try {
-            publishCache(old, "", usage);
-        } catch (CacheChangedException ignored) {
-            // A concurrent launcher initialized the new cache first.
-        }
     }
 
     /// Reloads metadata and sidecars only when the caller's disk fingerprint changed.
@@ -305,10 +260,10 @@ public final class ContentStore {
 
     /// Shares one lock across all sources that use this instance's managed files.
     private <T> T withInstanceLock(LockedOperation<T> operation) throws IOException {
-        Files.createDirectories(cacheDirectory);
-        checkCachePath(cacheDirectory);
+        Files.createDirectories(client);
+        checkCachePath(client);
         synchronized (CACHE_WRITE_LOCK) {
-            try (var channel = FileChannel.open(cacheDirectory.resolve("content.lock"), StandardOpenOption.CREATE,
+            try (var channel = FileChannel.open(client.resolve("content.lock"), StandardOpenOption.CREATE,
                     StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
                 @Nullable FileLock lock;
                 try {
@@ -421,7 +376,7 @@ public final class ContentStore {
 
     /// Keeps usage registrations at the instance level because resources are shared across sources.
     private Path usageDirectory() {
-        return cacheDirectory.resolve("content-users");
+        return client.resolve("content-users");
     }
 
     /// Checks for live users and removes registrations left unlocked by closed or crashed launchers.
@@ -582,7 +537,7 @@ public final class ContentStore {
                 owned.remove(name);
             }
         }
-        if (!owned.isEmpty() || Files.exists(cacheDirectory.resolve("managed-files.json")))
+        if (!owned.isEmpty() || Files.exists(client.resolve("managed-files.json")))
             saveOwned(owned);
     }
 
@@ -693,24 +648,13 @@ public final class ContentStore {
     /// Reads source-specific receipts without converting damaged state into consent.
     private JsonObject receipts() throws IOException {
         Path path = stateDirectory.resolve("receipts.json");
-        if (Files.exists(path))
-            return read(path);
-        Path legacy = legacyStateDirectory.resolve("receipts.json");
-        if (Files.isRegularFile(legacy, LinkOption.NOFOLLOW_LINKS)) {
-            try {
-                checkCachePath(legacyStateDirectory);
-                return read(legacy);
-            } catch (IOException ignored) {
-                // An unreadable legacy receipt cannot grant consent.
-            }
-        }
-        return new JsonObject();
+        return Files.exists(path) ? read(path) : new JsonObject();
     }
 
     /// Reads the installation's managed-object inventory, shared across source changes for safe cleanup.
     private Set<String> owned() throws IOException {
         Set<String> result = new HashSet<>();
-        Path path = cacheDirectory.resolve("managed-files.json");
+        Path path = client.resolve("managed-files.json");
         if (Files.exists(path)) {
             for (var name : read(path).getAsJsonArray("files"))
                 result.add(name.getAsString());
@@ -724,7 +668,7 @@ public final class ContentStore {
         JsonArray array = new JsonArray();
         owned.stream().sorted().forEach(array::add);
         json.add("files", array);
-        write(cacheDirectory.resolve("managed-files.json"), json.toString().getBytes(StandardCharsets.UTF_8));
+        write(client.resolve("managed-files.json"), json.toString().getBytes(StandardCharsets.UTF_8));
     }
 
     /// Creates the public cache and rejects filesystem links escaping this instance's launcher directory.

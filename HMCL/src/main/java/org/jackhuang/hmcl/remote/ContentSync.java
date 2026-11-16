@@ -73,8 +73,6 @@ public final class ContentSync implements AutoCloseable {
     private String cacheVersion = "";
     /// Protects all cached files this session may still present, even while it is paused.
     private volatile @Nullable ContentStore.Usage usage;
-    /// Whether this session attempted to initialize an empty cache from the previous launcher layout.
-    private boolean legacyCacheChecked;
     /// A metadata write must complete before managed file cleanup can use the new state.
     private boolean cacheDirty;
     /// Whether the manifest has been checked successfully during this process session.
@@ -158,12 +156,6 @@ public final class ContentSync implements AutoCloseable {
                       boolean success, @Nullable Instant checkedAt, @Nullable String error, boolean exhausted) {
             this(manifest, announcementFallbacks, readyAnnouncements, cached, pending, success, checkedAt, error,
                     exhausted, false);
-        }
-
-        /// Creates a result for callers that have no announcement fallbacks.
-        public Result(@Nullable RemoteContent.Manifest manifest, boolean cached, boolean pending, boolean success,
-                      @Nullable Instant checkedAt, @Nullable String error, boolean exhausted) {
-            this(manifest, Map.of(), Set.of(), cached, pending, success, checkedAt, error, exhausted);
         }
 
         /// Returns the manifest once its agreement can be used for a launch decision.
@@ -308,10 +300,6 @@ public final class ContentSync implements AutoCloseable {
         StringBuilder errors = new StringBuilder();
         try {
             registerUsage(token);
-            if (!legacyCacheChecked) {
-                store.importLegacyCache(config.instanceKey(), java.util.Objects.requireNonNull(usage));
-                legacyCacheChecked = true;
-            }
             reloadCache();
             emit(token, verification, true, null);
             if (!checked || recheckAnnouncementManifest) {

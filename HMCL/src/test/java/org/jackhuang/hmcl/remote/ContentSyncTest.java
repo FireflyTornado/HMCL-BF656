@@ -126,7 +126,7 @@ final class ContentSyncTest {
                 assertEquals("\"new\"", retriedValidator.get());
                 assertEquals(3, requests.get());
                 assertEquals(newer.toString(), java.util.Objects.requireNonNull(storeA.cache("main")).body());
-                assertEquals(newer.toString(), Files.readString(directory.resolve("client/content-cache-v2/server/manifest.json")));
+                assertEquals(newer.toString(), Files.readString(directory.resolve("server/manifest.json")));
             } finally {
                 releaseOld.countDown();
                 http.stop(0);
@@ -187,7 +187,7 @@ final class ContentSyncTest {
                 javaExecutable = javaExecutable.resolveSibling("java.exe");
             Path classes = Path.of(PublicationLockPeer.class.getProtectionDomain().getCodeSource().getLocation().toURI());
             Process peer = new ProcessBuilder(javaExecutable.toString(), "-cp", classes.toString(), PublicationLockPeer.class.getName(),
-                    directory.resolve("client/content-cache-v2/content.lock").toString(), ready.toString()).redirectErrorStream(true).start();
+                    directory.resolve("client/content.lock").toString(), ready.toString()).redirectErrorStream(true).start();
             try {
                 long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
                 while (!Files.exists(ready) && peer.isAlive() && System.nanoTime() < deadline)
@@ -357,7 +357,7 @@ final class ContentSyncTest {
             var saved = java.util.Objects.requireNonNull(store.cache("main"));
             assertEquals(2, RemoteContent.parse(saved.body(), "main").agreement().revision());
             assertEquals(1, saved.announcementFallbacks().get("news").item().revision());
-            Path state = directory.resolve("client/content-cache-v2/state").resolve(RemoteContent.hash(config.endpoint().toString()));
+            Path state = directory.resolve("client/state").resolve(RemoteContent.hash(config.endpoint().toString()));
             JsonObject index = JsonParser.parseString(Files.readString(state.resolve("sync.json"))).getAsJsonObject();
             String digest = index.getAsJsonObject("announcementFallbacks").get("news").getAsString();
             snapshot = state.resolve("announcement-fallbacks").resolve(digest + ".json");
@@ -545,7 +545,7 @@ final class ContentSyncTest {
         store.install(file, body.getBytes(StandardCharsets.UTF_8));
         var events = new LinkedBlockingQueue<ContentSync.Result>();
         var held = new AtomicReference<@Nullable FileLock>();
-        Path lockPath = directory.resolve("client/content-cache-v2/content.lock");
+        Path lockPath = directory.resolve("client/content.lock");
         try (var channel = FileChannel.open(lockPath, StandardOpenOption.WRITE);
              var sync = new ContentSync(config, store, result -> {
                  if (result.pending() && !result.cached() && held.get() == null) {
