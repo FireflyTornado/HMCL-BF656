@@ -39,6 +39,7 @@ import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /// Immutable instance-specific version-two manifests, content identities and resource ownership.
@@ -146,10 +147,7 @@ public final class RemoteContent {
 
         /// Copies the descriptors declared by this announcement for rendering or persistent fallback.
         static Announcement capture(Manifest manifest, Item item) {
-            Map<String, Resource> files = new LinkedHashMap<>();
-            for (String path : item.files())
-                files.put(path, manifest.files().get(path));
-            return new Announcement(item, files);
+            return new Announcement(item, manifest.itemFiles(item));
         }
     }
 
@@ -164,6 +162,14 @@ public final class RemoteContent {
                 case NOTICES -> notices;
                 case ANNOUNCEMENTS -> announcements;
             };
+        }
+
+        /// Returns the exact descriptors declared by one item.
+        @Unmodifiable Map<String, Resource> itemFiles(Item item) {
+            Map<String, Resource> descriptors = new LinkedHashMap<>();
+            for (String path : item.files())
+                descriptors.put(path, Objects.requireNonNull(files.get(path)));
+            return Map.copyOf(descriptors);
         }
 
         /// All current and future files, excluding expired notices and announcements.

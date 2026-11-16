@@ -45,6 +45,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 /// Instance-local receipts and content-addressed downloads, with ownership-bounded garbage collection.
 @NotNullByDefault
@@ -55,10 +56,10 @@ public final class ContentStore {
     private static final int MAX_STATE_BYTES = 12_582_912;
     /// Bounded delays while another launcher holds the lock needed for a receipt operation.
     private static final long @Unmodifiable [] RECEIPT_RETRY_MILLIS = {100, 300, 900};
-    /// Serializes local writers before taking the instance lock shared across launcher processes.
-    private static final Object CACHE_WRITE_LOCK = new Object();
+    /// Serializes local writers by real instance path before taking the cross-process lock.
+    private static final Map<Path, Object> INSTANCE_WRITE_LOCKS = new ConcurrentHashMap<>();
     /// Avoids opening a second channel to a locally locked registration.
-    private static final Set<Path> LOCAL_USERS = new HashSet<>();
+    private static final Set<Path> LOCAL_USERS = ConcurrentHashMap.newKeySet();
     /// This instance's `.launcher` directory.
     private final Path root;
     /// Instance-side state, file ownership and cache coordination.
@@ -267,8 +268,9 @@ public final class ContentStore {
     /// Shares one lock across all sources that use this instance's managed files.
     private <T> T withInstanceLock(LockedOperation<T> operation) throws IOException {
         Files.createDirectories(client);
-        checkCachePath(client);
-        synchronized (CACHE_WRITE_LOCK) {
+        Path realClient = checkCachePath(client);
+        Object localLock = INSTANCE_WRITE_LOCKS.computeIfAbsent(realClient, ignored -> new Object());
+        synchronized (localLock) {
             try (var channel = FileChannel.open(client.resolve("content.lock"), StandardOpenOption.CREATE,
                     StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
                 @Nullable FileLock lock;
@@ -351,12 +353,11 @@ public final class ContentStore {
         /// Releases the registration for the next cleanup to collect.
         @Override
         public void close() throws IOException {
-            synchronized (CACHE_WRITE_LOCK) {
-                try {
-                    channel.close();
-                } finally {
-                    LOCAL_USERS.remove(path);
-                }
+            try {
+                channel.close();
+            } finally {
+                // Readers may defer cleanup until the channel is fully released.
+                LOCAL_USERS.remove(path);
             }
         }
     }
@@ -415,10 +416,12 @@ public final class ContentStore {
         return stateDirectory.resolve("announcement-fallbacks");
     }
 
-    /// Rejects linked directories that resolve outside their exact instance and cache path.
-    private void checkCachePath(Path directory) throws IOException {
-        if (!directory.toRealPath().equals(root.toRealPath().resolve(root.relativize(directory))))
+    /// Returns the real directory after checking that it resolves to the expected cache path.
+    private Path checkCachePath(Path directory) throws IOException {
+        Path resolved = directory.toRealPath();
+        if (!resolved.equals(root.toRealPath().resolve(root.relativize(directory))))
             throw new IOException("Content cache path escapes its instance directory");
+        return resolved;
     }
 
     /// Cleans previously published or interrupted snapshots once the replacement index is durable.

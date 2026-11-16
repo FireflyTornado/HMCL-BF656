@@ -77,6 +77,8 @@ public final class ContentSync implements AutoCloseable {
     private boolean cacheDirty;
     /// Whether the manifest has been checked successfully during this process session.
     private boolean checked;
+    /// Requests a fresh manifest check when the next worker cycle starts.
+    private boolean forceCheck;
     /// Whether an invalid announcement requires fetching a corrected manifest on the next attempt.
     private boolean recheckAnnouncementManifest;
     /// Whether a manifest check reached publication but could not acquire the instance lock.
@@ -139,11 +141,12 @@ public final class ContentSync implements AutoCloseable {
         }
     }
 
-    /// Carries current metadata and the announcement revisions that passed background payload and document checks.
+    /// Carries current metadata and items that passed background payload and document checks.
     @NotNullByDefault
     public record Result(@Nullable RemoteContent.Manifest manifest,
                          @Unmodifiable Map<String, RemoteContent.Announcement> announcementFallbacks,
                          @Unmodifiable Set<String> readyAnnouncements,
+                         @Unmodifiable Set<String> readyNotices,
                          boolean cached, boolean pending,
                          boolean contentSynced, @Nullable Instant checkedAt, @Nullable String error, boolean exhausted,
                          boolean publicationBlocked, @Nullable String cleanupError, boolean agreementReady) {
@@ -151,6 +154,7 @@ public final class ContentSync implements AutoCloseable {
         public Result {
             announcementFallbacks = Map.copyOf(announcementFallbacks);
             readyAnnouncements = Set.copyOf(readyAnnouncements);
+            readyNotices = Set.copyOf(readyNotices);
         }
 
         /// Creates a result without pending cache errors.
@@ -158,7 +162,7 @@ public final class ContentSync implements AutoCloseable {
                       @Unmodifiable Map<String, RemoteContent.Announcement> announcementFallbacks,
                       @Unmodifiable Set<String> readyAnnouncements, boolean cached, boolean pending,
                       boolean success, @Nullable Instant checkedAt, @Nullable String error, boolean exhausted) {
-            this(manifest, announcementFallbacks, readyAnnouncements, cached, pending, success, checkedAt, error,
+            this(manifest, announcementFallbacks, readyAnnouncements, Set.of(), cached, pending, success, checkedAt, error,
                     exhausted, false, null, false);
         }
 
@@ -169,7 +173,7 @@ public final class ContentSync implements AutoCloseable {
 
         /// Records a local maintenance result while preserving the current content and its network status.
         private Result withCleanupError(@Nullable String error) {
-            return new Result(manifest, announcementFallbacks, readyAnnouncements, cached, pending, contentSynced,
+            return new Result(manifest, announcementFallbacks, readyAnnouncements, readyNotices, cached, pending, contentSynced,
                     checkedAt, this.error, exhausted, publicationBlocked, error, agreementReady);
         }
 
@@ -195,6 +199,8 @@ public final class ContentSync implements AutoCloseable {
 
     /// Activates once per selection, retaining successful work across repeated selections in this process.
     public synchronized void activate() {
+        if (worker.isShutdown())
+            return;
         active = true;
         if (success) {
             prune();
@@ -219,9 +225,9 @@ public final class ContentSync implements AutoCloseable {
 
     /// Explicit refresh rechecks the manifest while reusing unchanged content-addressed files.
     public synchronized void refresh() {
+        forceCheck = true;
         if (running)
             return;
-        checked = false;
         success = false;
         failures = 0;
         if (retry != null)
@@ -248,7 +254,12 @@ public final class ContentSync implements AutoCloseable {
 
     /// Runs cleanup and restarts synchronization if another launcher changed the cache baseline.
     private void pruneOnWorker(int attempt) {
-        CleanupOutcome outcome = cleanup(new Verification(), attempt);
+        boolean contentSynced;
+        synchronized (this) {
+            contentSynced = success;
+        }
+        CleanupOutcome outcome = cleanup(new Verification(), attempt, contentSynced);
+        long token;
         synchronized (this) {
             if (worker.isShutdown())
                 return;
@@ -258,11 +269,12 @@ public final class ContentSync implements AutoCloseable {
                     failures = 0;
                     activate();
                 }
-            } else if (lastResult != null && !java.util.Objects.equals(lastResult.cleanupError(), cleanupError)) {
-                lastResult = lastResult.withCleanupError(cleanupError);
-                listener.accept(lastResult);
+                return;
             }
+            token = generation;
         }
+        if (lastResult != null && !java.util.Objects.equals(lastResult.cleanupError(), cleanupError))
+            deliver(token, lastResult.withCleanupError(cleanupError));
     }
 
     /// Queues at most one delayed local cleanup after a maintenance failure.
@@ -286,10 +298,19 @@ public final class ContentSync implements AutoCloseable {
     }
 
     /// Acquires filesystem protection before loading any documents into this session.
-    private synchronized void registerUsage(long token) throws IOException {
+    private void registerUsage(long token) throws IOException {
         checkActive(token);
-        if (usage == null)
-            usage = store.registerUsage();
+        if (usage != null)
+            return;
+        ContentStore.Usage registered = store.registerUsage();
+        synchronized (this) {
+            if (active && generation == token && !worker.isShutdown()) {
+                usage = registered;
+                return;
+            }
+        }
+        closeUsage(registered);
+        throw new CancellationException();
     }
 
     /// Adopts a newer on-disk state without treating its cached response as a fresh network check.
@@ -320,12 +341,19 @@ public final class ContentSync implements AutoCloseable {
         Verification verification = new Verification();
         StringBuilder errors = new StringBuilder();
         try {
+            synchronized (this) {
+                checkActive(token);
+                if (forceCheck) {
+                    checked = false;
+                    forceCheck = false;
+                }
+            }
             registerUsage(token);
             reloadCache();
-            emit(token, verification, true, null);
+            emitProgress(token, verification);
             if (!checked || recheckAnnouncementManifest) {
                 checkManifest(token, verification);
-                emit(token, verification, true, null);
+                emitProgress(token, verification);
             }
             RemoteContent.Manifest current = java.util.Objects.requireNonNull(manifest);
             for (RemoteContent.Resource resource : current.needed(Instant.now())) {
@@ -336,28 +364,22 @@ public final class ContentSync implements AutoCloseable {
                         checkActive(token);
                         store.install(resource, bytes, java.util.Objects.requireNonNull(usage));
                         verification.installed(resource);
-                        emit(token, verification, true, null);
+                        emitProgress(token, verification);
                     }
                 } catch (IOException | IllegalArgumentException e) {
                     errors.append(resource.path()).append(": ").append(e.getMessage()).append('\n');
                 }
             }
+            Instant now = Instant.now();
             for (RemoteContent.Kind kind : RemoteContent.Kind.values()) {
                 for (RemoteContent.Item item : current.items(kind)) {
-                    if (item.expired(Instant.now()))
+                    if (item.expired(now))
                         continue;
-                    if (kind == RemoteContent.Kind.ANNOUNCEMENTS) {
-                        @Nullable String error = verification.announcement(RemoteContent.Announcement.capture(current, item)).error();
-                        if (error != null) {
-                            errors.append(item.id()).append(": ").append(error).append('\n');
+                    @Nullable String error = verification.document(item, current.itemFiles(item)).error();
+                    if (error != null) {
+                        errors.append(item.id()).append(": ").append(error).append('\n');
+                        if (kind == RemoteContent.Kind.ANNOUNCEMENTS)
                             recheckAnnouncementManifest = true;
-                        }
-                    } else if (store.ready(current, item)) {
-                        try {
-                            ContentDocuments.validate(Path.of("."), current, item, store, config.endpoint(), false);
-                        } catch (IOException e) {
-                            errors.append(item.id()).append(": ").append(e.getMessage()).append('\n');
-                        }
                     }
                 }
             }
@@ -369,22 +391,32 @@ public final class ContentSync implements AutoCloseable {
                 return;
             errors.append(e.getMessage() == null ? e.toString() : e.getMessage());
         }
+        int failedCycles;
+        synchronized (this) {
+            if (!active || generation != token || worker.isShutdown())
+                return;
+            failedCycles = failures;
+        }
+        if (cleanup(verification, 0, errors.isEmpty()) == CleanupOutcome.CACHE_CHANGED)
+            errors.append("Another launcher updated the content cache during synchronization");
+        boolean contentSynced = errors.isEmpty();
+        if (!contentSynced)
+            failedCycles++;
+        if (generation != token)
+            return;
+        Result result = snapshot(verification, false, contentSynced, failedCycles > retrySeconds.length,
+                contentSynced ? null : errors.toString());
         synchronized (this) {
             if (!active || generation != token || worker.isShutdown())
                 return;
             running = false;
-            success = errors.isEmpty();
-            if (cleanup(verification, 0) == CleanupOutcome.CACHE_CHANGED) {
-                success = false;
-                errors.append("Another launcher updated the content cache during synchronization");
-            }
-            if (success) {
+            success = contentSynced;
+            failures = failedCycles;
+            if (success)
                 previous = null;
-            } else {
-                failures++;
-            }
-            emit(token, verification, false, errors.isEmpty() ? null : errors.toString());
-            if (!success && failures <= retrySeconds.length) {
+            if (forceCheck) {
+                refresh();
+            } else if (!success && failures <= retrySeconds.length) {
                 retry = worker.schedule(() -> {
                     synchronized (ContentSync.this) {
                         if (active)
@@ -393,6 +425,7 @@ public final class ContentSync implements AutoCloseable {
                 }, retrySeconds[failures - 1], TimeUnit.SECONDS);
             }
         }
+        deliver(token, result);
     }
 
     /// Publishes a response against its original disk baseline, retrying once from a competing publication.
@@ -413,7 +446,7 @@ public final class ContentSync implements AutoCloseable {
                 verification.clear();
                 if (attempt > 0)
                     throw e;
-                emit(token, verification, true, null);
+                emitProgress(token, verification);
                 continue;
             } catch (ContentStore.CacheBusyException e) {
                 publicationBlocked = true;
@@ -436,19 +469,22 @@ public final class ContentSync implements AutoCloseable {
 
     /// Availability of a revision and the document error, if all files arrived but the document is invalid.
     @NotNullByDefault
-    private record AnnouncementCheck(boolean ready, @Nullable String error) {
+    private record DocumentCheck(boolean ready, @Nullable String error) {
         /// The revision is waiting for verified payloads.
-        private static final AnnouncementCheck MISSING = new AnnouncementCheck(false, null);
+        private static final DocumentCheck MISSING = new DocumentCheck(false, null);
         /// Both the payloads and document passed validation.
-        private static final AnnouncementCheck READY = new AnnouncementCheck(true, null);
+        private static final DocumentCheck READY = new DocumentCheck(true, null);
     }
+
+    /// Identifies a document by its exact item revision and declared resource descriptors.
+    private record DocumentRevision(RemoteContent.Item item, @Unmodifiable Map<String, RemoteContent.Resource> files) { }
 
     /// Shares file and document checks across publication, presentation and cleanup within one background attempt.
     private final class Verification {
         /// Digest checks by content-addressed filename, updated when a download is installed.
         private final Map<String, Boolean> resources = new HashMap<>();
         /// Document checks by exact revision and resource descriptors, after every payload is present.
-        private final Map<RemoteContent.Announcement, AnnouncementCheck> announcements = new HashMap<>();
+        private final Map<DocumentRevision, DocumentCheck> documents = new HashMap<>();
 
         /// Checks the cached bytes once per attempt.
         private boolean resource(RemoteContent.Resource resource) {
@@ -466,22 +502,21 @@ public final class ContentSync implements AutoCloseable {
             resources.put(resource.cacheName(), true);
         }
 
-        /// Checks all declared agreement files before exposing the protocol to the launch flow.
-        private boolean agreementReady(RemoteContent.Manifest manifest) {
-            return manifest.agreement().files().stream()
-                    .allMatch(path -> resource(java.util.Objects.requireNonNull(manifest.files().get(path))));
+        /// Checks an announcement using its retained descriptors, which may differ from the current manifest.
+        private DocumentCheck announcement(RemoteContent.Announcement announcement) {
+            return document(announcement.item(), announcement.files());
         }
 
-        /// Considers a revision ready only after validating its payloads and document.
-        private AnnouncementCheck announcement(RemoteContent.Announcement announcement) {
-            if (!announcement.files().values().stream().allMatch(this::resource))
-                return AnnouncementCheck.MISSING;
-            return announcements.computeIfAbsent(announcement, revision -> {
+        /// Requires verified payloads and a valid document for every content type.
+        private DocumentCheck document(RemoteContent.Item item, @Unmodifiable Map<String, RemoteContent.Resource> files) {
+            if (!files.values().stream().allMatch(this::resource))
+                return DocumentCheck.MISSING;
+            return documents.computeIfAbsent(new DocumentRevision(item, files), revision -> {
                 try {
-                    ContentDocuments.validateAnnouncement(revision, store, config.endpoint());
-                    return AnnouncementCheck.READY;
+                    ContentDocuments.validateCachedDocument(revision.item(), revision.files(), store, config.endpoint());
+                    return DocumentCheck.READY;
                 } catch (IOException e) {
-                    return new AnnouncementCheck(false, e.getMessage() == null ? e.toString() : e.getMessage());
+                    return new DocumentCheck(false, e.getMessage() == null ? e.toString() : e.getMessage());
                 }
             });
         }
@@ -489,7 +524,7 @@ public final class ContentSync implements AutoCloseable {
         /// Revalidates files and documents after adopting a concurrent publication.
         private void clear() {
             resources.clear();
-            announcements.clear();
+            documents.clear();
         }
     }
 
@@ -561,7 +596,7 @@ public final class ContentSync implements AutoCloseable {
     }
 
     /// Retains current resources and files still owned by an available fallback revision.
-    private CleanupOutcome cleanup(Verification verification, int attempt) {
+    private CleanupOutcome cleanup(Verification verification, int attempt, boolean contentSynced) {
         if (publicationBlocked)
             return CleanupOutcome.COMPLETE;
         String operation = "保存缓存索引";
@@ -591,7 +626,7 @@ public final class ContentSync implements AutoCloseable {
                 }
             }
             @Nullable RemoteContent.Manifest old = previous;
-            if (old != null && !success) {
+            if (old != null && !contentSynced) {
                 for (RemoteContent.Kind kind : RemoteContent.Kind.values()) {
                     if (kind == RemoteContent.Kind.ANNOUNCEMENTS)
                         continue;
@@ -632,26 +667,43 @@ public final class ContentSync implements AutoCloseable {
         return CleanupOutcome.COMPLETE;
     }
 
-    /// Delivers ordered snapshots; cancellation checks prevent old selection generations from updating the UI.
-    private void emit(long token, Verification verification, boolean pending, @Nullable String error) {
+    /// Emits an in-progress result if this cycle still belongs to the active selection.
+    private void emitProgress(long token, Verification verification) {
         if (worker.isShutdown() || generation != token)
             return;
+        deliver(token, snapshot(verification, true, false, false, null));
+    }
+
+    /// Calculates presentation readiness on the worker without holding the synchronization state monitor.
+    private Result snapshot(Verification verification, boolean pending, boolean contentSynced, boolean exhausted,
+                            @Nullable String error) {
         @Nullable RemoteContent.Manifest current = manifest;
         Instant now = Instant.now();
-        Set<String> ready = new HashSet<>();
+        Set<String> announcements = new HashSet<>();
+        Set<String> notices = new HashSet<>();
+        boolean agreementReady = false;
         if (current != null) {
             for (RemoteContent.Item item : current.announcements()) {
-                if (!item.expired(now) && verification.announcement(RemoteContent.Announcement.capture(current, item)).ready())
-                    ready.add(item.id());
+                if (!item.expired(now) && verification.document(item, current.itemFiles(item)).ready())
+                    announcements.add(item.id());
             }
+            for (RemoteContent.Item item : current.notices()) {
+                if (!item.expired(now) && verification.document(item, current.itemFiles(item)).ready())
+                    notices.add(item.id());
+            }
+            agreementReady = verification.document(current.agreement(), current.itemFiles(current.agreement())).ready();
         }
         @Unmodifiable Map<String, RemoteContent.Announcement> fallbacks = current == null || cache == null ? Map.of()
                 : selectAnnouncementFallbacks(current, null, now, verification);
+        return new Result(current, fallbacks, announcements, notices, !checked, pending, contentSynced,
+                cache == null ? null : cache.checkedAt(), error, exhausted, publicationBlocked, cleanupError, agreementReady);
+    }
+
+    /// Delivers ordered results from the worker after checking the selection generation again.
+    private void deliver(long token, Result result) {
         if (!worker.isShutdown() && generation == token) {
-            lastResult = new Result(current, fallbacks, ready, !checked, pending, success,
-                    cache == null ? null : cache.checkedAt(), error, failures > retrySeconds.length, publicationBlocked,
-                    cleanupError, current != null && verification.agreementReady(current));
-            listener.accept(lastResult);
+            lastResult = result;
+            listener.accept(result);
         }
     }
 
@@ -721,18 +773,25 @@ public final class ContentSync implements AutoCloseable {
 
     /// Stops requests and removes all scheduled retries for this instance.
     @Override
-    public synchronized void close() {
-        pause();
-        cancelCleanupRetry();
-        worker.shutdownNow();
-        @Nullable ContentStore.Usage registered = usage;
-        usage = null;
-        if (registered != null) {
-            try {
-                registered.close();
-            } catch (IOException e) {
-                org.jackhuang.hmcl.util.logging.Logger.LOG.warning("Cannot release instance content cache", e);
-            }
+    public void close() {
+        @Nullable ContentStore.Usage registered;
+        synchronized (this) {
+            pause();
+            cancelCleanupRetry();
+            worker.shutdownNow();
+            registered = usage;
+            usage = null;
+        }
+        if (registered != null)
+            closeUsage(registered);
+    }
+
+    /// Releases the filesystem registration without holding the synchronization state monitor.
+    private void closeUsage(ContentStore.Usage registered) {
+        try {
+            registered.close();
+        } catch (IOException e) {
+            org.jackhuang.hmcl.util.logging.Logger.LOG.warning("Cannot release instance content cache", e);
         }
     }
 }

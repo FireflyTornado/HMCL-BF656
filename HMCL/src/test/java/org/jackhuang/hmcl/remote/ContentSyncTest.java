@@ -43,6 +43,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -75,6 +76,49 @@ final class ContentSyncTest {
             return bytes.toByteArray();
         } catch (IOException e) {
             throw new AssertionError(e);
+        }
+    }
+
+    /// Hides a notice with damaged cached bytes and makes it available after the retry replaces them.
+    @Test
+    void noticeIsReadyOnlyAfterRepairingItsCachedBody() throws Exception {
+        HttpServer http = java.util.Objects.requireNonNull(server);
+        String bodyPath = "notices/maintenance.md";
+        byte @Unmodifiable [] body = "# Maintenance notice".getBytes(StandardCharsets.UTF_8);
+        JsonObject catalog = ContentFixtures.basic("main");
+        JsonObject notice = new JsonObject();
+        notice.addProperty("id", "maintenance");
+        notice.addProperty("revision", 1);
+        notice.addProperty("title", "Maintenance");
+        notice.addProperty("contentFile", bodyPath);
+        catalog.getAsJsonArray("notices").add(notice);
+        ContentFixtures.file(catalog, bodyPath, body);
+        AtomicBoolean bodyAvailable = new AtomicBoolean();
+        http.createContext("/", exchange -> {
+            if (exchange.getRequestURI().getPath().endsWith("manifest.json")) {
+                send(exchange, 200, catalog.toString().getBytes(StandardCharsets.UTF_8));
+            } else {
+                send(exchange, bodyAvailable.get() ? 200 : 503, body);
+            }
+        });
+        http.start();
+        var config = config();
+        var store = new ContentStore(directory, config.endpoint().toString());
+        var manifest = RemoteContent.parse(catalog.toString(), "main");
+        var resource = java.util.Objects.requireNonNull(manifest.files().get(bodyPath));
+        ContentFixtures.publishCache(store, new ContentStore.Cache(catalog.toString(), "", Instant.EPOCH));
+        store.install(resource, body);
+        Files.writeString(store.file(resource), "# Damaged cached notice");
+
+        var events = new LinkedBlockingQueue<ContentSync.Result>();
+        try (var sync = new ContentSync(config, store, events::add, new long[0])) {
+            sync.activate();
+            assertTrue(java.util.Objects.requireNonNull(events.poll(5, TimeUnit.SECONDS)).readyNotices().isEmpty());
+            assertTrue(awaitFinal(events, false).readyNotices().isEmpty());
+            bodyAvailable.set(true);
+            sync.retryFailed();
+            assertTrue(awaitFinal(events, true).readyNotices().contains("maintenance"));
+            assertArrayEquals(body, Files.readAllBytes(store.file(resource)));
         }
     }
 
@@ -920,6 +964,65 @@ final class ContentSyncTest {
             assertEquals(1, manifests.get());
         } finally {
             release.countDown();
+        }
+    }
+
+    /// Keeps refresh and selection changes responsive while the worker waits to prune files.
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void canRefreshOrPauseWhileCacheCleanupWaits(boolean pause) throws Exception {
+        HttpServer http = java.util.Objects.requireNonNull(server);
+        byte @Unmodifiable [] catalog = ContentFixtures.basic("main").toString().getBytes(StandardCharsets.UTF_8);
+        AtomicInteger manifestRequests = new AtomicInteger();
+        http.createContext("/", exchange -> {
+            manifestRequests.incrementAndGet();
+            send(exchange, 200, catalog);
+        });
+        http.start();
+        var config = config();
+        var store = new ContentStore(directory, config.endpoint().toString());
+        CountDownLatch checked = new CountDownLatch(1);
+        CountDownLatch releaseResult = new CountDownLatch(1);
+        AtomicReference<@Nullable Thread> worker = new AtomicReference<>();
+        var events = new LinkedBlockingQueue<ContentSync.Result>();
+        try (var controls = Executors.newSingleThreadExecutor();
+             var sync = new ContentSync(config, store, result -> {
+                 if (result.pending() && !result.cached() && worker.compareAndSet(null, Thread.currentThread())) {
+                     checked.countDown();
+                     try {
+                         if (!releaseResult.await(5, TimeUnit.SECONDS))
+                             throw new AssertionError("The test did not release the pending result");
+                     } catch (InterruptedException e) {
+                         Thread.currentThread().interrupt();
+                     }
+                 }
+                 events.add(result);
+             }, new long[0])) {
+            sync.activate();
+            assertTrue(checked.await(5, TimeUnit.SECONDS));
+            Thread syncWorker = java.util.Objects.requireNonNull(worker.get());
+            synchronized (store) {
+                releaseResult.countDown();
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (syncWorker.getState() != Thread.State.BLOCKED && System.nanoTime() < deadline)
+                    Thread.sleep(10);
+                assertEquals(Thread.State.BLOCKED, syncWorker.getState());
+                assertTrue(Arrays.stream(syncWorker.getStackTrace())
+                        .anyMatch(frame -> frame.getClassName().equals(ContentStore.class.getName())
+                                && frame.getMethodName().equals("prune")));
+                if (pause)
+                    controls.submit(sync::pause).get(2, TimeUnit.SECONDS);
+                else
+                    controls.submit(sync::refresh).get(2, TimeUnit.SECONDS);
+            }
+            if (pause)
+                sync.activate();
+            else
+                awaitFinal(events, true);
+            awaitFinal(events, true);
+            assertEquals(pause ? 1 : 2, manifestRequests.get());
+        } finally {
+            releaseResult.countDown();
         }
     }
 

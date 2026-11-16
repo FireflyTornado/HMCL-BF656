@@ -617,7 +617,7 @@ public final class RemoteContentController {
         RemoteContent.Manifest manifest = result.manifest();
         for (RemoteContent.Item item : manifest.notices()) {
             String key = manifest.key(item);
-            if (!item.active(Instant.now()) || !store.ready(manifest, item) || owner.notices.contains(key)
+            if (!item.active(Instant.now()) || !result.readyNotices().contains(item.id()) || owner.notices.contains(key)
                     || (!item.repeat().equals("each_start") && store.remembered("notices", key)))
                 continue;
             owner.notices.add(key);
@@ -632,6 +632,7 @@ public final class RemoteContentController {
     private boolean present(Session owner, RemoteContent.Manifest snapshot, RemoteContent.Item item, RemoteContent.Kind kind) {
         @Nullable ContentSync.Result result = owner.result;
         return result != null && result.manifest() != null && item.active(Instant.now())
+                && (kind != RemoteContent.Kind.NOTICES || result.readyNotices().contains(item.id()))
                 && result.manifest().items(kind).stream().anyMatch(next -> result.manifest().key(next).equals(snapshot.key(item)));
     }
 
@@ -664,10 +665,7 @@ public final class RemoteContentController {
         /// Obsolete or deselected notices close normally so the global dialog queue keeps advancing.
         @Override
         public void onDialogShown() {
-            @Nullable ContentSync.Result latest = owner.result;
-            boolean present = latest != null && latest.manifest() != null && latest.manifest().notices().stream()
-                    .anyMatch(next -> latest.manifest().key(next).equals(manifest.key(item)));
-            if (owner.quiet || current != owner || !item.active(Instant.now()) || !present || pending != null)
+            if (owner.quiet || current != owner || pending != null || !present(owner, manifest, item, RemoteContent.Kind.NOTICES))
                 Platform.runLater(() -> DialogUtils.close(this));
         }
 

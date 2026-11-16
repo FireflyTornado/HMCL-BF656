@@ -131,9 +131,10 @@ public final class ContentDocuments {
         validateDocument(manifest.files(), item, store, endpoint, agreement ? root : null, false);
     }
 
-    /// Validates an announcement's document after its exact payloads have passed digest checks.
-    static void validateAnnouncement(RemoteContent.Announcement announcement, ContentStore store, URI endpoint) throws IOException {
-        validateDocument(announcement.files(), announcement.item(), store, endpoint, null, true);
+    /// Validates cached Markdown and its images after the declared payloads have passed digest checks.
+    static void validateCachedDocument(RemoteContent.Item item, @Unmodifiable Map<String, RemoteContent.Resource> files,
+                                       ContentStore store, URI endpoint) throws IOException {
+        validateDocument(files, item, store, endpoint, null, true);
     }
 
     /// Loads an indexed Markdown image using the same format rules for verification and rendering.
