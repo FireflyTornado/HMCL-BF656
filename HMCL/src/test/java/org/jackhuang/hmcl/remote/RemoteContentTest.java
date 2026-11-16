@@ -205,12 +205,18 @@ final class RemoteContentTest {
         var second = new ContentStore(root, "source");
         JsonObject json = ContentFixtures.basic("main");
         var original = RemoteContent.parse(json.toString(), "main");
-        ContentFixtures.publishCache(first, ContentFixtures.cache(json.toString(), "", Instant.EPOCH));
+        var initialCache = ContentFixtures.cache(json.toString(), "", Instant.EPOCH);
+        ContentFixtures.publishCache(first, initialCache);
         first.accept(original);
+        assertSame(initialCache.manifest(), java.util.Objects.requireNonNull(first.cache("main")).manifest());
 
         json.getAsJsonObject("agreement").addProperty("introduction", "Updated introduction");
         ContentFixtures.publishCache(second, ContentFixtures.cache(json.toString(), "", Instant.now()));
         assertTrue(first.acceptedCurrent(original));
+        var updated = java.util.Objects.requireNonNull(first.cache("main")).manifest();
+        assertEquals("Updated introduction", updated.agreement().introduction());
+        assertSame(updated, java.util.Objects.requireNonNull(first.cache("main")).manifest());
+        assertNull(first.cache("other"));
 
         json.getAsJsonObject("agreement").addProperty("revision", 2);
         var current = RemoteContent.parse(json.toString(), "main");
@@ -517,6 +523,6 @@ final class RemoteContentTest {
         assertEquals("\"etag\"", compacted.etag());
         assertTrue(compacted.manifest().notices().isEmpty());
         assertEquals(RemoteContent.parse(compacted.body(), "main"), compacted.manifest());
-        assertFalse(Files.readString(root.resolve("server/manifest.json")).contains("expired-secret-marker"));
+        assertEquals(compacted.body(), java.util.Objects.requireNonNull(store.cache("main")).body());
     }
 }

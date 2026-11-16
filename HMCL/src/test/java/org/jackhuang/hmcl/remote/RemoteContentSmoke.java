@@ -58,6 +58,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
@@ -66,6 +67,7 @@ import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
 
 /// Isolated offscreen desktop verification using real instance selection and a real loopback content server.
 @NotNullByDefault
@@ -476,10 +478,31 @@ public final class RemoteContentSmoke {
                     false, true, false, null, null, false));
             verifyAnnouncementTitles(root, "新版公告 A", "新版公告 B");
             require(root.lookup("#bf656-announcement-loading") == null, "Hide the card once the active announcements are ready");
-            receive.invoke(controller, session, new ContentSync.Result(missing, fallbacks, Set.of("news", "second-news"),
-                    true, true, false, null, null, false));
-            require(root.lookup("#bf656-announcement-feed") != null && root.lookup("#bf656-announcement-loading") == null,
-                    "Revalidating a complete cached feed must not show the loading card");
+            ScrollPane readyFeed = (ScrollPane) java.util.Objects.requireNonNull(root.lookup("#bf656-announcement-feed"));
+            Node readyEntries = readyFeed.getContent();
+            ButtonBase toggle = (ButtonBase) java.util.Objects.requireNonNull(readyEntries.lookup("#bf656-announcement-toggle-news"));
+            Parent card = toggle.getParent().getParent();
+            Parent body = (Parent) card.getChildrenUnmodifiable().getLast();
+            Node document = body.getChildrenUnmodifiable().stream().filter(MarkdownView.class::isInstance).findFirst().orElseThrow();
+            toggle.fire();
+            readyFeed.setVvalue(0.4);
+            String linkPath = "announcements/updated-link.md";
+            var extraLink = new RemoteContent.Resource(linkPath, RemoteContent.hash("updated link"), "");
+            var updatedFiles = new HashMap<>(missing.files());
+            updatedFiles.put(linkPath, extraLink);
+            var updatedLinks = new RemoteContent.Manifest(missing.instanceKey(), missing.agreement(), missing.notices(),
+                    missing.announcements(), Map.copyOf(updatedFiles));
+            receive.invoke(controller, session, new ContentSync.Result(updatedLinks, fallbacks, Set.of("news", "second-news"), Set.of(),
+                    true, true, false, null, null, false, false, "Local maintenance", true));
+            require(root.lookup("#bf656-announcement-feed") == readyFeed && root.lookup("#bf656-announcement-loading") == null,
+                    "Maintenance and offline status updates must retain the existing announcement feed");
+            require(readyEntries.lookup("#bf656-announcement-toggle-news") == toggle && toggle.getAccessibleText().startsWith("展开")
+                            && readyFeed.getVvalue() == 0.4,
+                    "The existing collapse and scroll state must survive metadata updates");
+            var linkFiles = MarkdownView.class.getDeclaredField("linkFiles");
+            linkFiles.setAccessible(true);
+            require(extraLink.equals(((Map<?, ?>) ((Supplier<?>) linkFiles.get(document)).get()).get(linkPath)),
+                    "Retained Markdown views must find links in the updated index");
             receive.invoke(controller, session, new ContentSync.Result(futureReplacement, fallbacks, Set.of("news", "second-news"),
                     false, true, false, null, null, false));
             verifyAnnouncementTitles(root, "服务器公告", "新版公告 B");
@@ -498,6 +521,11 @@ public final class RemoteContentSmoke {
                     false, true, false, null, null, false));
             require(root.lookup("#bf656-announcement-feed") != null && root.lookup("#bf656-announcement-loading") != null,
                     "A scheduled fallback must appear once active while the replacement is still loading");
+            Node fallbackFeed = java.util.Objects.requireNonNull(root.lookup("#bf656-announcement-feed"));
+            receive.invoke(controller, session, new ContentSync.Result(waiting, Map.of("news", activeFallback), Set.of(),
+                    false, false, false, null, null, true));
+            require(root.lookup("#bf656-announcement-feed") == fallbackFeed && root.lookup("#bf656-announcement-loading") == null,
+                    "Removing the loading overlay must leave the visible fallback feed in place");
 
             receive.invoke(controller, session, new ContentSync.Result(waiting, Map.of(), Set.of(),
                     false, false, false, null, null, false));

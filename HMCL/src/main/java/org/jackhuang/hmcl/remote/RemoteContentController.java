@@ -85,6 +85,8 @@ public final class RemoteContentController {
     private final StackPane announcementSlot = new StackPane();
     /// Reused while the selected instance still has announcement work pending.
     private @Nullable HBox announcementLoading;
+    /// Current feed, retained across loading and metadata updates.
+    private @Nullable AnnouncementFeed announcementFeed;
     /// Selection changes invalidate pending launches.
     private long epoch;
     /// One captured launch awaiting network data or user consent.
@@ -684,12 +686,14 @@ public final class RemoteContentController {
     private void render() {
         @Nullable Session owner = current;
         if (owner == null || owner.store == null) {
+            announcementFeed = null;
             renderAnnouncementSlot(null, false);
             return;
         }
         @Nullable ContentSync.Result result = owner.result;
         boolean loading = result == null || (!result.contentSynced() && !result.exhausted());
         if (result == null || result.manifest() == null) {
+            announcementFeed = null;
             renderAnnouncementSlot(null, loading);
             return;
         }
@@ -697,21 +701,33 @@ public final class RemoteContentController {
         Instant now = Instant.now();
         boolean pendingAnnouncements = false;
         List<RemoteContent.Announcement> visible = new ArrayList<>();
+        Map<String, @Unmodifiable Map<String, RemoteContent.Resource>> links = new HashMap<>();
         for (RemoteContent.Item item : manifest.announcements()) {
             if (item.expired(now))
                 continue;
             boolean active = item.active(now);
             if (active && result.readyAnnouncements().contains(item.id())) {
                 visible.add(RemoteContent.Announcement.capture(manifest, item));
+                links.put(item.id(), manifest.files());
             } else {
                 pendingAnnouncements |= active;
                 @Nullable RemoteContent.Announcement cached = result.announcementFallbacks().get(item.id());
-                if (cached != null && cached.item().active(now))
-                    visible.add(cached);
+                if (cached != null && cached.item().active(now)) {
+                    visible.add(new RemoteContent.Announcement(cached.item(), cached.files()));
+                    links.put(item.id(), cached.linkIndex());
+                }
             }
         }
-        @Nullable ScrollPane feed = visible.isEmpty() ? null : createAnnouncementFeed(owner, result, List.copyOf(visible));
-        renderAnnouncementSlot(feed, loading && pendingAnnouncements);
+        @Nullable AnnouncementFeed feed = announcementFeed;
+        if (visible.isEmpty()) {
+            feed = null;
+        } else {
+            if (feed == null || feed.owner != owner || !feed.visible.equals(visible))
+                feed = new AnnouncementFeed(owner, List.copyOf(visible));
+            feed.update(result, Map.copyOf(links));
+        }
+        announcementFeed = feed;
+        renderAnnouncementSlot(feed == null ? null : feed.pane, loading && pendingAnnouncements);
     }
 
     /// Overlays a noninteractive loading card in the feed's lower-right corner.
@@ -732,22 +748,57 @@ public final class RemoteContentController {
         }
         @Nullable HBox overlay = loading ? announcementLoading : null;
         var children = announcementSlot.getChildren();
-        children.removeIf(node -> node != overlay);
-        if (feed != null)
+        children.removeIf(node -> node != feed && node != overlay);
+        if (feed != null && !children.contains(feed))
             children.addFirst(feed);
         if (overlay != null && !children.contains(overlay))
             children.add(overlay);
         Controllers.getRootPage().getMainPage().setRemoteAnnouncements(children.isEmpty() ? null : announcementSlot);
     }
 
-    /// Builds the scrollable feed, resolving each announcement from its own manifest.
-    private ScrollPane createAnnouncementFeed(Session owner, ContentSync.Result result,
-                                              @Unmodifiable List<RemoteContent.Announcement> visible) {
-        RemoteContent.Manifest manifest = Objects.requireNonNull(result.manifest());
-        VBox entries = new VBox(14);
+    /// Owns one ordered set of announcement cards and its independently updated metadata.
+    private final class AnnouncementFeed {
+        /// Session supplying the resources and owning the feed's UI state.
+        private final Session owner;
+        /// Displayed item revisions and body resources in presentation order.
+        private final @Unmodifiable List<RemoteContent.Announcement> visible;
+        /// Scrollable cards retained for updates to loading, links and cache status.
+        private final ScrollPane pane;
+        /// Card container, with the offline status appended only while needed.
+        private final VBox entries = new VBox(14);
+        /// Offline status shown beneath the cards.
+        private final Label offlineStatus = new Label();
+        /// Current hyperlink targets for each visible announcement, accessed on JavaFX.
+        private @Unmodifiable Map<String, @Unmodifiable Map<String, RemoteContent.Resource>> links = Map.of();
+
+        /// Creates cards for one session and ordered set of displayed revisions.
+        private AnnouncementFeed(Session owner, @Unmodifiable List<RemoteContent.Announcement> visible) {
+            this.owner = owner;
+            this.visible = visible;
+            pane = createAnnouncementPane(this);
+        }
+
+        /// Updates metadata without rebuilding any Markdown or card nodes.
+        private void update(ContentSync.Result result,
+                            @Unmodifiable Map<String, @Unmodifiable Map<String, RemoteContent.Resource>> links) {
+            this.links = links;
+            if (result.cached()) {
+                offlineStatus.setText("离线缓存 · 上次同步 " + time(result.checkedAt()));
+                if (!entries.getChildren().contains(offlineStatus))
+                    entries.getChildren().add(offlineStatus);
+            } else {
+                entries.getChildren().remove(offlineStatus);
+            }
+        }
+    }
+
+    /// Builds the scrollable cards for a changed announcement feed.
+    private ScrollPane createAnnouncementPane(AnnouncementFeed feed) {
+        Session owner = feed.owner;
+        VBox entries = feed.entries;
         entries.setMinWidth(0);
         entries.setPadding(new Insets(4, 10, 10, 4));
-        for (RemoteContent.Announcement announcement : visible) {
+        for (RemoteContent.Announcement announcement : feed.visible) {
             RemoteContent.Item item = announcement.item();
             String key = announcement.key();
             Label title = heading((item.pinned() ? "[置顶] " : "") + item.title());
@@ -759,10 +810,8 @@ public final class RemoteContentController {
             VBox body = new VBox(10);
             if (!item.publishedAt().isEmpty())
                 body.getChildren().add(new Label(item.publishedAt()));
-            // Ready announcements can link to other documents listed in the current manifest.
-            @Unmodifiable Map<String, RemoteContent.Resource> linkFiles =
-                    announcement.equals(result.announcementFallbacks().get(item.id())) ? announcement.linkIndex() : manifest.files();
-            body.getChildren().addAll(new MarkdownView(owner.root, announcement.files(), linkFiles, item,
+            body.getChildren().addAll(new MarkdownView(owner.root, announcement.files(),
+                    () -> feed.links.getOrDefault(item.id(), announcement.files()), item,
                     Objects.requireNonNull(owner.store), Objects.requireNonNull(owner.config).endpoint(), text -> {
                 error.setText(text);
                 error.setManaged(true);
@@ -796,17 +845,15 @@ public final class RemoteContentController {
             card.setMaxWidth(Double.MAX_VALUE);
             entries.getChildren().add(card);
         }
-        if (result.cached())
-            entries.getChildren().add(new Label("离线缓存 · 上次同步 " + time(result.checkedAt())));
-        ScrollPane feed = new ScrollPane(entries);
-        feed.setId("bf656-announcement-feed");
-        feed.setFitToWidth(true);
-        feed.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
-        feed.setMinSize(0, 0);
-        feed.setMaxSize(Double.MAX_VALUE, Double.MAX_VALUE);
-        feed.setVvalue(owner.announcementPosition);
-        feed.vvalueProperty().addListener((observable, oldValue, newValue) -> owner.announcementPosition = newValue.doubleValue());
-        return feed;
+        ScrollPane pane = new ScrollPane(entries);
+        pane.setId("bf656-announcement-feed");
+        pane.setFitToWidth(true);
+        pane.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
+        pane.setMinSize(0, 0);
+        pane.setMaxSize(Double.MAX_VALUE, Double.MAX_VALUE);
+        pane.setVvalue(owner.announcementPosition);
+        pane.vvalueProperty().addListener((observable, oldValue, newValue) -> owner.announcementPosition = newValue.doubleValue());
+        return pane;
     }
 
     /// Schedules only local publication/expiry updates, including cleanup for previously loaded inactive instances.

@@ -69,6 +69,8 @@ public final class ContentStore {
     private final Path stateDirectory;
     /// Public downloaded content beneath the instance's launcher directory.
     private final Path server;
+    /// Parsed index reusable by synchronization and receipts after checking the on-disk fingerprint.
+    private volatile @Nullable ParsedState parsedState;
 
     /// Creates storage for one instance and one server content source.
     public ContentStore(Path launcherDirectory, String source) {
@@ -135,9 +137,10 @@ public final class ContentStore {
         if (disk.version().isEmpty())
             return new CacheState(null, disk.version());
         try {
-            JsonObject json = disk.json();
+            ParsedState parsed = parseState(disk, instanceKey);
+            JsonObject json = parsed.json();
             String body = json.get("body").getAsString();
-            RemoteContent.Manifest manifest = RemoteContent.parse(body, instanceKey);
+            RemoteContent.Manifest manifest = parsed.manifest();
             @Nullable JsonElement index = json.get("announcementFallbacks");
             @Unmodifiable Map<String, RemoteContent.Announcement> fallbacks = readAnnouncementFallbacks(index, manifest);
             boolean rewrite = index != null && (!index.isJsonObject() || index.getAsJsonObject().size() != fallbacks.size());
@@ -156,6 +159,21 @@ public final class ContentStore {
         private JsonObject json() {
             return JsonParser.parseString(new String(bytes, StandardCharsets.UTF_8)).getAsJsonObject();
         }
+    }
+
+    /// Private, read-only view of a validated index and its exact disk fingerprint.
+    private record ParsedState(String version, JsonObject json, RemoteContent.Manifest manifest) { }
+
+    /// Shares the parsed manifest without skipping the caller's fresh disk fingerprint check.
+    private ParsedState parseState(DiskState disk, String instanceKey) throws IOException {
+        @Nullable ParsedState parsed = parsedState;
+        if (parsed != null && parsed.version().equals(disk.version()) && parsed.manifest().instanceKey().equals(instanceKey))
+            return parsed;
+        JsonObject json = disk.json();
+        var manifest = RemoteContent.parse(json.get("body").getAsString(), instanceKey);
+        parsed = new ParsedState(disk.version(), json, manifest);
+        parsedState = parsed;
+        return parsed;
     }
 
     /// Fingerprints the whole state, including fallback-only and compaction changes.
@@ -283,18 +301,21 @@ public final class ContentStore {
         synchronized (localLock) {
             try (var channel = FileChannel.open(client.resolve("content.lock"), StandardOpenOption.CREATE,
                     StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
-                @Nullable FileLock lock;
-                try {
-                    lock = channel.tryLock();
-                } catch (OverlappingFileLockException e) {
-                    throw new CacheBusyException();
-                }
-                if (lock == null)
-                    throw new CacheBusyException();
-                try (lock) {
+                try (@Nullable FileLock lock = tryLock(channel)) {
+                    if (lock == null)
+                        throw new CacheBusyException();
                     return operation.run();
                 }
             }
+        }
+    }
+
+    /// Treats both OS contention and overlapping JVM locks as unavailable, propagating I/O failures.
+    private static @Nullable FileLock tryLock(FileChannel channel) throws IOException {
+        try {
+            return channel.tryLock();
+        } catch (OverlappingFileLockException e) {
+            return null;
         }
     }
 
@@ -328,17 +349,13 @@ public final class ContentStore {
         }
         json.add("announcementFallbacks", references);
         byte @Unmodifiable [] bytes = json.toString().getBytes(StandardCharsets.UTF_8);
+        String version = RemoteContent.digest(bytes);
         write(stateDirectory.resolve("sync.json"), bytes);
-        try {
-            ensureServer();
-            writeIfChanged(server.resolve("manifest.json"), cache.body().getBytes(StandardCharsets.UTF_8));
-        } catch (IOException e) {
-            org.jackhuang.hmcl.util.logging.Logger.LOG.warning("Cannot update the public content cache", e);
-        }
-        return new SavedCache(RemoteContent.digest(bytes), Set.copyOf(keep));
+        parsedState = new ParsedState(version, json, cache.manifest());
+        return new SavedCache(version, Set.copyOf(keep));
     }
 
-    /// Avoids replacing an identical snapshot or manifest mirror.
+    /// Avoids replacing an identical fallback snapshot.
     private static void writeIfChanged(Path path, byte @Unmodifiable [] bytes) throws IOException {
         try {
             if (Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) && Files.size(path) == bytes.length) {
@@ -422,11 +439,9 @@ public final class ContentStore {
                 if (LOCAL_USERS.contains(path))
                     return true;
                 try (var channel = FileChannel.open(path, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
-                     @Nullable FileLock lock = channel.tryLock()) {
+                     @Nullable FileLock lock = tryLock(channel)) {
                     if (lock == null)
                         return true;
-                } catch (OverlappingFileLockException e) {
-                    return true;
                 }
                 Files.deleteIfExists(path);
             }
@@ -540,7 +555,9 @@ public final class ContentStore {
     private @Unmodifiable Set<String> publishedFallbacks(DiskState state) {
         if (state.version().isEmpty())
             return Set.of();
-        @Nullable JsonElement index = state.json().get("announcementFallbacks");
+        @Nullable ParsedState parsed = parsedState;
+        JsonObject json = parsed != null && parsed.version().equals(state.version()) ? parsed.json() : state.json();
+        @Nullable JsonElement index = json.get("announcementFallbacks");
         Set<String> keep = new HashSet<>();
         if (index != null && index.isJsonObject()) {
             for (JsonElement value : index.getAsJsonObject().asMap().values()) {
@@ -690,8 +707,7 @@ public final class ContentStore {
             throw new AgreementChangedException();
         RemoteContent.Manifest current;
         try {
-            String body = disk.json().get("body").getAsString();
-            current = RemoteContent.parse(body, manifest.instanceKey());
+            current = parseState(disk, manifest.instanceKey()).manifest();
         } catch (RuntimeException e) {
             throw new IOException("无法读取当前用户协议", e);
         }

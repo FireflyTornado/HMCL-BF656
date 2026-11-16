@@ -40,6 +40,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 
 /// Shared Markdown parsing and deterministic link-to-index resolution for rendering and prelaunch checks.
 @NotNullByDefault
@@ -128,13 +129,57 @@ public final class ContentDocuments {
                     throw new IOException("协议缓存文件校验失败，暂不可用：" + path);
             }
         }
-        validateDocument(manifest.files(), item, store, endpoint, agreement ? root : null, false);
+        validateDocument(manifest.files(), item, store, endpoint, agreement ? root : null, null);
     }
 
     /// Validates cached Markdown and its images after the declared payloads have passed digest checks.
     static void validateCachedDocument(RemoteContent.Item item, @Unmodifiable Map<String, RemoteContent.Resource> files,
-                                       ContentStore store, URI endpoint) throws IOException {
-        validateDocument(files, item, store, endpoint, null, true);
+                                       ContentStore store, URI endpoint, ImageChecks images) throws IOException {
+        validateDocument(files, item, store, endpoint, null, images);
+    }
+
+    /// Decodes one verified cached image without retaining its pixels.
+    @FunctionalInterface
+    interface ImageDecoder {
+        /// Rejects an image that cannot be decoded.
+        void decode(RemoteContent.Resource resource) throws IOException;
+    }
+
+    /// Remembers image decode outcomes by content and extension for one background attempt.
+    static final class ImageChecks {
+        /// Decoder shared with the view.
+        private final ImageDecoder decoder;
+        /// Successful decodes have an empty failure.
+        private final Map<String, Optional<IOException>> results = new HashMap<>();
+
+        /// Uses the given decoder for cache misses.
+        ImageChecks(ImageDecoder decoder) {
+            this.decoder = decoder;
+        }
+
+        /// Reuses the first decode outcome for these bytes and this image format.
+        void verify(RemoteContent.Resource resource) throws IOException {
+            Optional<IOException> failure = results.computeIfAbsent(resource.cacheName(), ignored -> {
+                try {
+                    decoder.decode(resource);
+                    return Optional.empty();
+                } catch (IOException e) {
+                    return Optional.of(e);
+                }
+            });
+            if (failure.isPresent())
+                throw failure.get();
+        }
+
+        /// Rechecks the file after reinstalling its bytes.
+        void installed(RemoteContent.Resource resource) {
+            results.remove(resource.cacheName());
+        }
+
+        /// Discards results obtained before a competing publication.
+        void clear() {
+            results.clear();
+        }
     }
 
     /// Loads an indexed Markdown image using the same format rules for verification and rendering.
@@ -184,7 +229,7 @@ public final class ContentDocuments {
     /// Validates a revision's Markdown images and any required agreement links.
     private static void validateDocument(@Unmodifiable Map<String, RemoteContent.Resource> files, RemoteContent.Item item,
                                          ContentStore store, URI endpoint, @Nullable Path agreementRoot,
-                                         boolean decodeImages) throws IOException {
+                                         @Nullable ImageChecks images) throws IOException {
         if (item.contentFile().isEmpty()) {
             if (agreementRoot != null)
                 ContentLinks.validateAgreement(agreementRoot, item);
@@ -200,8 +245,8 @@ public final class ContentDocuments {
                         @Nullable RemoteContent.Resource resource = resource(files, item, endpoint, image.getDestination());
                         if (resource == null || !item.files().contains(resource.path()) || !Files.isRegularFile(store.file(resource)))
                             throw new IOException("图片未列入 resources 或尚未下载：" + image.getDestination());
-                        if (decodeImages)
-                            loadImage(resource, store);
+                        if (images != null)
+                            images.verify(resource);
                     } catch (IOException e) {
                         throw new DocumentException(e);
                     }

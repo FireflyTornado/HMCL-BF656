@@ -42,7 +42,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
-import java.nio.file.attribute.FileTime;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.Map;
@@ -184,7 +183,7 @@ final class ContentSyncTest {
                 assertEquals("\"new\"", retriedValidator.get());
                 assertEquals(3, requests.get());
                 assertEquals(newer.toString(), java.util.Objects.requireNonNull(storeA.cache("main")).body());
-                assertEquals(newer.toString(), Files.readString(directory.resolve("server/manifest.json")));
+                assertFalse(Files.exists(directory.resolve("server/manifest.json")));
             } finally {
                 releaseOld.countDown();
                 http.stop(0);
@@ -340,6 +339,9 @@ final class ContentSyncTest {
         var events = new LinkedBlockingQueue<ContentSync.Result>();
         var config = config();
         var store = new ContentStore(directory.resolve(".launcher"), config.endpoint().toString());
+        Path serverManifest = directory.resolve(".launcher/server/manifest.json");
+        Files.createDirectories(serverManifest.getParent());
+        Files.writeString(serverManifest, "managed by the publishing tool");
         try (var sync = new ContentSync(config, store, events::add, new long[]{0, 0, 0})) {
             sync.activate();
             var first = java.util.Objects.requireNonNull(awaitFinal(events, true).manifest());
@@ -353,16 +355,13 @@ final class ContentSyncTest {
             assertEquals(1, bodies.get());
             assertEquals(1, images.get());
         }
-        Path mirror = directory.resolve(".launcher/server/manifest.json");
-        Files.setLastModifiedTime(mirror, FileTime.from(Instant.EPOCH));
-        FileTime unchanged = Files.getLastModifiedTime(mirror);
         try (var nextProcess = new ContentSync(config, store, events::add, new long[]{0, 0, 0})) {
             nextProcess.activate();
             awaitFinal(events, true);
             assertEquals(2, manifests.get());
             assertEquals(1, bodies.get());
             assertEquals(1, images.get());
-            assertEquals(unchanged, Files.getLastModifiedTime(mirror));
+            assertEquals("managed by the publishing tool", Files.readString(serverManifest));
             Files.delete(store.file(RemoteContent.parse(catalog, "main").files().get(ContentFixtures.IMAGE)));
             nextProcess.refresh();
             awaitFinal(events, true);
@@ -370,6 +369,43 @@ final class ContentSyncTest {
             assertEquals(1, bodies.get());
             assertEquals(2, images.get());
         }
+    }
+
+    /// Shares one image decode across documents and resets the outcome after reinstalling or changing baselines.
+    @Test
+    void sharesImageChecksAcrossDocuments() throws Exception {
+        JsonObject catalog = ContentFixtures.markdown("main", BODY, IMAGE);
+        JsonObject notice = catalog.getAsJsonArray("announcements").get(0).getAsJsonObject().deepCopy();
+        notice.addProperty("id", "notice");
+        catalog.getAsJsonArray("notices").add(notice);
+        var manifest = RemoteContent.parse(catalog.toString(), "main");
+        var store = new ContentStore(directory, "source");
+        var endpoint = config().endpoint();
+        var image = java.util.Objects.requireNonNull(manifest.files().get(ContentFixtures.IMAGE));
+        store.install(java.util.Objects.requireNonNull(manifest.files().get(ContentFixtures.BODY)), BODY.getBytes(StandardCharsets.UTF_8));
+        store.install(image, IMAGE);
+        AtomicInteger decodes = new AtomicInteger();
+        AtomicBoolean broken = new AtomicBoolean();
+        var checks = new ContentDocuments.ImageChecks(resource -> {
+            decodes.incrementAndGet();
+            if (broken.get())
+                throw new IOException("broken image");
+            ContentDocuments.loadImage(resource, store);
+        });
+        var announcement = manifest.announcements().getFirst();
+        var notification = manifest.notices().getFirst();
+        ContentDocuments.validateCachedDocument(announcement, manifest.itemFiles(announcement), store, endpoint, checks);
+        ContentDocuments.validateCachedDocument(notification, manifest.itemFiles(notification), store, endpoint, checks);
+        assertEquals(1, decodes.get());
+        checks.clear();
+        broken.set(true);
+        assertThrows(IOException.class, () -> checks.verify(image));
+        assertThrows(IOException.class, () -> checks.verify(image));
+        assertEquals(2, decodes.get());
+        broken.set(false);
+        checks.installed(image);
+        checks.verify(image);
+        assertEquals(3, decodes.get());
     }
 
     /// Keeps a good revision across restart when the new file is corrupt and its download is interrupted.

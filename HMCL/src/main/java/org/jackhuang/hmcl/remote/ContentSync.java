@@ -336,6 +336,16 @@ public final class ContentSync implements AutoCloseable {
         checked = false;
     }
 
+    /// Discards results derived from a superseded index and adopts the authoritative cache.
+    private void reloadAfterCacheChange(Verification verification) throws IOException {
+        cancelCleanupRetry();
+        cleanupError = null;
+        lastResult = null;
+        clearCacheState();
+        verification.clear();
+        reloadCache();
+    }
+
     /// Executes one attempt, continuing past individual file failures so unrelated items can still become ready.
     private void run(long token) {
         Verification verification = new Verification();
@@ -442,9 +452,7 @@ public final class ContentSync implements AutoCloseable {
             try {
                 cacheVersion = store.publishCache(replacement, cacheVersion, java.util.Objects.requireNonNull(usage));
             } catch (ContentStore.CacheChangedException e) {
-                clearCacheState();
-                reloadCache();
-                verification.clear();
+                reloadAfterCacheChange(verification);
                 if (attempt > 0)
                     throw e;
                 emitProgress(token, verification);
@@ -482,6 +490,9 @@ public final class ContentSync implements AutoCloseable {
 
     /// Shares file and document checks across publication, presentation and cleanup within one background attempt.
     private final class Verification {
+        /// Decode results shared by all documents in this attempt.
+        private final ContentDocuments.ImageChecks images = new ContentDocuments.ImageChecks(
+                resource -> ContentDocuments.loadImage(resource, store));
         /// Digest checks by content-addressed filename, updated when a download is installed.
         private final Map<String, Boolean> resources = new HashMap<>();
         /// Document checks by exact revision and resource descriptors, after every payload is present.
@@ -501,6 +512,7 @@ public final class ContentSync implements AutoCloseable {
         /// Records a payload whose digest the store checked during installation.
         private void installed(RemoteContent.Resource resource) {
             resources.put(resource.cacheName(), true);
+            images.installed(resource);
         }
 
         /// Checks an announcement using its retained descriptors, which may differ from the current manifest.
@@ -514,7 +526,7 @@ public final class ContentSync implements AutoCloseable {
                 return DocumentCheck.MISSING;
             return documents.computeIfAbsent(new DocumentRevision(item, files), revision -> {
                 try {
-                    ContentDocuments.validateCachedDocument(revision.item(), revision.files(), store, config.endpoint());
+                    ContentDocuments.validateCachedDocument(revision.item(), revision.files(), store, config.endpoint(), images);
                     return DocumentCheck.READY;
                 } catch (IOException e) {
                     return new DocumentCheck(false, e.getMessage() == null ? e.toString() : e.getMessage());
@@ -526,6 +538,7 @@ public final class ContentSync implements AutoCloseable {
         private void clear() {
             resources.clear();
             documents.clear();
+            images.clear();
         }
     }
 
@@ -638,13 +651,8 @@ public final class ContentSync implements AutoCloseable {
             cleanupError = null;
             cancelCleanupRetry();
         } catch (ContentStore.CacheChangedException e) {
-            cancelCleanupRetry();
-            cleanupError = null;
-            lastResult = null;
-            clearCacheState();
-            verification.clear();
             try {
-                reloadCache();
+                reloadAfterCacheChange(verification);
             } catch (IOException failure) {
                 org.jackhuang.hmcl.util.logging.Logger.LOG.warning("Cannot reload the instance content cache", failure);
             }

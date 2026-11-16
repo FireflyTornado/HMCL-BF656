@@ -53,6 +53,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 /// Native JavaFX Markdown view with themed typography, tables, links and cached responsive images.
 @NotNullByDefault
@@ -61,8 +62,8 @@ public final class MarkdownView extends VBox {
     private final Path root;
     /// Indexed resources for the exact document revision being rendered.
     private final @Unmodifiable Map<String, RemoteContent.Resource> files;
-    /// Index used to resolve links to other documents.
-    private final @Unmodifiable Map<String, RemoteContent.Resource> linkFiles;
+    /// Supplies the latest index when a link is clicked on the JavaFX thread.
+    private final Supplier<@Unmodifiable Map<String, RemoteContent.Resource>> linkFiles;
     /// Item whose body is displayed.
     private final RemoteContent.Item item;
     /// Content-addressed local downloads.
@@ -77,12 +78,12 @@ public final class MarkdownView extends VBox {
     /// Builds a complete document; parsing and rendering never execute embedded HTML.
     public MarkdownView(Path root, RemoteContent.Manifest manifest, RemoteContent.Item item,
                         ContentStore store, URI endpoint, Consumer<String> error) {
-        this(root, manifest.files(), manifest.files(), item, store, endpoint, error);
+        this(root, manifest.files(), manifest::files, item, store, endpoint, error);
     }
 
     /// Builds a document with its own body and image index and the available hyperlink targets.
     MarkdownView(Path root, @Unmodifiable Map<String, RemoteContent.Resource> files,
-                 @Unmodifiable Map<String, RemoteContent.Resource> linkFiles, RemoteContent.Item item,
+                 Supplier<@Unmodifiable Map<String, RemoteContent.Resource>> linkFiles, RemoteContent.Item item,
                  ContentStore store, URI endpoint, Consumer<String> error) {
         super(10);
         this.root = root;
@@ -300,10 +301,11 @@ public final class MarkdownView extends VBox {
         link.setWrapText(true);
         link.setStyle("-fx-font-size: 14px; -fx-padding: 0;");
         link.setOnAction(event -> {
+            @Unmodifiable Map<String, RemoteContent.Resource> targets = linkFiles.get();
             link.setDisable(true);
             CompletableFuture.runAsync(() -> {
                 try {
-                    openLinkInBackground(destination);
+                    openLinkInBackground(destination, targets);
                 } catch (IOException e) {
                     throw new CompletionException(e);
                 }
@@ -319,8 +321,9 @@ public final class MarkdownView extends VBox {
     }
 
     /// Verifies the link target and opens it without blocking the JavaFX thread.
-    private void openLinkInBackground(String destination) throws IOException {
-        URI target = ContentDocuments.link(root, linkFiles, item, store, endpoint, destination);
+    private void openLinkInBackground(String destination, @Unmodifiable Map<String, RemoteContent.Resource> targets)
+            throws IOException {
+        URI target = ContentDocuments.link(root, targets, item, store, endpoint, destination);
         if (!"file".equalsIgnoreCase(target.getScheme())) {
             FXUtils.openLink(target.toASCIIString());
             return;
