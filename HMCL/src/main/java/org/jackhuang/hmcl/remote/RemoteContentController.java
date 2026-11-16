@@ -20,6 +20,7 @@ package org.jackhuang.hmcl.remote;
 import com.jfoenix.controls.JFXButton;
 import com.jfoenix.controls.JFXCheckBox;
 import com.jfoenix.controls.JFXDialogLayout;
+import com.jfoenix.controls.JFXSpinner;
 import javafx.animation.PauseTransition;
 import javafx.application.Platform;
 import javafx.beans.InvalidationListener;
@@ -34,8 +35,9 @@ import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyEvent;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
-import javafx.scene.layout.VBox;
 import javafx.scene.layout.Region;
+import javafx.scene.layout.StackPane;
+import javafx.scene.layout.VBox;
 import javafx.util.Duration;
 import org.jackhuang.hmcl.game.HMCLGameInstance;
 import org.jackhuang.hmcl.setting.GameDirectoryManager;
@@ -61,7 +63,9 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
+import java.util.stream.Stream;
 
+import static org.jackhuang.hmcl.util.i18n.I18n.i18n;
 import static org.jackhuang.hmcl.util.logging.Logger.LOG;
 
 /// Projects per-instance content onto the homepage and confirms agreements only for captured launch requests.
@@ -75,6 +79,8 @@ public final class RemoteContentController {
     private final Set<InformationPane> informationPanes = new HashSet<>();
     /// Session currently projected onto the homepage.
     private @Nullable Session current;
+    /// Reused while the selected instance has no announcement ready to display.
+    private @Nullable StackPane announcementLoading;
     /// Selection changes invalidate pending launches.
     private long epoch;
     /// One captured launch awaiting network data or user consent.
@@ -610,22 +616,65 @@ public final class RemoteContentController {
         }
     }
 
-    /// Renders all ready active cards; legacy dismissal receipts no longer hide announcements.
+    /// Projects the selected instance's ready announcements or its current loading state.
     private void render() {
         @Nullable Session owner = current;
-        @Nullable ContentSync.Result result = owner == null ? null : owner.result;
-        @Nullable ContentStore store = owner == null ? null : owner.store;
-        if (owner == null || result == null || result.manifest() == null || store == null) {
-            Controllers.getRootPage().getMainPage().setRemoteAnnouncements(null);
+        if (owner == null || owner.store == null) {
+            renderAnnouncementPlaceholder(false);
+            return;
+        }
+        ContentStore store = owner.store;
+        @Nullable ContentSync.Result result = owner.result;
+        boolean loading = result == null || (!result.success() && !result.exhausted());
+        if (result == null || result.manifest() == null) {
+            renderAnnouncementPlaceholder(loading);
             return;
         }
         RemoteContent.Manifest manifest = result.manifest();
-        @Unmodifiable List<RemoteContent.Item> visible = manifest.announcements().stream()
-                .filter(item -> item.active(Instant.now()) && store.ready(manifest, item)).toList();
-        if (visible.isEmpty()) {
-            Controllers.getRootPage().getMainPage().setRemoteAnnouncements(null);
+        Instant now = Instant.now();
+        @Unmodifiable List<RemoteContent.Item> active = manifest.announcements().stream()
+                .filter(item -> item.active(now)).toList();
+        @Unmodifiable List<RemoteContent.Item> visible = active.stream()
+                .filter(item -> store.ready(manifest, item)).toList();
+        if (!visible.isEmpty()) {
+            renderAnnouncementFeed(owner, result, manifest, visible);
             return;
         }
+        @Nullable RemoteContent.Manifest previous = result.previousManifest();
+        if (previous != null && !active.isEmpty()) {
+            // A replacement may still be downloading. Keep only ready revisions that the server still lists as active.
+            @Unmodifiable List<RemoteContent.Item> cached = previous.announcements().stream()
+                    .filter(item -> item.active(now) && active.stream().anyMatch(next -> next.id().equals(item.id()))
+                            && store.ready(previous, item)).toList();
+            if (!cached.isEmpty()) {
+                renderAnnouncementFeed(owner, result, previous, cached);
+                return;
+            }
+        }
+        renderAnnouncementPlaceholder(loading && (result.cached() || !active.isEmpty()));
+    }
+
+    /// Centers the compact status card within the mouse-transparent announcement slot.
+    private void renderAnnouncementPlaceholder(boolean loading) {
+        if (loading && announcementLoading == null) {
+            JFXSpinner spinner = new JFXSpinner();
+            spinner.setRadius(8);
+            spinner.setFocusTraversable(false);
+            HBox card = new HBox(8, spinner, new Label(i18n("message.loading")));
+            card.setId("bf656-announcement-loading");
+            card.getStyleClass().add("card");
+            card.setAlignment(Pos.CENTER_LEFT);
+            card.setMaxSize(Region.USE_PREF_SIZE, Region.USE_PREF_SIZE);
+            StackPane placeholder = new StackPane(card);
+            placeholder.setMouseTransparent(true);
+            announcementLoading = placeholder;
+        }
+        Controllers.getRootPage().getMainPage().setRemoteAnnouncements(loading ? announcementLoading : null);
+    }
+
+    /// Builds the existing scrollable feed from the manifest that owns the displayed files.
+    private void renderAnnouncementFeed(Session owner, ContentSync.Result result, RemoteContent.Manifest manifest,
+                                        @Unmodifiable List<RemoteContent.Item> visible) {
         VBox entries = new VBox(14);
         entries.setMinWidth(0);
         entries.setPadding(new Insets(4, 10, 10, 4));
@@ -673,7 +722,7 @@ public final class RemoteContentController {
             card.setMaxWidth(Double.MAX_VALUE);
             entries.getChildren().add(card);
         }
-        if (result.cached())
+        if (result.cached() && manifest == result.manifest())
             entries.getChildren().add(new Label("离线缓存 · 上次同步 " + time(result.checkedAt())));
         ScrollPane feed = new ScrollPane(entries);
         feed.setId("bf656-announcement-feed");
@@ -697,7 +746,10 @@ public final class RemoteContentController {
             if (result == null || result.manifest() == null)
                 continue;
             for (RemoteContent.Kind kind : RemoteContent.Kind.values()) {
-                for (RemoteContent.Item item : result.manifest().items(kind)) {
+                @Unmodifiable List<RemoteContent.Item> items = result.manifest().items(kind);
+                if (owner == current && kind == RemoteContent.Kind.ANNOUNCEMENTS && result.previousManifest() != null)
+                    items = Stream.concat(items.stream(), result.previousManifest().announcements().stream()).toList();
+                for (RemoteContent.Item item : items) {
                     @Nullable Instant start = item.startsAt();
                     @Nullable Instant expiry = item.expiresAt();
                     if (start != null && start.isAfter(now) && (next == null || start.isBefore(next)))

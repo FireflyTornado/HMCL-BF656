@@ -17,6 +17,7 @@
  */
 package org.jackhuang.hmcl.remote;
 
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.sun.net.httpserver.HttpServer;
 import javafx.application.Platform;
@@ -25,9 +26,11 @@ import javafx.scene.Parent;
 import javafx.scene.Scene;
 import javafx.scene.control.ButtonBase;
 import javafx.scene.control.CheckBox;
+import javafx.scene.control.Label;
 import javafx.scene.control.ScrollPane;
 import javafx.scene.image.ImageView;
 import javafx.scene.layout.Region;
+import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
 import javafx.event.ActionEvent;
 import org.jackhuang.hmcl.Launcher;
@@ -42,6 +45,7 @@ import org.jackhuang.hmcl.ui.Controllers;
 import org.jackhuang.hmcl.ui.DialogUtils;
 import org.jackhuang.hmcl.ui.construct.AdvancedListItem;
 import org.jackhuang.hmcl.ui.decorator.Decorator;
+import org.jackhuang.hmcl.util.i18n.SupportedLocale;
 import org.jetbrains.annotations.NotNullByDefault;
 import org.jetbrains.annotations.Nullable;
 import org.jetbrains.annotations.Unmodifiable;
@@ -55,6 +59,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -86,6 +91,7 @@ public final class RemoteContentSmoke {
         System.setProperty("hmcl.home", state.resolve("user").toString());
         System.setProperty("hmcl.dir", state.resolve("local").toString());
         SettingsManager.init();
+        SettingsManager.settings().languageProperty().set(SupportedLocale.getLocaleByName("zh-Hans"));
         SettingsManager.settings().animationDisabledProperty().set(true);
         Platform.startup(() -> Platform.setImplicitExit(false));
         var runtime = Launcher.class.getDeclaredMethod("initializeSettingsRuntime");
@@ -100,17 +106,23 @@ public final class RemoteContentSmoke {
         JsonObject b = catalog("b", markdown.replace("正式服玩家", "测试服玩家"), image);
         AtomicInteger aChecks = new AtomicInteger();
         AtomicInteger bChecks = new AtomicInteger();
+        var manifestGate = new CompletableFuture<Boolean>();
+        var imageGate = new CompletableFuture<Boolean>();
         HttpServer http = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         http.createContext("/", exchange -> {
             String path = exchange.getRequestURI().getPath();
             byte[] bytes;
             if (path.endsWith("manifest.json")) {
                 boolean first = path.contains("/a/");
+                if (first)
+                    manifestGate.join();
                 (first ? aChecks : bChecks).incrementAndGet();
                 bytes = (first ? a : b).toString().getBytes(StandardCharsets.UTF_8);
             } else if (path.endsWith("news.md")) {
                 bytes = (path.contains("/a/") ? markdown : markdown.replace("正式服玩家", "测试服玩家")).getBytes(StandardCharsets.UTF_8);
             } else {
+                if (path.contains("/a/"))
+                    imageGate.join();
                 bytes = image;
             }
             exchange.sendResponseHeaders(200, bytes.length);
@@ -138,20 +150,39 @@ public final class RemoteContentSmoke {
         Scene scene = onFx(() -> {
             Scene value = new Scene(decorator.getRoot(), 1000, 650);
             StyleSheets.init(value);
-            repo.setSelectedInstance(gameA);
+            repo.setSelectedInstance(null);
             RemoteContentController.initialize();
+            require(value.getRoot().lookup("#bf656-announcement-loading") == null,
+                    "The homepage must stay clear until a content-enabled instance is selected");
+            repo.setSelectedInstance(gameA);
             value.getRoot().applyCss();
             value.getRoot().layout();
             return value;
         });
+        onFx(() -> {
+            verifyLoadingCard(scene, output);
+            return true;
+        });
+        manifestGate.complete(true);
+        await(() -> currentRevision() == 1);
+        onFx(() -> {
+            require(decorator.getRoot().lookup("#bf656-announcement-loading") != null,
+                    "The placeholder must remain while announcement files are missing");
+            return true;
+        });
+        imageGate.complete(true);
         await(() -> hasButton(decorator.getRoot(), "我已知晓"));
+        await(() -> decorator.getRoot().lookup("#bf656-announcement-feed") != null);
         onFx(() -> { snapshot(scene, output.resolve("instance-debug.png")); return true; });
         await(() -> imageReady(decorator.getRoot()));
         onFx(() -> {
             require(decorator.getRoot().lookup("#bf656-instance-agreement") == null, "Selecting must not present a protocol");
             snapshot(scene, output.resolve("instance-notice.png"));
             findButton(decorator.getRoot(), "我已知晓").fire();
+            require(decorator.getRoot().lookup("#bf656-announcement-loading") == null,
+                    "A ready announcement feed must replace the placeholder");
             verifyAnnouncements(scene, output);
+            verifyAnnouncementStates(scene, catalog("a", "# Replacement awaiting a download", image));
             return true;
         });
         AtomicInteger launchedA = new AtomicInteger();
@@ -322,6 +353,64 @@ public final class RemoteContentSmoke {
             return snapshot == null || snapshot.manifest() == null ? 0 : snapshot.manifest().agreement().revision();
         } catch (ReflectiveOperationException e) {
             throw new AssertionError(e);
+        }
+    }
+
+    /// Verifies the first render of the noninteractive placeholder with the manifest request held open.
+    private static void verifyLoadingCard(Scene scene, Path output) throws Exception {
+        @Nullable Node card = scene.getRoot().lookup("#bf656-announcement-loading");
+        require(card != null && card.isVisible(), "The announcement placeholder must be visible");
+        Node loading = java.util.Objects.requireNonNull(card);
+        StackPane slot = (StackPane) java.util.Objects.requireNonNull(loading.getParent());
+        require(slot.isMouseTransparent(), "The announcement placeholder must allow pointer input through its entire slot");
+        Node spinner = java.util.Objects.requireNonNull(loading.lookup(".jfx-spinner"));
+        Label label = (Label) java.util.Objects.requireNonNull(loading.lookup(".label"));
+        require(!spinner.isFocusTraversable() && "加载中...".equals(label.getText()),
+                "The loading card must use the localized text and a nonfocusable spinner");
+        snapshot(scene, output.resolve("announcement-loading.png"));
+        var home = Controllers.getRootPage().getMainPage();
+        var insets = home.getInsets();
+        var margin = java.util.Objects.requireNonNull(StackPane.getMargin(slot));
+        require(Math.abs(slot.getWidth() - (home.getWidth() - insets.getLeft() - insets.getRight())) <= 1
+                        && Math.abs(slot.getHeight() - (home.getHeight() - insets.getTop() - insets.getBottom()
+                        - margin.getBottom())) <= 1,
+                "The placeholder slot must fill the content area above the launch controls");
+        var bounds = loading.getLayoutBounds();
+        require(Math.abs(loading.getLayoutX() + bounds.getWidth() / 2 - slot.getWidth() / 2) <= 1
+                        && Math.abs(loading.getLayoutY() + bounds.getHeight() / 2 - slot.getHeight() / 2) <= 1,
+                "The loading card must be centered horizontally and vertically in the announcement slot");
+    }
+
+    /// Replays replacement, empty and exhausted results for the selected instance with its real cached files.
+    private static void verifyAnnouncementStates(Scene scene, JsonObject replacement) throws Exception {
+        var manager = RemoteContentController.class.getDeclaredField("instance");
+        manager.setAccessible(true);
+        Object controller = manager.get(null);
+        var current = RemoteContentController.class.getDeclaredField("current");
+        current.setAccessible(true);
+        Object session = current.get(controller);
+        var result = session.getClass().getDeclaredField("result");
+        result.setAccessible(true);
+        ContentSync.Result ready = (ContentSync.Result) result.get(session);
+        RemoteContent.Manifest missing = RemoteContent.parse(replacement.toString(), "a");
+        replacement.add("announcements", new JsonArray());
+        RemoteContent.Manifest empty = RemoteContent.parse(replacement.toString(), "a");
+        var receive = RemoteContentController.class.getDeclaredMethod("receive", session.getClass(), ContentSync.Result.class);
+        receive.setAccessible(true);
+        Parent root = scene.getRoot();
+        try {
+            receive.invoke(controller, session, new ContentSync.Result(missing, ready.manifest(), false, true, false, null, null, false));
+            require(root.lookup("#bf656-announcement-feed") != null && root.lookup("#bf656-announcement-loading") == null,
+                    "Ready cached files must remain visible while their replacement downloads");
+            receive.invoke(controller, session, new ContentSync.Result(missing, null, false, false, false, null, null, false));
+            require(root.lookup("#bf656-announcement-loading") != null, "A scheduled retry must keep the loading card");
+            receive.invoke(controller, session, new ContentSync.Result(missing, null, false, false, false, null, null, true));
+            require(root.lookup("#bf656-announcement-loading") == null, "Exhausting retries must remove the loading card");
+            receive.invoke(controller, session, new ContentSync.Result(empty, ready.manifest(), false, true, false, null, null, false));
+            require(root.lookup("#bf656-announcement-feed") == null && root.lookup("#bf656-announcement-loading") == null,
+                    "A fresh empty manifest must remove withdrawn announcements and hide the loading card");
+        } finally {
+            receive.invoke(controller, session, ready);
         }
     }
 
