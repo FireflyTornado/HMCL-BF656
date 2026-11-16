@@ -701,7 +701,7 @@ public final class RemoteContentController {
                 body.getChildren().add(new Label(item.publishedAt()));
             // Ready announcements can link to other documents listed in the current manifest.
             @Unmodifiable Map<String, RemoteContent.Resource> linkFiles =
-                    announcement.equals(result.announcementFallbacks().get(item.id())) ? announcement.files() : manifest.files();
+                    announcement.equals(result.announcementFallbacks().get(item.id())) ? announcement.linkIndex() : manifest.files();
             body.getChildren().addAll(new MarkdownView(owner.root, announcement.files(), linkFiles, item,
                     Objects.requireNonNull(owner.store), Objects.requireNonNull(owner.config).endpoint(), text -> {
                 error.setText(text);

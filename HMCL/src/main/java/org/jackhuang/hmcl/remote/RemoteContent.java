@@ -76,6 +76,11 @@ public final class RemoteContent {
                        @Unmodifiable List<String> resources, String publishedAt,
                        @Nullable Instant startsAt, @Nullable Instant expiresAt,
                        int priority, boolean pinned, String repeat) {
+        /// Keeps the required resource list stable for the lifetime of the item.
+        public Item {
+            resources = List.copyOf(resources);
+        }
+
         /// Whether the item should currently be presented.
         public boolean active(Instant now) {
             return (startsAt == null || !now.isBefore(startsAt)) && !expired(now);
@@ -97,17 +102,41 @@ public final class RemoteContent {
 
     /// One announcement and the file index used to read, render and identify its revision.
     @NotNullByDefault
-    public record Announcement(Item item, @Unmodifiable Map<String, Resource> files) {
-        /// Snapshots the index and requires its keys to match the announcement's declared files.
+    public record Announcement(Item item, @Unmodifiable Map<String, Resource> files,
+                               @Unmodifiable Map<String, Resource> linkedFiles) {
+        /// Snapshots the required files and additional hyperlink targets for this revision.
         public Announcement {
             files = Map.copyOf(files);
+            linkedFiles = Map.copyOf(linkedFiles);
             @Unmodifiable Set<String> required = item.files();
             for (String path : required) {
-                if (!files.containsKey(path))
+                @Nullable Resource resource = files.get(path);
+                if (resource == null)
                     throw new IllegalArgumentException("Announcement file missing from index: " + path);
+                if (!path.equals(resource.path()))
+                    throw new IllegalArgumentException("Announcement descriptor path does not match its key: " + path);
             }
             if (files.size() != required.size())
                 throw new IllegalArgumentException("Announcement file index contains undeclared files");
+            for (var entry : linkedFiles.entrySet()) {
+                String path = entry.getKey();
+                if (files.containsKey(path) || !path.equals(entry.getValue().path()))
+                    throw new IllegalArgumentException("Invalid announcement link descriptor: " + path);
+            }
+        }
+
+        /// Creates a revision before resolving any additional hyperlink targets.
+        public Announcement(Item item, @Unmodifiable Map<String, Resource> files) {
+            this(item, files, Map.of());
+        }
+
+        /// Returns the files available when opening a hyperlink from this revision.
+        @Unmodifiable Map<String, Resource> linkIndex() {
+            if (linkedFiles.isEmpty())
+                return files;
+            Map<String, Resource> index = new LinkedHashMap<>(files);
+            index.putAll(linkedFiles);
+            return Map.copyOf(index);
         }
 
         /// Identifies this revision from its metadata and file digests.
@@ -217,8 +246,9 @@ public final class RemoteContent {
     static Announcement readAnnouncement(JsonObject json) throws IOException {
         Item item = item(json.getAsJsonObject("item"), false);
         @Unmodifiable Map<String, Resource> files = files(json.getAsJsonObject("files"));
+        @Unmodifiable Map<String, Resource> links = json.has("linkedFiles") ? files(json.getAsJsonObject("linkedFiles")) : Map.of();
         try {
-            return new Announcement(item, files);
+            return new Announcement(item, files, links);
         } catch (IllegalArgumentException e) {
             throw new IOException("Cached announcement file index does not match the item", e);
         }
@@ -245,18 +275,25 @@ public final class RemoteContent {
         fields.addProperty("pinned", item.pinned());
         fields.addProperty("repeat", item.repeat());
 
+        JsonObject json = new JsonObject();
+        json.add("item", fields);
+        json.add("files", writeFiles(announcement.files()));
+        if (!announcement.linkedFiles().isEmpty())
+            json.add("linkedFiles", writeFiles(announcement.linkedFiles()));
+        return json;
+    }
+
+    /// Encodes resource descriptors in a deterministic order for digest-addressed snapshots.
+    private static JsonObject writeFiles(@Unmodifiable Map<String, Resource> files) {
         JsonObject index = new JsonObject();
-        for (var entry : announcement.files().entrySet().stream().sorted(Map.Entry.comparingByKey()).toList()) {
+        for (var entry : files.entrySet().stream().sorted(Map.Entry.comparingByKey()).toList()) {
             Resource resource = entry.getValue();
             JsonObject descriptor = new JsonObject();
             descriptor.addProperty("sha256", resource.sha256());
             descriptor.addProperty("url", resource.url());
             index.add(entry.getKey(), descriptor);
         }
-        JsonObject json = new JsonObject();
-        json.add("item", fields);
-        json.add("files", index);
-        return json;
+        return index;
     }
 
     /// Parses a bounded list and rejects duplicate IDs within the content type.

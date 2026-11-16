@@ -35,6 +35,7 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -125,7 +126,7 @@ final class ContentSyncTest {
                 assertEquals("\"new\"", retriedValidator.get());
                 assertEquals(3, requests.get());
                 assertEquals(newer.toString(), java.util.Objects.requireNonNull(storeA.cache("main")).body());
-                assertEquals(newer.toString(), Files.readString(directory.resolve("server/manifest.json")));
+                assertEquals(newer.toString(), Files.readString(directory.resolve("client/content-cache-v2/server/manifest.json")));
             } finally {
                 releaseOld.countDown();
                 http.stop(0);
@@ -186,7 +187,7 @@ final class ContentSyncTest {
                 javaExecutable = javaExecutable.resolveSibling("java.exe");
             Path classes = Path.of(PublicationLockPeer.class.getProtectionDomain().getCodeSource().getLocation().toURI());
             Process peer = new ProcessBuilder(javaExecutable.toString(), "-cp", classes.toString(), PublicationLockPeer.class.getName(),
-                    directory.resolve("client/content.lock").toString(), ready.toString()).redirectErrorStream(true).start();
+                    directory.resolve("client/content-cache-v2/content.lock").toString(), ready.toString()).redirectErrorStream(true).start();
             try {
                 long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
                 while (!Files.exists(ready) && peer.isAlive() && System.nanoTime() < deadline)
@@ -356,7 +357,7 @@ final class ContentSyncTest {
             var saved = java.util.Objects.requireNonNull(store.cache("main"));
             assertEquals(2, RemoteContent.parse(saved.body(), "main").agreement().revision());
             assertEquals(1, saved.announcementFallbacks().get("news").item().revision());
-            Path state = directory.resolve("client/state").resolve(RemoteContent.hash(config.endpoint().toString()));
+            Path state = directory.resolve("client/content-cache-v2/state").resolve(RemoteContent.hash(config.endpoint().toString()));
             JsonObject index = JsonParser.parseString(Files.readString(state.resolve("sync.json"))).getAsJsonObject();
             String digest = index.getAsJsonObject("announcementFallbacks").get("news").getAsString();
             snapshot = state.resolve("announcement-fallbacks").resolve(digest + ".json");
@@ -461,10 +462,13 @@ final class ContentSyncTest {
     @Test
     void invalidReplacementDocumentKeepsFallbackUntilCorrected() throws Exception {
         HttpServer http = java.util.Objects.requireNonNull(server);
-        String originalBody = "# Last usable announcement";
+        String originalBody = "# Last usable announcement\n\n[Rules](rules.txt)";
         String invalidBody = "# Invalid update\n\n![Missing image](undeclared.png)";
         String correctedBody = "# Corrected update";
         JsonObject original = ContentFixtures.markdown("main", originalBody, new byte[0]);
+        String rulesPath = "announcements/rules.txt";
+        byte @Unmodifiable [] rules = "Original rules".getBytes(StandardCharsets.UTF_8);
+        ContentFixtures.file(original, rulesPath, rules);
         JsonObject invalid = ContentFixtures.markdown("main", invalidBody, new byte[0]);
         JsonObject corrected = ContentFixtures.markdown("main", correctedBody, new byte[0]);
         invalid.getAsJsonArray("announcements").get(0).getAsJsonObject().addProperty("revision", 2);
@@ -481,8 +485,10 @@ final class ContentSyncTest {
         var store = new ContentStore(directory, config.endpoint().toString());
         var originalManifest = RemoteContent.parse(original.toString(), "main");
         var originalFile = java.util.Objects.requireNonNull(originalManifest.files().get(ContentFixtures.BODY));
+        var rulesFile = java.util.Objects.requireNonNull(originalManifest.files().get(rulesPath));
         store.cache(new ContentStore.Cache(original.toString(), "", Instant.EPOCH));
         store.install(originalFile, originalBody.getBytes(StandardCharsets.UTF_8));
+        store.install(rulesFile, rules);
         var events = new LinkedBlockingQueue<ContentSync.Result>();
         try (var sync = new ContentSync(config, store, events::add, new long[0])) {
             sync.activate();
@@ -499,7 +505,11 @@ final class ContentSyncTest {
             var restored = java.util.Objects.requireNonNull(events.poll(5, TimeUnit.SECONDS));
             assertTrue(restored.cached());
             assertFalse(restored.readyAnnouncements().contains("news"));
-            assertEquals(1, java.util.Objects.requireNonNull(restored.announcementFallbacks().get("news")).item().revision());
+            var fallback = java.util.Objects.requireNonNull(restored.announcementFallbacks().get("news"));
+            assertEquals(1, fallback.item().revision());
+            assertEquals(Map.of(rulesPath, rulesFile), fallback.linkedFiles());
+            assertEquals(reopened.file(rulesFile).toUri(), ContentDocuments.link(directory, fallback.linkIndex(),
+                    fallback.item(), reopened, config.endpoint(), "rules.txt"));
             var failed = awaitFinal(events, false);
             assertFalse(failed.readyAnnouncements().contains("news"));
             fixed.set(true);
@@ -510,6 +520,52 @@ final class ContentSyncTest {
             assertTrue(ready.announcementFallbacks().isEmpty());
             assertTrue(java.util.Objects.requireNonNull(reopened.cache("main")).announcementFallbacks().isEmpty());
             assertFalse(Files.exists(reopened.file(originalFile)));
+            assertFalse(Files.exists(reopened.file(rulesFile)));
+        }
+    }
+
+    /// Retries only local cleanup when a lock is taken after the latest manifest is published.
+    @Test
+    void retriesCleanupWithoutRepeatingTheManifestRequest() throws Exception {
+        HttpServer http = java.util.Objects.requireNonNull(server);
+        AtomicInteger requests = new AtomicInteger();
+        String empty = ContentFixtures.basic("main").toString();
+        http.createContext("/", exchange -> {
+            requests.incrementAndGet();
+            send(exchange, 200, empty.getBytes(StandardCharsets.UTF_8));
+        });
+        http.start();
+        var config = config();
+        var store = new ContentStore(directory, config.endpoint().toString());
+        String body = "# Withdrawn";
+        String original = ContentFixtures.markdown("main", body, new byte[0]).toString();
+        var manifest = RemoteContent.parse(original, "main");
+        var file = java.util.Objects.requireNonNull(manifest.files().get(ContentFixtures.BODY));
+        store.cache(new ContentStore.Cache(original, "", Instant.EPOCH));
+        store.install(file, body.getBytes(StandardCharsets.UTF_8));
+        var events = new LinkedBlockingQueue<ContentSync.Result>();
+        var held = new AtomicReference<@Nullable FileLock>();
+        Path lockPath = directory.resolve("client/content-cache-v2/content.lock");
+        try (var channel = FileChannel.open(lockPath, StandardOpenOption.WRITE);
+             var sync = new ContentSync(config, store, result -> {
+                 if (result.pending() && !result.cached() && held.get() == null) {
+                     try {
+                         held.set(channel.lock());
+                     } catch (IOException e) {
+                         throw new java.io.UncheckedIOException(e);
+                     }
+                 }
+                 events.add(result);
+             }, new long[0])) {
+            sync.activate();
+            awaitFinal(events, true);
+            assertTrue(Files.exists(store.file(file)));
+            java.util.Objects.requireNonNull(held.get()).release();
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (Files.exists(store.file(file)) && System.nanoTime() < deadline)
+                Thread.sleep(20);
+            assertFalse(Files.exists(store.file(file)), "Deferred local cleanup must remove the withdrawn payload");
+            assertEquals(1, requests.get());
         }
     }
 

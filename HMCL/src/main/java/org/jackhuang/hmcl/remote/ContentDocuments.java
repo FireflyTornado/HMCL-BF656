@@ -34,6 +34,7 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -121,6 +122,33 @@ public final class ContentDocuments {
     /// Validates an announcement's document after its exact payloads have passed digest checks.
     static void validateAnnouncement(RemoteContent.Announcement announcement, ContentStore store, URI endpoint) throws IOException {
         validateDocument(announcement.files(), announcement.item(), store, endpoint, null);
+    }
+
+    /// Captures the extra indexed documents that this Markdown revision actually links to.
+    static @Unmodifiable Map<String, RemoteContent.Resource> linkedFiles(RemoteContent.Announcement announcement,
+            RemoteContent.Manifest manifest, ContentStore store, URI endpoint) throws IOException {
+        RemoteContent.Item item = announcement.item();
+        if (item.contentFile().isEmpty())
+            return Map.of();
+        Map<String, RemoteContent.Resource> linked = new HashMap<>();
+        parse(store.body(item, announcement.files())).accept(new AbstractVisitor() {
+            /// Records optional cached-document targets without affecting announcement readiness.
+            @Override
+            public void visit(Link node) {
+                String destination = node.getDestination();
+                if (!destination.startsWith("client/")) {
+                    try {
+                        @Nullable RemoteContent.Resource target = resource(manifest, item, endpoint, destination);
+                        if (target != null && !announcement.files().containsKey(target.path()))
+                            linked.put(target.path(), target);
+                    } catch (IOException ignored) {
+                        // The renderer reports invalid optional links when followed.
+                    }
+                }
+                visitChildren(node);
+            }
+        });
+        return Map.copyOf(linked);
     }
 
     /// Validates a revision's Markdown images and any required agreement links.
